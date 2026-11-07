@@ -14,6 +14,9 @@ Every milestone ends with the definition of done in [`AGENTS.md`](../AGENTS.md#d
   ([ADR-0001](adr/0001-what-magnolia-is.md) to [ADR-0010](adr/0010-the-quality-bar.md)), and the
   list of what Magnolia asks of uwui ([`uwui-needs.md`](uwui-needs.md)), handed to the owner for
   SlimeEngine's M6d.1b3b.
+- **2026-11-07: Magnolia is no longer a program of uwui's first stage**; Slatty took its place
+  ([ADR-0011](adr/0011-magnolia-no-longer-a-program-of-uwuis-first-stage.md)). Stages 1 and 2 are
+  unchanged; Stage 3 waits for a stable release of uwui that holds what it needs first.
 - **Next: M1.1**, the workspace and its checks, on the owner's go.
 
 ## Status

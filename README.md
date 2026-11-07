@@ -10,7 +10,9 @@ loops and stems.
 
 **Designed, not built.** The direction, the quality bar and the first decisions were taken on
 2026-11-06. No code exists yet. The first stage builds the audio engine and plugin hosting, without
-an interface; the interface comes at Stage 3, on [uwui](https://github.com/HoneySlatt/uwui).
+an interface; the interface comes at Stage 3, on [uwui](https://github.com/HoneySlatt/uwui), once a
+stable release of uwui holds what Magnolia needs. Magnolia is a later client of uwui, not one of the
+programs of its first stage.
 
 ## Read next
 

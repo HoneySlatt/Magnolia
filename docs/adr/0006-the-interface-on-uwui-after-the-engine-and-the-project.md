@@ -1,6 +1,7 @@
 # 0006. The interface on uwui, after the engine and the project
 
-- Status: Accepted
+- Status: Accepted; amended by [0011](0011-magnolia-no-longer-a-program-of-uwuis-first-stage.md)
+  (Magnolia no longer among uwui's first programs; what Stage 3 waits for)
 - Date: 2026-11-06
 
 ## Context

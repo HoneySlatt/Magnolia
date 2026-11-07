@@ -10,7 +10,7 @@ each out of the engine's process. Its interface will be written on uwui, the own
 which is not ready yet. It is licensed under GPL-3.0-or-later, its copyright held by the owner
 alone ([ADR-0002](docs/adr/0002-gpl-3-0-or-later-copyright-kept.md)).
 
-Its real state: the design is done (ADRs 0001 to 0010); no code exists yet.
+Its real state: the design is done (ADRs 0001 to 0011); no code exists yet.
 
 Agents develop it; the owner sets its direction and validates its decisions. Anyone must be able to
 understand it from the repository alone. Documentation is part of every deliverable.

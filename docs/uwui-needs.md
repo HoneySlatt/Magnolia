@@ -1,15 +1,19 @@
 # What Magnolia asks of uwui
 
 Magnolia's interface will be written on uwui, the owner's UI framework
-([ADR-0006](adr/0006-the-interface-on-uwui-after-the-engine-and-the-project.md)). Magnolia is the DAW
-among the programs of uwui's first stage (SlimeEngine's
+([ADR-0006](adr/0006-the-interface-on-uwui-after-the-engine-and-the-project.md)). Magnolia was the
+DAW among the programs of uwui's first stage (SlimeEngine's
 [ADR-0203](https://github.com/HoneySlatt/SlimeEngine/blob/main/docs/adr/0203-pilots-replaced-pluto-and-a-daw.md)).
-The "Magnolia" that ADR-0198 and ADR-0203 abandon is an earlier, unrelated media application, now
-`Magnolia-media`; the DAW took the name afterwards.
+Since 2026-11-07 it is not: Slatty took its place, and Magnolia is a later client of uwui
+([ADR-0011](adr/0011-magnolia-no-longer-a-program-of-uwuis-first-stage.md)). The "Magnolia" that
+ADR-0198 and ADR-0203 abandon is an earlier, unrelated media application, now `Magnolia-media`; the
+DAW took the name afterwards.
 
-SlimeEngine's milestone M6d.1b3b chooses how an application's state changes its interface once three
-lists exist: Opium's, Pluto's and this one. This file is Magnolia's list. It comes from the owner's
-interview of 2026-11-06, before any code. Nothing here is measured yet.
+This file is Magnolia's list of what it asks of uwui. It was one of the three lists, with Opium's
+and Pluto's, from which SlimeEngine's milestone M6d.1b3b chose how an application's state changes
+its interface ([ADR-0205](https://github.com/HoneySlatt/SlimeEngine/blob/main/docs/adr/0205-signals-change-uwuis-interface.md)).
+It stays whole, an input of uwui's choices for the long term. It comes from the owner's interview
+of 2026-11-06, before any code. Nothing here is measured yet.
 
 ## How to read it
 
@@ -117,9 +121,10 @@ These stay in Magnolia. They ask uwui only for the general needs above.
 
 ## A screen of reference for Magnolia
 
-uwui's ROADMAP measures each pilot on screens chosen before the work. The owner chose this one on
-2026-11-06 ([ADR-0010](adr/0010-the-quality-bar.md)); entering it in uwui's ROADMAP is uwui's
-decision.
+The owner chose this screen on 2026-11-06 ([ADR-0010](adr/0010-the-quality-bar.md)). It measures
+Magnolia's interface at Stage 3. uwui's first stage no longer measures it; uwui may take it as a
+bench of its own, which is uwui's decision
+([ADR-0011](adr/0011-magnolia-no-longer-a-program-of-uwuis-first-stage.md)).
 
 - **The arrangement playing**: 128 tracks, 4,000 audio and MIDI clips with their waveforms, a
   session of three hours; the transport playing, the playhead moving, 128 stereo meters on a
@@ -134,7 +139,9 @@ decision.
 
 ## What Stage 3 needs first
 
-Magnolia's interface starts once uwui gives at least these, in its first stage:
+Magnolia's interface starts once a release of uwui, its API declared stable, gives at least these
+([ADR-0011](adr/0011-magnolia-no-longer-a-program-of-uwuis-first-stage.md)). uwui's plan does not
+promise them, and no date is set:
 
 - the desktop host on Wayland, with several windows;
 - values bound to drawn properties, and accumulated between frames;
@@ -145,4 +152,5 @@ Magnolia's interface starts once uwui gives at least these, in its first stage:
 - the accessibility of drawn controls, tabular figures, and the Pro theme at compact density.
 
 Drag and drop between applications and raw key presses can follow during Stage 3. The foreign
-surface and video come with their own stages. The owner carries this set into uwui's plan.
+surface and video come with their own stages. Those that uwui's stages have not brought when
+Stage 3 is planned are put to the owner then, as needs of uwui.

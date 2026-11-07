@@ -106,7 +106,7 @@ A crash leaves a report on the machine; nothing leaves it without the user's con
 | Plugins | Every plugin out of the engine's process, the unit measured ([ADR-0003](adr/0003-every-plugin-out-of-the-engines-process.md)) |
 | Windows plugins | Magnolia's own bridge, on the system's Wine ([ADR-0004](adr/0004-magnolias-own-wine-bridge-on-the-systems-wine.md)) |
 | Plugin GUIs | Floating first, then inside the window ([ADR-0005](adr/0005-plugin-guis-floating-first-then-inside-the-window.md)) |
-| Interface and order | On uwui, after the engine and the project ([ADR-0006](adr/0006-the-interface-on-uwui-after-the-engine-and-the-project.md)) |
+| Interface and order | On uwui, after the engine and the project ([ADR-0006](adr/0006-the-interface-on-uwui-after-the-engine-and-the-project.md)); Magnolia a later client of uwui, not one of its first programs ([ADR-0011](adr/0011-magnolia-no-longer-a-program-of-uwuis-first-stage.md)) |
 | Engine | Own duplex backends, a compiled graph, exact time ([ADR-0007](adr/0007-the-audio-engine.md)) |
 | Project model | Tracks with channels, linked patterns ([ADR-0008](adr/0008-the-project-model.md)) |
 | Project file | SQLite, nothing lost ([ADR-0009](adr/0009-the-project-in-sqlite-nothing-lost.md)) |
@@ -195,6 +195,10 @@ any gesture with nothing lost, and renders offline to stems that null against re
 ### Stage 3 — The interface → 0.3
 
 **Goal.** The owner makes a beat from nothing to an exported file in Magnolia, on uwui.
+
+**Starts when** a release of uwui, its API declared stable, holds the set that
+[`uwui-needs.md`](uwui-needs.md#what-stage-3-needs-first) names first; no date is set
+([ADR-0011](adr/0011-magnolia-no-longer-a-program-of-uwuis-first-stage.md)).
 
 - The arrangement and the pattern lane, the piano roll, the step sequencer with a simple sampler,
   the mixer, the browser, the transport.

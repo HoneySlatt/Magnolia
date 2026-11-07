@@ -1,6 +1,7 @@
 # 0010. The quality bar
 
-- Status: Accepted
+- Status: Accepted; amended by [0011](0011-magnolia-no-longer-a-program-of-uwuis-first-stage.md)
+  (the screen of reference, Magnolia's own)
 - Date: 2026-11-06
 
 ## Context
