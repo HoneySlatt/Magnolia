@@ -1,6 +1,6 @@
 # 0002. GPL-3.0-or-later, its copyright kept by the owner
 
-- Status: Accepted
+- Status: Accepted; amended by [0012](0012-the-logo-its-rights-kept.md) (the logo not under the GPL)
 - Date: 2026-11-06
 
 ## Context

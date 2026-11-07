@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo/magnolia.svg" alt="Magnolia's logo: seven audio bars from coral to violet, the three tallest ending in magnolia petals" width="256">
+</p>
+
 # Magnolia
 
 A digital audio workstation for Linux, then Windows: the composing speed of FL Studio and the
@@ -33,4 +37,5 @@ nix develop --command scripts/check.sh
 
 ## License
 
-GPL-3.0-or-later. See [`LICENSE`](LICENSE).
+GPL-3.0-or-later. See [`LICENSE`](LICENSE). The logo is not under it: its author keeps its rights,
+and [`logo/README.md`](logo/README.md) says how it may be shown.

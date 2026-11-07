@@ -10,7 +10,7 @@ New ADRs copy [`0000-template.md`](0000-template.md) and take the next free numb
 | ADR | Title | Status |
 |---|---|---|
 | [0001](0001-what-magnolia-is.md) | What Magnolia is | Accepted |
-| [0002](0002-gpl-3-0-or-later-copyright-kept.md) | GPL-3.0-or-later, its copyright kept by the owner | Accepted |
+| [0002](0002-gpl-3-0-or-later-copyright-kept.md) | GPL-3.0-or-later, its copyright kept by the owner | Accepted; amended by 0012 |
 | [0003](0003-every-plugin-out-of-the-engines-process.md) | Every plugin out of the engine's process | Accepted |
 | [0004](0004-magnolias-own-wine-bridge-on-the-systems-wine.md) | Magnolia's own Wine bridge, on the system's Wine | Accepted |
 | [0005](0005-plugin-guis-floating-first-then-inside-the-window.md) | Plugin GUIs floating first, then inside the window | Accepted |
@@ -20,3 +20,4 @@ New ADRs copy [`0000-template.md`](0000-template.md) and take the next free numb
 | [0009](0009-the-project-in-sqlite-nothing-lost.md) | The project in SQLite; nothing lost | Accepted |
 | [0010](0010-the-quality-bar.md) | The quality bar | Accepted; amended by 0011 |
 | [0011](0011-magnolia-no-longer-a-program-of-uwuis-first-stage.md) | Magnolia no longer a program of uwui's first stage | Accepted |
+| [0012](0012-the-logo-its-rights-kept.md) | The logo, its rights kept | Accepted |
