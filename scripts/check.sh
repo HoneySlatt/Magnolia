@@ -48,9 +48,9 @@ cargo deny --locked check
 # RealtimeSanitizer ships with the nightly's standard library (ADR-0013). `--target` keeps the flag
 # off build scripts and procedural macros, as the Unstable Book asks; a target directory of its own
 # keeps these builds from evicting the stable ones.
-step "RealtimeSanitizer stops an allocation on a real-time thread"
+step "RealtimeSanitizer stops an allocation in a function marked real-time"
 sanitized=(--locked -p magnolia-engine --features realtime-sanitizer --test realtime_sanitizer
-    --target x86_64-unknown-linux-gnu --target-dir target/realtime-sanitizer)
+    --target x86_64-unknown-linux-gnu --target-dir "${CARGO_TARGET_DIR:-target}/realtime-sanitizer")
 nightly cargo clippy "${sanitized[@]}" -- -D warnings
 RUSTFLAGS="-Zsanitizer=realtime" nightly cargo test "${sanitized[@]}"
 

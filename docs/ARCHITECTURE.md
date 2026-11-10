@@ -19,9 +19,15 @@ reverse ([`AGENTS.md`](../AGENTS.md#architecture-rules)).
 
 The engine's real-time functions will be marked `#[sanitize(realtime = "nonblocking")]` under the
 crate's `realtime-sanitizer` feature. With that feature, the nightly toolchain and
-`-Zsanitizer=realtime`, RealtimeSanitizer ends the process at the first allocation, lock or
-blocking call made inside a marked function, on any thread
+`-Zsanitizer=realtime`, RealtimeSanitizer ends the process at the first allocation, free or system
+call made inside a marked function, on any thread
 ([ADR-0013](adr/0013-a-pinned-stable-toolchain-and-a-nightly-for-checks.md)).
+
+Its limit, measured on the pinned nightly: an uncontended `std::sync::Mutex` or `RwLock` and
+`thread::sleep` pass unreported. std's locks on Linux use a futex directly, which the sanitizer sees
+only when a lock is contended and waits; `thread::sleep` calls `clock_nanosleep`, which it does not
+intercept. A clean run therefore does not prove that the real-time path takes no lock. What covers
+the gap is known debt in the [PLAN](PLAN.md#known-debt).
 
 Because the sanitizer ends the process, a test of it runs each case in a child process and reads
 its exit status and standard error: `crates/magnolia-engine/tests/realtime_sanitizer.rs`.

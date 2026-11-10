@@ -20,7 +20,7 @@ use std::thread;
 /// Names the case a child process runs; the parent leaves it unset.
 const CASE_VARIABLE: &str = "MAGNOLIA_RTSAN_CASE";
 
-/// The start of the sanitizer's report of a call that a real-time function must not make.
+/// The text of the sanitizer's report of a call that a real-time function must not make.
 const VIOLATION: &str = "RealtimeSanitizer: unsafe-library-call";
 
 /// Allocates in a real-time context, as a bug on the audio thread would.
@@ -38,21 +38,21 @@ fn halve(buffer: &mut [f32]) {
     }
 }
 
-/// Runs `work` on a new thread and waits for it. The thread is started outside the real-time
-/// context: only `work` runs inside it.
-fn on_realtime_thread(work: impl FnOnce() + Send + 'static) {
+/// Runs `work` on a new thread and waits for it, as the audio thread will run. Only the functions
+/// marked `nonblocking` that `work` calls run in the real-time context; the rest of `work` does not.
+fn on_new_thread(work: impl FnOnce() + Send + 'static) {
     thread::spawn(work)
         .join()
-        .expect("the real-time thread panicked");
+        .expect("the test's thread panicked");
 }
 
 /// Runs one case in this process, as a child of the parent's.
 fn run_case(case: &str) -> ExitCode {
     match case {
-        "allocate" => on_realtime_thread(|| {
+        "allocate" => on_new_thread(|| {
             black_box(allocate());
         }),
-        "halve" => on_realtime_thread(|| {
+        "halve" => on_new_thread(|| {
             let mut buffer = vec![1.0; 64];
             halve(&mut buffer);
             assert!(buffer.iter().all(|&sample| sample == 0.5));

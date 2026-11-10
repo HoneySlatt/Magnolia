@@ -15,7 +15,6 @@ publish = false
 # scripts/check.sh turns every warning into an error.
 [workspace.lints.rust]
 missing_docs = "warn"
-unsafe_op_in_unsafe_fn = "warn"
 
 [workspace.lints.clippy]
 # AGENTS.md: every `unsafe` block says why it is sound, in a `// SAFETY:` comment.

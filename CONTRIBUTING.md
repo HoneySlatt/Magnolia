@@ -44,23 +44,24 @@ fails. CI runs it unchanged, on each push to `main`, each pull request and once 
 
 | Step | What it checks | Alone |
 |---|---|---|
-| links | Links between Markdown files, anchors included, offline | `lychee --offline --include-fragments $(git ls-files '*.md')` |
+| links | Links between Markdown files, anchors included, offline | `lychee --offline --include-fragments $(git ls-files --cached --others --exclude-standard '*.md')` |
 | AGENTS.md length | `AGENTS.md` under 1,500 words | `wc -w AGENTS.md` |
-| scripts | The scripts' syntax | `bash -n scripts/*.sh` |
+| scripts | The scripts' syntax | `for script in scripts/*.sh; do bash -n "$script"; done` |
 | formatting | rustfmt's format | `cargo fmt --all --check` |
 | lints | Clippy and the compiler's lints of `Cargo.toml`, warnings as errors | `cargo clippy --workspace --all-targets --locked -- -D warnings` |
 | tests | Every test on the stable toolchain | `cargo test --workspace --locked` |
 | documentation | rustdoc, warnings as errors | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked` |
 | dependencies | Licenses, RustSec advisories and sources, by `deny.toml`; fetches the advisories | `cargo deny --locked check` |
-| RealtimeSanitizer | The sanitizer stops an allocation on a real-time thread | below |
+| RealtimeSanitizer | Clippy on the sanitizer's test, then the sanitizer stops an allocation in a function marked real-time | below |
 
 The sanitizer's test is built only with the `realtime-sanitizer` feature, on the nightly, in a
-target directory of its own:
+target directory of its own. `scripts/check.sh` runs Clippy on it first, with the same arguments,
+then the test:
 
 ```sh
 RUSTFLAGS="-Zsanitizer=realtime" nightly cargo test --locked -p magnolia-engine \
     --features realtime-sanitizer --test realtime_sanitizer \
-    --target x86_64-unknown-linux-gnu --target-dir target/realtime-sanitizer
+    --target x86_64-unknown-linux-gnu --target-dir "${CARGO_TARGET_DIR:-target}/realtime-sanitizer"
 ```
 
 How long a full check takes, and its budget, are in
