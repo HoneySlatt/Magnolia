@@ -1,0 +1,7 @@
+# The stable toolchain that builds and checks Magnolia: the development shell reads this file
+# (flake.nix), and so does rustup. The nightly that only the sanitizers, Miri and cargo fuzz use is
+# pinned in flake.nix. ADR-0013 says why; bump it on purpose, with `rust-version` in Cargo.toml.
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt", "rust-src", "rust-analyzer"]
+profile = "minimal"

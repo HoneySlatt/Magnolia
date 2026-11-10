@@ -1,0 +1,22 @@
+# The Cargo workspace: every crate of Magnolia lives under crates/ (docs/ARCHITECTURE.md). The
+# toolchain is pinned in rust-toolchain.toml (ADR-0013).
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/HoneySlatt/Magnolia"
+publish = false
+
+# scripts/check.sh turns every warning into an error.
+[workspace.lints.rust]
+missing_docs = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+# AGENTS.md: every `unsafe` block says why it is sound, in a `// SAFETY:` comment.
+undocumented_unsafe_blocks = "warn"

@@ -24,7 +24,7 @@ interface, on uwui, is dark, dense, refined, accessible, drawn at 240 Hz and sti
 ## Quality bar
 
 Accepted by the owner on 2026-11-06 ([ADR-0010](adr/0010-the-quality-bar.md)). Figures measured go
-to `docs/measurements.md`, created with the first measure. Nothing is measured yet.
+to [`measurements.md`](measurements.md); only the check's time is measured yet.
 
 ### References
 
@@ -81,7 +81,7 @@ project* is fixed in M1.3, one for each tier, and never tuned for afterwards.
 | Saving | a gesture's commit off the interface's thread; its sync's 99th percentile and the window of gestures a power cut may lose set in Stage 2 on the lowest tier's storage; no gesture whose sync returned is lost | a SQLite file layer that drops unsynced writes | CI |
 | Bad input | project, MIDI, audio and plugin-state files never crash Magnolia | `cargo fuzz` | CI, briefly; longer by hand |
 | `unsafe` code | sound under Miri where Miri can run it (shared memory and system calls cannot) | Miri | CI |
-| Iteration | a CI job under 20 minutes; a full `scripts/check.sh` timed at M1.1, its budget set then | the job's time | CI |
+| Iteration | a CI job under 20 minutes; a full `scripts/check.sh` from a clean build within 3 minutes on the high tier | the job's time; `time` on the script | CI; by hand at each milestone |
 
 A crash leaves a report on the machine; nothing leaves it without the user's consent.
 
@@ -123,7 +123,7 @@ Each is decided by an ADR when its stage needs it, not earlier.
 | The unit of plugin isolation, and a late plugin's deadline | one process per plugin; one per track's chain; per tier | Stage 1, on the prototype's figures |
 | How often a plugin's state is read when it never reports a change | an interval, against its cost on the host's main thread | Stage 1 |
 | The audio device at rest | kept open; released after a while at rest, reopened on play or arming | Stage 1, on the measured cost of each |
-| The figures left to measure | a plugin's round trip, the render's factor, the saving's sync and its window, power, the check's time | each at the milestone that measures it |
+| The figures left to measure | a plugin's round trip, the render's factor, the saving's sync and its window, power | each at the milestone that measures it |
 | How the Windows host talks to the engine | a pure Windows executable; a winelib program | Stage 1, on the prototype's figures |
 | Render-ahead of tracks without live input | REAPER's way; the graph scheduler alone | Stage 2, on measures of heavy projects |
 | Time-stretch | signalsmith-stretch (MIT), Bungee (MPL-2.0), Rubber Band (GPL-2.0-or-later) | Stage 4 |

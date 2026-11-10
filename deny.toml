@@ -1,0 +1,52 @@
+# The dependency policy that `cargo deny --locked check` enforces (scripts/check.sh runs it). AGENTS.md
+# says what a new dependency needs before it is added: a reason, an alternative weighed, a license
+# checked, the owner's go.
+
+[graph]
+# The dependencies of every feature of Magnolia's crates, not only of the default ones.
+all-features = true
+# Linux alone for now; Windows joins at its stage (docs/ROADMAP.md).
+targets = ["x86_64-unknown-linux-gnu"]
+
+[advisories]
+# Every RustSec advisory (a vulnerability, an unsound or unmaintained crate) affecting a dependency
+# fails the check. One may be ignored only by an entry here that says why.
+ignore = []
+
+[licenses]
+# Licenses that may be combined into a program distributed under GPL-3.0-or-later (ADR-0002).
+# GPL-2.0-only is not among them: it cannot be combined with GPL-3.0.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "GPL-3.0-or-later",
+    "ISC",
+    "LGPL-2.1-or-later",
+    "LGPL-3.0-or-later",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.8
+unused-allowed-license = "allow"
+
+[licenses.private]
+# Magnolia's own crates are not published; their license is set once, in Cargo.toml.
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Paths between Magnolia's own crates carry no version; that is not a wildcard.
+allow-wildcard-paths = true
+
+[sources]
+# crates.io alone; a crate from a git repository or another registry needs an entry here.
+unknown-registry = "deny"
+unknown-git = "deny"

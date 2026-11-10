@@ -21,3 +21,4 @@ New ADRs copy [`0000-template.md`](0000-template.md) and take the next free numb
 | [0010](0010-the-quality-bar.md) | The quality bar | Accepted; amended by 0011 |
 | [0011](0011-magnolia-no-longer-a-program-of-uwuis-first-stage.md) | Magnolia no longer a program of uwui's first stage | Accepted |
 | [0012](0012-the-logo-its-rights-kept.md) | The logo, its rights kept | Accepted |
+| [0013](0013-a-pinned-stable-toolchain-and-a-nightly-for-checks.md) | A pinned stable toolchain, and a nightly for checks only | Accepted |

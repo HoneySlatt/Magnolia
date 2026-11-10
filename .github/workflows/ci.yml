@@ -1,6 +1,7 @@
 # Runs scripts/check.sh on each push to main, on each pull request, and once a week, in the
 # development shell that flake.lock pins. Actions are pinned to commit SHAs, with the release they
-# correspond to in a comment.
+# correspond to in a comment. The timeout is the iteration's budget for a CI job
+# (docs/ROADMAP.md, Budgets).
 name: CI
 
 concurrency:
@@ -21,7 +22,7 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1

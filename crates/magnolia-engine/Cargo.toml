@@ -1,0 +1,22 @@
+[package]
+name = "magnolia-engine"
+description = "Magnolia's audio engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# Builds the `realtime_sanitizer` test, which needs the nightly toolchain and
+# `-Zsanitizer=realtime` (ADR-0013); scripts/check.sh runs it.
+realtime-sanitizer = []
+
+[[test]]
+name = "realtime_sanitizer"
+harness = false
+required-features = ["realtime-sanitizer"]
+
+[lints]
+workspace = true
