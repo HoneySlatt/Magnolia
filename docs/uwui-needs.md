@@ -73,7 +73,7 @@ fed from a real-time thread.
 |---|---|---|---|
 | Values that change every frame, bound to drawn properties alone: written by another thread without a lock, read when the element is painted, without running the application's code, styles or layout, and without allocating | The playhead, knobs following automation | Indispensable: Stage 3 | Precision: the state model; Opium asks the same for its wave |
 | Such values accumulated between two frames by their writer: the highest since the last read, or a short history in a ring buffer | Peak meters, scopes, a recording's waveform as it grows; elsewhere, a system monitor's graphs | Indispensable: Stage 3 | New |
-| The predicted presentation time of the next frame, per window and per output, given to the application before it draws | Meters and playhead in step with the sound heard; video in step with audio | Indispensable: Stage 3 | New |
+| The predicted presentation time of the next frame, per window and per output, given to the application before it draws | Meters and playhead in step with the sound heard; video in step with audio | Indispensable: Stage 3 | Precision, since 2026-11-10: uwui's ROADMAP gives each window's frame its predicted time (`shown_at`, `next_frame`, [SlimeEngine's ADR-0227](https://github.com/HoneySlatt/SlimeEngine/blob/main/docs/adr/0227-the-time-that-motion-reads.md)); per output, unstated |
 | Frames requested while something moves, and none once it stops, without a timer of the application's own | Frames while playing; none when stopped | Indispensable: Stage 3 | Yes: frames follow the display, none at rest |
 | Drawing only what changed: the regions damaged in a frame, the rest of the window kept, so that a playhead at 240 Hz does not redraw a 4K window | A moving playhead over a still arrangement | Indispensable: Stage 3 | Precision: ADR-0190's groups drawn apart into cached images |
 | A 2D view of a very large space: positions in 64-bit, scrolled and zoomed smoothly over nine orders of magnitude, its content virtualized along both axes, laid out relative to the view so that 32-bit drawing stays exact | The arrangement, the piano roll, automation lanes | Indispensable: Stage 3 | New: ADR-0190 has virtual lists, a map of tiles and charts, not a zoomable virtual space |
@@ -122,8 +122,9 @@ These stay in Magnolia. They ask uwui only for the general needs above.
 ## A screen of reference for Magnolia
 
 The owner chose this screen on 2026-11-06 ([ADR-0010](adr/0010-the-quality-bar.md)). It measures
-Magnolia's interface at Stage 3. uwui's first stage no longer measures it; uwui may take it as a
-bench of its own, which is uwui's decision
+Magnolia's interface at Stage 3. uwui's first stage no longer measures it; since 2026-11-10
+Magnolia asks uwui to measure it before its 1.0 ([below](#a-heavy-creative-tool-before-10)), which
+remains uwui's decision
 ([ADR-0011](adr/0011-magnolia-no-longer-a-program-of-uwuis-first-stage.md)).
 
 - **The arrangement playing**: 128 tracks, 4,000 audio and MIDI clips with their waveforms, a
@@ -154,3 +155,81 @@ promise them, and no date is set:
 Drag and drop between applications and raw key presses can follow during Stage 3. The foreign
 surface and video come with their own stages. Those that uwui's stages have not brought when
 Stage 3 is planned are put to the owner then, as needs of uwui.
+
+## Since uwui's decisions of 2026-11-07
+
+SlimeEngine's ADRs 0213, 0214, 0215, 0218 and 0220 reshaped uwui on 2026-11-07. Magnolia's owner
+weighed their effect on Magnolia on 2026-11-10
+([ADR-0014](adr/0014-the-quality-bar-measured-against-the-market.md) to
+[ADR-0017](adr/0017-macos-a-candidate-stage-after-stage-4.md)). These requests follow. The owner
+carries them to uwui. Each names the milestone of SlimeEngine that decides it, where one does.
+
+The marks *New* in the table above were checked against uwui's ROADMAP on 2026-11-10. The
+predicted presentation time now appears in it, and its mark became *Precision*. None of the other
+needs marked *New* appears in it yet, so their marks stand.
+
+### The Pro theme, extended by applications
+
+For M6d.1d and M6d.2. uwui's ROADMAP already makes Pro a crate of its own, with its own version.
+Magnolia asks for two more things:
+
+- **An application extends a theme without forking it.** It adds tokens of its own for the
+  components that uwui does not have: colours, sizes, spacing and motion. It overrides existing
+  tokens too.
+- **An application's components take every value from the theme.** For Magnolia, these are
+  knobs, faders, meters, clips, waveforms and automation lanes. A change of theme or density, high
+  contrast, reduced motion and reduced transparency then reach them as they reach uwui's own.
+
+Magnolia's look is decided at its Stage 3: Pro as it is, or a theme of its own that extends Pro. By
+uwui's test of signature, Magnolia must not be recognised as an application of uwui by its look
+alone. The same look as SlimeEngine's editor would fail that test.
+
+### A heavy creative tool before 1.0
+
+uwui's stable API must not be fixed before a heavy creative tool has tried it. Magnolia needs three
+things that no program of uwui's first stage needs:
+
+- a zoomable view in 64 bits;
+- values accumulated between two frames;
+- a surface drawn by another process.
+
+Magnolia asks for two trials before 1.0:
+
+- **Magnolia's [screen of reference](#a-screen-of-reference-for-magnolia) as a screen that uwui
+  measures**, against Bitwig Studio, REAPER and Ardour. A fake engine feeds it: a thread that writes
+  meters and positions as the audio thread will. The rivals' interfaces are measured thread by
+  thread, so that their real engines do not count against them.
+- **A small trial of a foreign surface**: an element that shows a surface drawn by a child process,
+  its input and focus forwarded, on Wayland.
+
+### Commands, undo, agents and services
+
+For M6d.10, which decides who owns commands, undo and their journal, and what uwui's services hold:
+
+- **Commands and undo stay the application's.** Magnolia provides its own commands, and its undo
+  lives in its project's file ([ADR-0009](adr/0009-the-project-in-sqlite-nothing-lost.md)). uwui's
+  ROADMAP lists "undo for applications" as a service of uwui's, a line written before SlimeEngine's
+  ADR-0218. That service must stay optional and replaceable.
+- **The agent core works without a window.** Magnolia's engine is a server without an interface
+  ([ADR-0015](adr/0015-the-interface-in-a-process-of-its-own.md)). Its MCP server takes the core's
+  shape now, and the core itself once it is published
+  ([ADR-0016](adr/0016-agents-on-the-shape-of-uwuis-agent-core.md)).
+- **Files, settings and long work are optional services.**
+  - The application provides the storage of its settings.
+  - Long work runs on few threads of normal priority, never real-time.
+  - Magnolia's engine runs without uwui, and keeps its own files and settings.
+
+### Platforms, license and the light sensor
+
+- **The primary modifier.** M6d.3 makes Ctrl or Cmd one modifier in the format of shortcuts
+  ([SlimeEngine's ADR-0220](https://github.com/HoneySlatt/SlimeEngine/blob/main/docs/adr/0220-the-roadmap-reshaped-by-the-market.md)). Magnolia's files of shortcuts
+  name that modifier, so one file serves every platform.
+- **Zero lines for a platform covers the interface alone.** Magnolia's engine has platform code of
+  its own: audio backends, plugin bundles, plugin windows from another process, signing
+  ([ADR-0017](adr/0017-macos-a-candidate-stage-after-stage-4.md)).
+- **License.** uwui under MIT OR Apache-2.0 fits Magnolia's GPL-3.0-or-later. Magnolia can take
+  uwui only once none of the crates it uses is under SlimeEngine's own license: those leave uwui at
+  M6d.11.
+- **The light sensor of SlimeEngine's Stage 6e.** Magnolia uses it to check that meters and
+  playhead are in step with the sound heard. It needs the audio output recorded on the same clock as
+  the sensor. *Wished*: Stage 3.

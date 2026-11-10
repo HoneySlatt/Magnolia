@@ -10,7 +10,8 @@ each out of the engine's process. Its interface will be written on uwui, the own
 which is not ready yet. It is licensed under GPL-3.0-or-later, its copyright held by the owner
 alone ([ADR-0002](docs/adr/0002-gpl-3-0-or-later-copyright-kept.md)).
 
-Its real state: the design is done (ADRs 0001 to 0012); no code exists yet.
+Its real state: the design is done (ADRs 0001 to 0017); the workspace and its checks exist (M1.1);
+the engine has no code yet.
 
 Agents develop it; the owner sets its direction and validates its decisions. Anyone must be able to
 understand it from the repository alone. Documentation is part of every deliverable.
@@ -19,8 +20,8 @@ understand it from the repository alone. Documentation is part of every delivera
 
 - `docs/PLAN.md`, its *Current* section and the current milestone: what to do now.
 - When planning, or when the task touches a decision: `docs/ROADMAP.md` (direction, stages, the
-  quality bar), and `docs/adr/`, the decisions already made. `docs/ARCHITECTURE.md` arrives with the
-  first code.
+  quality bar), and `docs/adr/`, the decisions already made. `docs/ARCHITECTURE.md`: the crates and the flows
+  across them.
 - `docs/uwui-needs.md` when the work touches the interface; `docs/survey.md` for the field's facts
   and their sources.
 
@@ -42,7 +43,7 @@ nix develop          # the development shell: every tool the checks use
 scripts/check.sh     # every check of the definition of done; what CI runs
 ```
 
-The commands to build, test and run Magnolia arrive with its code (M1.1), in `CONTRIBUTING.md`.
+`CONTRIBUTING.md` holds the commands to build, test and run each check alone.
 
 Never on your own:
 

@@ -140,3 +140,58 @@ REAPER with OSARA speaks tracks, items, positions, markers, plugin parameters an
 and VoiceOver ([OSARA](https://osara.reaperaccessibility.com/)). Pro Tools works with VoiceOver.
 Blind producers need every action by the keyboard, every value spoken, and plugin parameters as
 lists ([ACM 2025](https://dl.acm.org/doi/full/10.1145/3733606)).
+
+## The market measured, 2026-11-10
+
+Gathered for [ADR-0014](adr/0014-the-quality-bar-measured-against-the-market.md) to
+[ADR-0016](adr/0016-agents-on-the-shape-of-uwuis-agent-core.md).
+
+### Processes
+
+- Bitwig Studio installs its audio engine as an executable of its own, `BitwigAudioEngine`, beside
+  `BitwigStudio` and its plugin hosts ([a packaging issue](https://github.com/yioannides/bitwig-fedora/issues/5),
+  [a CLAP interop report](https://github.com/free-audio/interop-tracker/issues/65)). Its user guide
+  says plugins hosted apart from the engine leave the engine running when they crash
+  ([Bitwig's user guide](https://www.bitwig.com/userguide/latest/vst_plug-in_handling_and_options)).
+  That the engine survives a forced close of the interface comes from a community answer only; no
+  page of Bitwig's says so.
+- Ardour runs its engine and its interface in one process; the engine does not know the interface,
+  which allows a build without one ([Paul Davis, 2026-05-30](https://discourse.ardour.org/t/113356)).
+- REAPER runs plugins inside its own process unless a plugin is set to run apart; this survey did
+  not read REAPER's documentation again for it.
+
+### Servers for agents
+
+No DAW maker ships an MCP server or an API for agents. Community servers, with their stars and last
+commit on 2026-11-10:
+
+| DAW | Server | Stars | Last commit | Through |
+|---|---|---|---|---|
+| Ableton Live | [ahujasid/ableton-mcp](https://github.com/ahujasid/ableton-mcp) | 3,334 | 2026-09-22 | a Remote Script; telemetry on by default |
+| REAPER | [bonfire-systems/reaper-mcp](https://github.com/bonfire-systems/reaper-mcp) | 184 | 2026-10-25 | python-reapy, 61 tools |
+| REAPER | [TwelveTake-Studios/reaper-mcp](https://github.com/TwelveTake-Studios/reaper-mcp) | 104 | 2026-11-09 | a Lua script inside REAPER, 188 tools |
+| Bitwig Studio | [WeModulate/bitwig-mcp-server](https://github.com/WeModulate/bitwig-mcp-server) | 79 | 2025-04-10 | OSC |
+| Bitwig Studio | [fabb/WigAI](https://github.com/fabb/WigAI) | 62 | 2026-10-18 | an extension; archived |
+
+Smaller servers exist for FL Studio, Logic Pro, Pro Tools and Ardour. One benchmark of agents
+driving REAPER, TOMORI-BENCH, was withdrawn by its authors on 2026-11-06.
+
+### Accessibility
+
+- OSARA runs on Windows and macOS, with NVDA and VoiceOver
+  ([OSARA](https://github.com/jcsteh/osara)). An experimental port to Linux speaks through Orca, but
+  not yet REAPER's drawn views ([osara-linux](https://audio.codyhurst.com/accessibility)).
+- "By far the most popular among blind users is Reaper"
+  ([Sound Without Sight, 2023](https://soundwithoutsight.org/hub-articles/basics-mixing-and-daws/)).
+  A study of 2020 scored REAPER with OSARA above Pro Tools and Cubase
+  ([Pedrini et al.](https://www.scitepress.org/Papers/2020/101670/101670.pdf)).
+- Ableton Live 12 supports screen readers on macOS and Windows, with gaps: Max for Live, MPE editing,
+  the browser's filters ([Live 12's manual](https://www.ableton.com/en/live-manual/12/accessibility-and-keyboard-navigation/)).
+- Ardour's timeline and mixer are drawn by Ardour itself, so Orca cannot read them
+  ([Ardour's forum, 2021](https://discourse.ardour.org/t/please-consider-screenreader-accessibility/106722)).
+
+### Modest hardware
+
+No figure is published for the tracks or plugins a DAW holds on a two-core laptop. Bitwig Studio
+asks for a processor with AVX2 and 4 GB of memory ([Bitwig](https://www.bitwig.com/download/));
+REAPER and Ardour state no minimum.

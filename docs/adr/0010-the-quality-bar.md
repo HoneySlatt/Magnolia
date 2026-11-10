@@ -1,7 +1,8 @@
 # 0010. The quality bar
 
 - Status: Accepted; amended by [0011](0011-magnolia-no-longer-a-program-of-uwuis-first-stage.md)
-  (the screen of reference, Magnolia's own)
+  (the screen of reference, Magnolia's own) and [0014](0014-the-quality-bar-measured-against-the-market.md)
+  (rivals measured, floors and leads, runs of eight hours)
 - Date: 2026-11-06
 
 ## Context

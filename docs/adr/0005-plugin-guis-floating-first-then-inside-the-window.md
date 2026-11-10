@@ -1,6 +1,7 @@
 # 0005. Plugin GUIs floating first, then inside the window
 
-- Status: Accepted
+- Status: Accepted; amended by [0015](0015-the-interface-in-a-process-of-its-own.md) (the plugins'
+  compositor a process of its own)
 - Date: 2026-11-06
 
 ## Context

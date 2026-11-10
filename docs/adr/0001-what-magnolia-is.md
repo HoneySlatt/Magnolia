@@ -1,6 +1,7 @@
 # 0001. What Magnolia is
 
-- Status: Accepted
+- Status: Accepted; amended by [0017](0017-macos-a-candidate-stage-after-stage-4.md) (macOS a
+  candidate stage)
 - Date: 2026-11-06
 
 ## Context
