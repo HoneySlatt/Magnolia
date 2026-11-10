@@ -186,8 +186,8 @@ None yet.
   runs set `allow_addr2line=true`. ADR-0007's allowlist, suppressed by name, needs names: settled in
   M1.3, taking care that a suppression of `syscall` does not hide a blocking wait.
 - **The `realtime-sanitizer` feature builds only on the nightly**, so `--all-features` fails on the
-  stable toolchain. Gating the nightly parts on a cfg that only the sanitizer's flags set would
-  change ADR-0013: put to the owner.
+  stable toolchain. The owner chose on 2026-11-11 to gate the nightly parts on a cfg that only
+  the sanitizer's flags set, by an ADR that amends ADR-0013, before M1.3.
 
 Finished stages move to [`history.md`](history.md), in a few lines each, so that this file holds the
 current stage only, under about 2,000 words.
