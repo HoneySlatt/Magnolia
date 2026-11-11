@@ -28,14 +28,18 @@ tier, into [`measurements.md`](measurements.md).
   rivals, the interface in a process of its own, agents on the shape of uwui's agent core, macOS a
   candidate stage. What follows for uwui is in
   [`uwui-needs.md`](uwui-needs.md#since-uwuis-decisions-of-2026-11-07), for the owner to carry.
-- **Next: M1.2**, the time model, on the owner's go.
+- **M1.2, the time model: done, 2026-11-11.** The owner's decisions of 2026-11-11 are
+  [ADR-0018](adr/0018-the-time-model.md), which amends ADR-0007: absolute positions are counted in
+  time units, not samples. The figures are in
+  [`measurements.md`](measurements.md#m12--the-time-model).
+- **Next: M1.3**, the JACK backend and the graph, on the owner's go.
 
 ## Status
 
 | Milestone | Goal | Status |
 |---|---|---|
 | [M1.1](#m11--the-workspace-and-its-checks) | The Rust workspace builds and is checked in CI | Done |
-| [M1.2](#m12--the-time-model) | Positions, tempo, meter and timecode are exact | Planned |
+| [M1.2](#m12--the-time-model) | Positions, tempo, meter and timecode are exact | Done |
 | [M1.3](#m13--the-jack-backend-and-the-graph) | A graph of nodes plays through the JACK API, swapped without a click | Planned |
 | [M1.4](#m14--a-session-plays) | A test session of clips and MIDI plays from disk, delays compensated | Planned |
 | [M1.5](#m15--recording-and-monitoring) | A voice is recorded and monitored at low latency | Planned |
@@ -66,13 +70,19 @@ milestone first needs it.
 ### M1.2 — The time model
 
 - **Goal.** Every position in Magnolia is exact over a film's length.
-- **Delivers.** 64-bit sample positions; fixed-point musical time; a tempo map with tempo and meter
-  changes; timecode at 23.976, 24, 25, 29.97 with and without drop-frame, 30, 50, 59.94 and 60; one
-  written rounding rule for every conversion.
+- **Delivers.** 64-bit sample positions, and absolute positions in time units
+  ([ADR-0018](adr/0018-the-time-model.md)); fixed-point musical time; a tempo map with tempo and meter
+  changes; timecode at 23.976, 24, 25, 29.97 with and without drop-frame, 30, 50, 59.94 with and
+  without drop-frame, and 60; one written rounding rule for every conversion.
 - **Done when.** Conversions round-trip over ten hours without drift, by the rounding rule; tested
   and fuzzed.
 - **How to test.** `cargo test`; `cargo fuzz` briefly in CI.
 - **Measured.** The time of a conversion, as the engine calls it per block.
+- **Delivered**, on the owner's decisions of 2026-11-11 ([ADR-0018](adr/0018-the-time-model.md);
+  libfuzzer-sys taken for `cargo fuzz`): `magnolia_engine::time`; the rule checked on every grid
+  over ten hours, a tick's sample against an independent oracle (`tests/time_over_ten_hours.rs`); two fuzz targets,
+  run 20 s each by `scripts/check.sh`; a RealtimeSanitizer case on a block's conversions; a
+  benchmark. No program runs yet: the tests, the fuzz targets and the benchmark ran.
 
 ### M1.3 — The JACK backend and the graph
 
@@ -173,7 +183,13 @@ milestone first needs it.
 
 ## Ideas
 
-None yet.
+- Pro Tools' other timecode rates (47.952, 48, 100, 119.88 and 120, 119.88 and 120 drop, and the
+  "30 drop" and "60 drop" of pulled workflows), at the stage that brings video; what Pro Tools means by the last two is
+  unverified ([survey](survey.md#time-models-2026-11-11)).
+- A cursor that remembers the last tempo segment from block to block, if a session with thousands
+  of tempo changes ever shows the binary search in the callback's histogram
+  ([measurements](measurements.md#m12--the-time-model)).
+- 11- and 13-tuplets exact, by refining the ticks by a whole factor, if a user needs them.
 
 ## Known debt
 
@@ -188,6 +204,10 @@ None yet.
 - **The `realtime-sanitizer` feature builds only on the nightly**, so `--all-features` fails on the
   stable toolchain. The owner chose on 2026-11-11 to gate the nightly parts on a cfg that only
   the sanitizer's flags set, by an ADR that amends ADR-0013, before M1.3.
+
+- **The time model's conversions were measured under load** (load average 34 to 36): their figures
+  are upper bounds until taken again on a quiet machine
+  ([measurements](measurements.md#m12--the-time-model)).
 
 Finished stages move to [`history.md`](history.md), in a few lines each, so that this file holds the
 current stage only, under about 2,000 words.
