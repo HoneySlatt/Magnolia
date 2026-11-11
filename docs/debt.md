@@ -45,6 +45,10 @@ stage's audit triages the whole list.
   default, and the lowest tier's storage is not measured yet (the owner's list, M1.4).
 - **The player copies with one relaxed atomic load per sample**, which the compiler does not
   vectorise: cheap at 16 tracks; to measure at large track counts in M1.9.
+- **The session's memory estimate repeats the engine's compensation rule** (`magnolia-session`'s
+  `load/budget.rs` against `engine/compensation.rs`) and its rounding of streams and buffers: a
+  change to either must change both until the engine exposes its own estimate; Stage 2's project
+  replaces the test session.
 - **Paths without a test**: a generation mismatch (`processor.rs`), and the silence the JACK callback
   writes while the server's rate differs from the engine's, since a JACK2 server cannot change its
   rate while it runs.
