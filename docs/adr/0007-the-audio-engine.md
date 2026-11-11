@@ -1,6 +1,6 @@
 # 0007. The audio engine
 
-- Status: Accepted; amended by 0018 and 0023
+- Status: Accepted; amended by 0018, 0023 and 0024
 - Date: 2026-11-06
 
 ## Context
