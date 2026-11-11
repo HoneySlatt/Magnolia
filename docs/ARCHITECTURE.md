@@ -15,7 +15,7 @@ reverse ([`AGENTS.md`](../AGENTS.md#architecture-rules)).
 |---|---|---|
 | `magnolia-engine` | The audio engine ([ADR-0007](adr/0007-the-audio-engine.md)): the graph of nodes, its swaps and its real-time processor (module `engine`), the node contract (`node`) and the engine's own nodes (`nodes`), audio clips streamed from disk by the disk reader and played by the audio players (`disk`, [ADR-0026](adr/0026-one-stream-per-audio-track.md)), what a backend lends each period (`device`), a backend without a device (`offline`), the engine's statistics (`stats`, `callback_times`), the time model (`time`), and WAV files read, decoded and written by its own code (`wav`, [ADR-0029](adr/0029-magnolias-own-wav-and-midi-file-readers.md)). It holds no audio backend: backends are crates of their own. | `rtrb` |
 | `magnolia-jack` | The JACK backend: plays the engine's processor through the JACK API, on PipeWire and JACK2, and says whether its audio thread runs in real time ([below](#the-jack-backend)). | `magnolia-engine`, `jack`, `libc`, `rtrb` |
-| `magnolia-session` | The test session of M1.4, which only the tests and the command line read and Stage 2's project replaces ([ADR-0028](adr/0028-the-test-session-in-json.md)). For now, Standard MIDI Files of format 0 and 1 read and written by its own code (`midi_file`, [ADR-0029](adr/0029-magnolias-own-wav-and-midi-file-readers.md)). | none |
+| `magnolia-session` | The test session of M1.4, which only the tests and the command line read and Stage 2's project replaces ([ADR-0028](adr/0028-the-test-session-in-json.md), [below](#the-test-session)): its JSON file and the checks that need no file on disk (`file`), its loader (`load`), the graph it builds into an engine (`build`), the offline render (`render`), a player for the command line (`play`), the generator of the reference projects (`generate`), and Standard MIDI Files of format 0 and 1 read and written by its own code (`midi_file`, [ADR-0029](adr/0029-magnolias-own-wav-and-midi-file-readers.md)). | `magnolia-engine`, `serde`, `serde_json` |
 
 Each crate's fuzz targets live in its `fuzz/` folder, a workspace of its own, so that the
 workspace's builds never compile libFuzzer. Its benchmarks live in `benches/`, built on the standard
@@ -582,6 +582,116 @@ refuses to run when the libjack it would load is PipeWire's (`tests/common/mod.r
 reach a live PipeWire. A server without real time on a busy machine may skip a client's cycle,
 which breaks a recording; the tests that compare a recording sample by sample take it again when
 the gap counters show a skipped cycle, five times at most.
+
+## The test session
+
+`magnolia-session` reads, plays and generates the test session of M1.4
+([ADR-0028](adr/0028-the-test-session-in-json.md)): a JSON file beside the WAV and MIDI files it
+names, which the tests and the command line read until Stage 2's project replaces it. The `file`
+module's documentation gives the format, an example and every rule; this section gives the flow.
+
+| Step | Code | Does |
+|---|---|---|
+| parse | `file::parse` | reads the format and the version first, so that a newer version is refused as such; then the whole file into `SessionFile` with serde, `deny_unknown_fields`; then every check that needs no file on disk ([below](#what-parse-checks)) |
+| open | `Session::open` | reads the file, at most 64 MiB, and parses it; opens each audio file once and checks its rate, its channels and that it holds every frame of its clips; reads each MIDI file once, at most 64 MiB, and makes each MIDI track's clips one `MidiSequence`; resolves every output and send |
+| build | `Session::build` | makes the engine, the disk reader and the graph, and commits it with the tempo map ([below](#the-graph-a-session-builds)) |
+| render | `render` | plays the session offline from sample 0 into a WAV file of 32-bit floats ([below](#the-offline-render)) |
+| play | `SessionPlayer` | builds the session with the disk reader's thread and hands its processor to a backend: the JACK backend, or the device-less backend in tests |
+| generate | `generate::generate` | writes the reference projects without their plugins, or a small session of every feature, the same to the byte on every machine ([below](#the-generator)) |
+
+### What parse checks
+
+The ranges of every value: the rate is one the time model takes, a tempo lies from 1 to 1,000
+quarter notes a minute, channels from 1 to 1,024 (the master's from 2), a latency up to 65,536
+samples, every gain finite, every clip at least a frame or a tick long and at or after the
+timeline's zero, an audio clip within 2^41 frames of it. The tempo map builds. Each track has the
+fields of its kind and no other: an audio track its channels, a MIDI track its instrument; an audio
+clip its file offset and gain, a MIDI clip neither. Bus names are unique and none is `master`;
+every output and send names `master` or a bus; what feeds a bus or the master has its channels, or
+is mono into stereo; no bus feeds itself back, through any chain of buses, checked once per bus. A
+track's audio clips, placed on the sample grid, do not overlap
+([ADR-0026](adr/0026-one-stream-per-audio-track.md)). Paths are relative; at most 512 distinct audio
+files, each kept open while the session plays, `.` components ignored in telling them apart.
+
+An error names the field by its path, such as `tracks[1].clips[0].start`, and says what is wrong.
+serde_json gives an error's line and column, and names an unknown or missing field, but not the
+path to it, so `file/position.rs` walks the text up to the error's position to name the field. The
+checks the loader needs again, such as resolving the routing or placing a clip, are the same
+functions, so that one rule has one copy. The fuzz target `session_file` feeds the parser text, raw
+or built like a session with arbitrary values, and checks that a session that parses writes back to
+text that parses.
+
+### The graph a session builds
+
+```text
+audio track:  player    ─┐
+MIDI track:   test synth ┴─> inserts, in series ─> gain ─┬─> its output's input
+                                                         └─> one gain per send ─> the send's input
+bus:          its input sums ─> inserts, in series ─> gain ─> its output's input
+master:       its input sums ─> inserts, in series ─> the playback channels
+```
+
+The engine has the session's rate, the master's channels as playback channels, no capture, and a
+largest block of 1,024. A strip's input is its first insert, else its gain; the master without
+inserts sums straight into the playback channels. Sends leave after the track's gain. A mono source
+feeds both channels of a stereo input. The disk reader reads 10 seconds ahead, one stream per audio
+track, its players in the tracks' order. Inserts are the engine's test nodes, `TestLatency` and
+`Gain`, until plugins come (M1.6); the engine compensates their latencies
+([above](#delay-compensation)).
+
+A MIDI clip plays its whole file from its start: every track of the file merged, at one tick in the
+order of the tracks then of the file; each tick scaled from the file's division to the time model's
+by the first tick at or after (exact for every common division, rounded up for others, such as
+1,000); each note off ends the earliest note of its channel and key still held, first in, first
+out, and one that ends none is ignored; a note without its note off ends at the clip's end, and a
+note that lasts no tick after scaling does not play; velocities and controllers' values divided by
+127, pitch bends by 8,192. The file's tempo and time signatures are ignored: the session's tempo map
+rules.
+
+### The offline render
+
+`render(session, block_frames, writer)` builds the session with a disk reader without a thread,
+locates it at sample 0, primes it and plays the cue. It processes blocks of `block_frames`, from 1
+to half the read-ahead (240,000 frames at 48 kHz), the reader filled before each, so it never
+underruns. It writes from the engine sample where the output reaches timeline sample 0, which the
+largest compensation delays (`PlayStart::audible_at`), up to the session's last clip's end and one
+second of tail, every playback channel, in 32-bit floats. Its report gives the frames written, the
+underruns and the largest compensation.
+
+The render is the same to the bit whatever its blocks, and a play from sample 0 through a
+`SessionPlayer`, in periods of any length, plays the same bits from where its output reaches that
+sample: `tests/session.rs` renders the small session in blocks of 4,096, 64 and 1,000 and plays it
+in random periods of 1 to 5,000 frames, waiting for the disk reader between periods.
+
+`SessionPlayer::start(from, timeout)` stops any play under way, locates the reader, waits until it
+has primed the cue, then plays it, the order the disk reader documents
+([above](#audio-clips-from-disk)). The stop comes first because a rolling play keeps the slots of
+all it may still read, which the new cue may need, until its stop reaches the players; so while a
+play rolls, the backend must be playing for the wait to end. `stop` stops;
+`report` gives the engine's and the reader's statistics and each audio track's low-water mark, which
+stays empty while its stream holds the track to its end, as for a track shorter than the read-ahead.
+
+### The generator
+
+`cargo run --release -p magnolia-session --example generate -- <kind> <folder>` writes
+`session.json`, `audio/*.wav` in 24 bits and `midi/*.mid` into an empty or new folder, and refuses
+any other. The kinds: `lowest` and `high`, the [reference projects](reference-projects.md) without
+their plugins and without the high tier's live input; `small`, about 8 seconds that hold every
+feature of the file, for tests and CI.
+
+Every file is the same to the byte on every machine. Each draws its numbers from a SplitMix64
+generator of its own, seeded from one fixed seed mixed with the file's name; a part's musical line
+comes from a seed of its own, so a lead and its double sing the same line. The audio is computed
+with +, -, *, / and `sqrt` on `f64`, and the conversions IEEE 754 makes exact, in a fixed order:
+the sine from a table computed by its Taylor series, the equal temperament from a twelfth root of
+two found by bisection, decays by one multiplication a sample; never `sin`, `exp` or `powf`, whose
+precision differs between C libraries. The JSON is serde_json's, the MIDI files the module's own
+writer's: format 1, a first track of the song's tempo and meters, which Magnolia ignores and REAPER
+reads, then the part. `tests/session.rs` generates the small session twice and compares the bytes.
+
+The test session's limits: the format holds no comments; buses have no sends; the only instrument
+is the test synth; only mono feeds a wider strip, and only a stereo one; a MIDI clip has no offset
+into its file. The command line that plays a session through JACK is not built yet.
 
 ## Checking the real-time path
 

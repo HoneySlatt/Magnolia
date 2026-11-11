@@ -30,8 +30,9 @@ The first entry downloads both toolchains, about 1 GB.
 ## Building and testing
 
 The engine is a library; the JACK backend plays it, and its example plays a sine
-([Playing through JACK](#playing-through-jack)). The commands that build and test them, and measure
-the time model's conversions:
+([Playing through JACK](#playing-through-jack)); the test session's crate reads, renders and
+generates sessions ([Test sessions](#test-sessions)). The commands that build and test them, and
+measure the time model's conversions:
 
 ```sh
 cargo build --workspace
@@ -71,6 +72,23 @@ synthetic load). On a JACK2 server of one's own, without a sound card:
 jackd -n magnolia-try -r -d dummy -r 48000 -p 256 &
 cargo run --release -p magnolia-jack --example play -- --server magnolia-try --load 64
 ```
+
+### Test sessions
+
+A test session is a JSON file beside the WAV and MIDI files it names
+([ARCHITECTURE](docs/ARCHITECTURE.md#the-test-session)). The generator writes one into an empty or
+new folder, outside the repository: `lowest` and `high`, the [reference
+projects](docs/reference-projects.md) without their plugins (0.67 and 2.18 GB), or `small`, about
+8 seconds of every feature of the format (7 MB). The render example plays one offline, from its
+start, into a WAV file of 32-bit floats it creates, in blocks of 4,096 frames or `--block N`:
+
+```sh
+cargo run --release -p magnolia-session --example generate -- small /tmp/magnolia-small
+cargo run --release -p magnolia-session --example render -- /tmp/magnolia-small/session.json \
+    /tmp/magnolia-small.wav
+```
+
+Both print what they wrote and how long it took. Delete the folders afterwards: nothing cleans them.
 
 ## Fuzzing
 

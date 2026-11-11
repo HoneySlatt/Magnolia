@@ -5,8 +5,9 @@ The two sessions on which the budgets of the sound are measured, one for each
 for afterwards: a figure that misses its floor is a fault of Magnolia, not of the project. A change to a project is an ADR, and
 every figure taken on the old one is marked as such.
 
-Neither project can play yet. They become test sessions when M1.4 plays sessions from disk, gain
-their plugins at M1.6 and M1.7, and become Magnolia projects at Stage 2.
+Since M1.4 the generator writes each without its plugins as a [test
+session](ARCHITECTURE.md#the-test-session), which renders offline ([below](#generating-them)). They
+gain their plugins at M1.6 and M1.7, and become Magnolia projects at Stage 2.
 
 ## Common to both
 
@@ -72,3 +73,37 @@ live through Auto-Tune.
 | LSP Parametric Equalizer x16 Stereo | CLAP, native | tracks | 8 |
 | Dragonfly Room Reverb | CLAP, native | a send | 2 |
 | LSP Limiter Stereo | CLAP, native | buses | 2 |
+
+## Generating them
+
+```sh
+cargo run --release -p magnolia-session --example generate -- lowest /tmp/magnolia-lowest
+cargo run --release -p magnolia-session --example generate -- high /tmp/magnolia-high
+```
+
+Each writes `session.json`, `audio/*.wav` and `midi/*.mid` into an empty or new folder, outside the
+repository, the same to the byte on every machine
+([how](ARCHITECTURE.md#the-generator)). What they hold, without plugins:
+
+| | The lowest tier | The high tier |
+|---|---|---|
+| Audio tracks | 10 mono vocal takes, 2 stereo backing vocals, 4 stereo stems (drums, bass, keys, effects) | 20 mono vocal takes, 8 stereo backing vocals, 4 mono guitars, 4 stereo pianos, 3 sets of the 4 stems |
+| MIDI tracks, each into the test synth | drums, bass, chords, a lead with pitch bends, pads with controllers, an arpeggio, a counter-melody, plucks | the same 8, then percussion, stabs, a sub bass, bells, 5 string parts, 5 brass parts, a string pad and brass stabs |
+| Buses | vocals, drums into beat, beat, room (a gain where the reverb goes), fed by sends | vocals, backing, instruments, drums into beat, beat, score, room and hall fed by sends |
+| Files | 16 WAV files, 24-bit, 0.67 GB; 8 MIDI files | 48 WAV files, 24-bit, 2.18 GB; 24 MIDI files |
+
+The song is 490 quarter notes at 140 BPM in 4/4, 3 minutes 30 seconds at 48 kHz, in sections over
+four chords: an intro, two verses and three choruses, a bridge, an outro. Vocal takes sing the lead,
+its double, harmonies, the bridge or ad-libs, each in some sections, resting two bars in four: their
+files hold silence between phrases, and their clips leave gaps between sections; the guitars play
+the verses and choruses. Stems and pianos play from the start to the end, the drums and bass
+percussive, the voices, backing vocals and pads sustained. The room and hall buses hold a gain where
+their reverb will go; the other plugins' places hold nothing yet. The master peaks near -3 dBFS.
+The live input of the high tier comes with recording (M1.5).
+
+To render one offline into a WAV file of floats:
+
+```sh
+cargo run --release -p magnolia-session --example render -- /tmp/magnolia-lowest/session.json \
+    /tmp/magnolia-lowest.wav
+```

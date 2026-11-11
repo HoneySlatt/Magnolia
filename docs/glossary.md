@@ -179,7 +179,9 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
   changes at bars, from the song start.
 - **Test of signature**: uwui's test that an application on uwui is not recognised by its look
   alone.
-- **Test session**: Stage 1's description of a session, read only by tests and the command line.
+- **Test session**: Stage 1's description of a session, a JSON file beside its WAV and MIDI files,
+  read only by tests and the command line
+  ([`ARCHITECTURE.md`](ARCHITECTURE.md#the-test-session)).
 - **Tick**: the unit of musical time, 1/4,838,400 of a quarter note
   ([ADR-0018](adr/0018-the-time-model.md)).
 - **Tier**: a class of machine with its own budgets; the high tier is the owner's desktop, the

@@ -1,12 +1,19 @@
 [package]
 name = "magnolia-session"
-description = "Magnolia's test session of M1.4, which Stage 2's project replaces; for now, its MIDI files"
+description = "Magnolia's test session of M1.4, which Stage 2's project replaces: its file, loader, render, player and generator"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
+
+[dependencies]
+# The engine a session is built into, its disk reader, its WAV files and its time model.
+magnolia-engine.workspace = true
+# The session file in JSON, its types derived (ADR-0028).
+serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true
