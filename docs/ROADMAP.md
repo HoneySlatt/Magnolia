@@ -71,7 +71,8 @@ Figures measured go to [`measurements.md`](measurements.md); only the check's ti
 ### Floors
 
 A *period* is the block of frames that the audio device asks for at each callback. A *reference
-project* is fixed in M1.3, one for each tier, and never tuned for afterwards.
+project* is fixed in M1.3, one for each tier, and never tuned for afterwards: they are in
+[`reference-projects.md`](reference-projects.md).
 
 | Budget | Floor | Measured by | Checked in |
 |---|---|---|---|

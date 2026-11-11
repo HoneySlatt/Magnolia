@@ -76,7 +76,7 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
 - **Prefix**: a folder holding one Windows installation for Wine, its programs and its registry.
 - **Primary modifier**: the key that shortcuts use, Ctrl on Linux and Windows, Cmd on macOS.
 - **Reference project**: a session fixed in M1.3 for each tier, on which the sound's budgets are
-  measured, never tuned for afterwards.
+  measured, never tuned for afterwards ([`reference-projects.md`](reference-projects.md)).
 - **Render-ahead**: rendering tracks without live input before the playhead reaches them, on worker
   threads, as REAPER does.
 - **Rest**: the transport stopped, nothing armed or monitored, plugin GUIs closed. Magnolia then

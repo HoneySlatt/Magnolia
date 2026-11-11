@@ -95,7 +95,8 @@ milestone first needs it.
 - **How to test.** `cargo test` on the backend without a device; playing by hand through `pw-jack`.
 - **Measured.** The callback's histogram at 64 frames on the high tier; rest with the transport
   stopped; the laptop of the lowest tier on mains power, its frequency governor and audio device
-  named; the lowest tier's reference project, its plugins named, within 2.5 GB
+  named; the lowest tier's reference project defined, its plugins named; its memory, within
+  2.5 GB, is measured at M1.9, once it can play
   ([ADR-0014](adr/0014-the-quality-bar-measured-against-the-market.md)).
 
 ### M1.4 — A session plays
