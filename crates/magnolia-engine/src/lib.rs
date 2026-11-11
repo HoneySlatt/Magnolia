@@ -5,4 +5,5 @@
 //! test proves that RealtimeSanitizer, which checks the real-time path in CI, stops a real-time
 //! function that allocates (`tests/realtime_sanitizer.rs`).
 
+pub mod callback_times;
 pub mod time;
