@@ -41,8 +41,8 @@ Each run is itself the median of nine timed loops.
 
 The machine was busy with other work: load average 34 to 36 on 16 threads. These figures are
 therefore upper bounds. An earlier version of the benchmark ran on a quiet machine (load 3.3) and
-gave about half of them, but most of its positions fell past the last tempo change. The quiet
-measure of this version is still to be taken.
+gave about half of them, but most of its positions fell past the last tempo change. This version
+was measured again on a quiet machine, below the table.
 
 | What | 1 tempo change | 1,000 tempo changes |
 |---|---|---|
@@ -50,8 +50,17 @@ measure of this version is still to be taken.
 | A sample read as a tick | 18.7 ns | 34.7 ns |
 | A block: its ticks, then its 16 events placed | 403 ns | 906 ns |
 
-A block of 64 frames at 48 kHz lasts 1.33 ms; even under this load, its conversions take under
-0.07 % of it. The cost grows with the number of tempo changes through the binary search alone. No
+Taken again on a quiet machine on 2026-11-11, during M1.3, with the same benchmark: load average 2
+to 3, the median of three runs.
+
+| What | 1 tempo change | 1,000 tempo changes |
+|---|---|---|
+| A tick placed on its sample | 11.3 ns | 25.1 ns |
+| A sample read as a tick | 9.8 ns | 17.7 ns |
+| A block: its ticks, then its 16 events placed | 191 ns | 494 ns |
+
+A block of 64 frames at 48 kHz lasts 1.33 ms; its conversions take under 0.04 % of it, and under
+0.07 % even under the load above. The cost grows with the number of tempo changes through the binary search alone. No
 budget is set for it: the [callback's](ROADMAP.md#floors) budget holds it.
 
 ### Compiling and checking
