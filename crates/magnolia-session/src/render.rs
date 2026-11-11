@@ -15,6 +15,7 @@ use magnolia_engine::offline::OfflineBackend;
 #[cfg(doc)]
 use magnolia_engine::stats::PlayStart;
 use magnolia_engine::time::SamplePosition;
+use magnolia_engine::time::SampleRate;
 use magnolia_engine::wav::{SampleFormat, WavError, WavWriter};
 
 use crate::build::{BuildError, BuiltSession, ReaderMode};
@@ -77,7 +78,7 @@ pub fn render<W: Write + Seek>(
     let channels = session.master_channels();
     let mut backend = OfflineBackend::new(processor);
     let mut wav = WavWriter::new(writer, SampleFormat::Float32, channels, rate.hertz())?;
-    let tail = u64::from(rate.hertz());
+    let tail = u64::try_from(tail_after_the_last_clip(rate).0).unwrap_or_default();
     let wanted = u64::try_from(last_sample.0)
         .unwrap_or_default()
         .saturating_add(tail);
@@ -281,4 +282,10 @@ impl Error for RenderError {
             Self::BlockOutOfRange { .. } | Self::PlayDidNotStart | Self::OutputExists(_) => None,
         }
     }
+}
+
+/// The tail a render plays, and a play by default, after the session's last clip: one second, so
+/// that releases and reverbs ring out.
+pub fn tail_after_the_last_clip(rate: SampleRate) -> SamplePosition {
+    SamplePosition(i64::from(rate.hertz()))
 }

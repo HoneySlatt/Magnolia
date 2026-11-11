@@ -158,7 +158,9 @@ impl Span {
             Some(length) => {
                 place(length, &TimeUnits, &rate).and_then(|length| from.0.checked_add(length.0))
             }
-            None => last_sample.0.checked_add(i64::from(rate.hertz())),
+            None => last_sample
+                .0
+                .checked_add(magnolia_session::tail_after_the_last_clip(rate).0),
         }
         .map(SamplePosition)
         .ok_or_else(beyond)?;

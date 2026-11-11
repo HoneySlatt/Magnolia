@@ -168,8 +168,8 @@ pub struct PlayReport {
     pub read_errors: u64,
     /// Each audio track's name and its low-water mark: the fewest frames its player found ready
     /// ahead of it since its play started, short of the track's end; `None` while its stream has
-    /// held the track to its end, as a track shorter than the read-ahead always is, or before it
-    /// played.
+    /// held the track to its end, or before it played. A play starts once the first half second of
+    /// each stream is ready, so even a track shorter than the read-ahead may show a mark.
     pub low_water: Vec<(String, Option<u64>)>,
 }
 
