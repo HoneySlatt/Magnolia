@@ -7,7 +7,8 @@
 //! - [`device`] and [`offline`]: what a backend lends the processor each period, and a backend
 //!   without a device, for tests;
 //! - [`stats`] and [`callback_times`]: what the engine reports of itself while it plays;
-//! - [`time`]: where every position lies, exactly.
+//! - [`time`]: where every position lies, exactly;
+//! - [`wav`]: WAV files, read, decoded and written.
 //!
 //! Its functions marked real-time are checked by RealtimeSanitizer in CI
 //! (`tests/realtime_sanitizer.rs`).
@@ -23,3 +24,4 @@ pub mod nodes;
 pub mod offline;
 pub mod stats;
 pub mod time;
+pub mod wav;

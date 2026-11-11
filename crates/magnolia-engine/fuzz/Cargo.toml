@@ -40,3 +40,10 @@ path = "fuzz_targets/timecode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "wav_reader"
+path = "fuzz_targets/wav_reader.rs"
+test = false
+doc = false
+bench = false
