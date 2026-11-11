@@ -1,7 +1,8 @@
 //! Proves that RealtimeSanitizer stops a real-time function that allocates, on a thread of its
 //! own as the audio thread will be, and stays silent on one that only works on memory allocated
 //! beforehand. Without this proof, a check of the real-time path that finds nothing would mean
-//! nothing.
+//! nothing. It also checks that a block's conversions of time, as the engine makes them, neither
+//! allocate nor make a system call.
 //!
 //! The sanitizer ends the process at its first report, so each case runs in a child process: this
 //! same executable, started again with `MAGNOLIA_RTSAN_CASE` naming the case. The parent reads the
@@ -16,6 +17,10 @@ use std::env;
 use std::hint::black_box;
 use std::process::{Command, ExitCode, Output};
 use std::thread;
+
+use magnolia_engine::time::{
+    Meter, MusicalPosition, SamplePosition, SampleRate, Tempo, TempoMap, TimePosition, place,
+};
 
 /// Names the case a child process runs; the parent leaves it unset.
 const CASE_VARIABLE: &str = "MAGNOLIA_RTSAN_CASE";
@@ -38,6 +43,36 @@ fn halve(buffer: &mut [f32]) {
     }
 }
 
+/// Converts time as the engine does for each block: the ticks whose events play in the block, then
+/// the sample of each event, on a tempo map built beforehand. Returns the sum of the samples.
+#[sanitize(realtime = "nonblocking")]
+fn convert_block(map: &TempoMap, rate: SampleRate, start: SamplePosition, frames: u32) -> i64 {
+    let ticks = map
+        .ticks_in_block(rate, start, frames)
+        .expect("the block is in range");
+    let step = ((ticks.end.0 - ticks.start.0) / 8).max(1);
+    let mut sum = 0;
+    let mut tick = ticks.start.0;
+    while tick < ticks.end.0 {
+        sum += place(MusicalPosition(tick), map, &rate)
+            .expect("the tick is in range")
+            .0;
+        tick += step;
+    }
+    sum
+}
+
+/// A tempo map with a few changes, built off the real-time context.
+fn tempo_map() -> TempoMap {
+    let tempo = |numerator, denominator| Tempo::from_bpm(numerator, denominator).unwrap();
+    let changes = [
+        (MusicalPosition(0), tempo(174, 1)),
+        (MusicalPosition(10_000_000), tempo(187, 2)),
+        (MusicalPosition(20_000_000), tempo(61, 1)),
+    ];
+    TempoMap::new(TimePosition(0), &changes, &[(0, Meter::new(4, 4).unwrap())]).unwrap()
+}
+
 /// Runs `work` on a new thread and waits for it, as the audio thread will run. Only the functions
 /// marked `nonblocking` that `work` calls run in the real-time context; the rest of `work` does not.
 fn on_new_thread(work: impl FnOnce() + Send + 'static) {
@@ -56,6 +91,13 @@ fn run_case(case: &str) -> ExitCode {
             let mut buffer = vec![1.0; 64];
             halve(&mut buffer);
             assert!(buffer.iter().all(|&sample| sample == 0.5));
+        }),
+        "convert" => on_new_thread(|| {
+            let map = tempo_map();
+            let rate = SampleRate::new(48_000).unwrap();
+            for block in 0..1_000 {
+                black_box(convert_block(&map, rate, SamplePosition(block * 64), 64));
+            }
         }),
         _ => {
             eprintln!("unknown case {case:?}");
@@ -119,6 +161,7 @@ fn main() -> ExitCode {
     let results = [
         check("allocate", Expected::Stopped),
         check("halve", Expected::Silent),
+        check("convert", Expected::Silent),
     ];
     if results.iter().all(|&passed| passed) {
         ExitCode::SUCCESS

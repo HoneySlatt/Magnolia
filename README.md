@@ -12,9 +12,9 @@ loops and stems.
 
 ## State
 
-**Designed; the engine not yet built.** The direction, the quality bar and the first decisions were
+**Designed; the engine being built.** The direction, the quality bar and the first decisions were
 taken on 2026-11-06, the quality bar measured against the market on 2026-11-10. The Rust workspace
-and its checks exist; the engine has no code yet. The first stage builds the audio engine and plugin hosting, without
+and its checks exist, and the engine's time model; nothing plays sound yet. The first stage builds the audio engine and plugin hosting, without
 an interface; the interface comes at Stage 3, on [uwui](https://github.com/HoneySlatt/uwui), once a
 stable release of uwui holds what Magnolia needs. Magnolia is a later client of uwui, not one of the
 programs of its first stage.

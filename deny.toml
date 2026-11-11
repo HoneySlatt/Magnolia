@@ -17,6 +17,8 @@ ignore = []
 # A checked subset of the licenses that may be combined into a program distributed under
 # GPL-3.0-or-later (ADR-0002); a license is added here when a dependency needs it.
 # GPL-2.0-only is not among them: it cannot be combined with GPL-3.0.
+# NCSA, a permissive license the FSF lists as compatible with the GPL, covers libFuzzer. It is
+# allowed for every crate; libfuzzer-sys, which bundles libFuzzer for the fuzz targets, alone uses it.
 allow = [
     "0BSD",
     "Apache-2.0",
@@ -32,6 +34,7 @@ allow = [
     "LGPL-3.0-or-later",
     "MIT",
     "MPL-2.0",
+    "NCSA",
     "Unicode-3.0",
     "Zlib",
 ]

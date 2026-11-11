@@ -15,7 +15,7 @@ New ADRs copy [`0000-template.md`](0000-template.md) and take the next free numb
 | [0004](0004-magnolias-own-wine-bridge-on-the-systems-wine.md) | Magnolia's own Wine bridge, on the system's Wine | Accepted |
 | [0005](0005-plugin-guis-floating-first-then-inside-the-window.md) | Plugin GUIs floating first, then inside the window | Accepted; amended by 0015 |
 | [0006](0006-the-interface-on-uwui-after-the-engine-and-the-project.md) | The interface on uwui, after the engine and the project | Accepted; amended by 0011 |
-| [0007](0007-the-audio-engine.md) | The audio engine | Accepted |
+| [0007](0007-the-audio-engine.md) | The audio engine | Accepted; amended by 0018 |
 | [0008](0008-the-project-model.md) | The project model: tracks with channels, linked patterns | Accepted |
 | [0009](0009-the-project-in-sqlite-nothing-lost.md) | The project in SQLite; nothing lost | Accepted |
 | [0010](0010-the-quality-bar.md) | The quality bar | Accepted; amended by 0011 and 0014 |
@@ -26,3 +26,4 @@ New ADRs copy [`0000-template.md`](0000-template.md) and take the next free numb
 | [0015](0015-the-interface-in-a-process-of-its-own.md) | The interface in a process of its own | Accepted; amends 0005 |
 | [0016](0016-agents-on-the-shape-of-uwuis-agent-core.md) | Agents on the shape of uwui's agent core | Accepted |
 | [0017](0017-macos-a-candidate-stage-after-stage-4.md) | macOS, a candidate stage after Stage 4 | Accepted; amends 0001 |
+| [0018](0018-the-time-model.md) | The time model | Accepted; amends 0007 |

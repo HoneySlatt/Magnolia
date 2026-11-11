@@ -25,7 +25,7 @@ interface, on uwui, is dark, dense, refined, accessible, drawn at 240 Hz and sti
 
 Accepted by the owner on 2026-11-06 ([ADR-0010](adr/0010-the-quality-bar.md)) and measured against
 the market since 2026-11-10 ([ADR-0014](adr/0014-the-quality-bar-measured-against-the-market.md)).
-Figures measured go to [`measurements.md`](measurements.md); only the check's time is measured yet.
+Figures measured go to [`measurements.md`](measurements.md); only the check's times and the time model's conversions are measured yet.
 
 ### How the bar works
 
@@ -163,6 +163,7 @@ advance, "no" as easy as "yes".
 | Plugin GUIs | Floating first, then inside the window ([ADR-0005](adr/0005-plugin-guis-floating-first-then-inside-the-window.md)) |
 | Interface and order | On uwui, after the engine and the project ([ADR-0006](adr/0006-the-interface-on-uwui-after-the-engine-and-the-project.md)); Magnolia a later client of uwui, not one of its first programs ([ADR-0011](adr/0011-magnolia-no-longer-a-program-of-uwuis-first-stage.md)) |
 | Engine | Own duplex backends, a compiled graph, exact time ([ADR-0007](adr/0007-the-audio-engine.md)) |
+| Time model | Ticks of 1/4,838,400 quarter note, absolute positions in time units of 1/903,168,000,000 s, one rounding rule ([ADR-0018](adr/0018-the-time-model.md)) |
 | Project model | Tracks with channels, linked patterns ([ADR-0008](adr/0008-the-project-model.md)) |
 | Project file | SQLite, nothing lost ([ADR-0009](adr/0009-the-project-in-sqlite-nothing-lost.md)) |
 | Quality bar | Above: floors, and leads over measured rivals ([ADR-0010](adr/0010-the-quality-bar.md), [ADR-0014](adr/0014-the-quality-bar-measured-against-the-market.md)) |
@@ -184,6 +185,7 @@ Each is decided by an ADR when its stage needs it, not earlier.
 | How the Windows host talks to the engine | a pure Windows executable; a winelib program | Stage 1, on the prototype's figures |
 | Render-ahead of tracks without live input | REAPER's way; the graph scheduler alone | Stage 2, on measures of heavy projects |
 | Time-stretch | signalsmith-stretch (MIT), Bungee (MPL-2.0), Rubber Band (GPL-2.0-or-later) | Stage 4 |
+| Tempo ramps | steps of constant tempo, exact with the time model's arithmetic; a shape (linear in time or in beats) with a rounding rule of its own, as Ardour computes in floating point ([ADR-0018](adr/0018-the-time-model.md)) | the stage that first edits tempo |
 | Video decoding | uwui's video crate, FFmpeg for ProRes and DNxHD | the film stage |
 | Exchange with film editors (AAF) | none; AAF export | the film stage |
 | Wwise and FMOD exports | files and metadata each tool imports | the film and games stage |

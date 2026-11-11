@@ -10,8 +10,8 @@ each out of the engine's process. Its interface will be written on uwui, the own
 which is not ready yet. It is licensed under GPL-3.0-or-later, its copyright held by the owner
 alone ([ADR-0002](docs/adr/0002-gpl-3-0-or-later-copyright-kept.md)).
 
-Its real state: the design is done (ADRs 0001 to 0017); the workspace and its checks exist (M1.1);
-the engine has no code yet.
+Its real state: the design is done (ADRs 0001 to 0018); the workspace and its checks exist (M1.1);
+the engine holds the time model (M1.2) and plays nothing yet.
 
 Agents develop it; the owner sets its direction and validates its decisions. Anyone must be able to
 understand it from the repository alone. Documentation is part of every deliverable.
@@ -86,7 +86,9 @@ check to make it pass (a skipped test, a raised budget, a silenced lint) without
   ([ADR-0007](docs/adr/0007-the-audio-engine.md)).
 - **A plugin never stalls the engine**: past its deadline, or dead, its block is silent, never
   bypassed.
-- **Time is exact**: 64-bit sample positions, fixed-point musical time; never float beats.
+- **Time is exact**: absolute positions in 64-bit time units, the engine's in 64-bit samples,
+  musical positions in 64-bit ticks; never float beats; every conversion by `place` or `read`
+  ([ADR-0018](docs/adr/0018-the-time-model.md)).
 - **The user's data is never lost**: each gesture is a transaction; recordings survive a crash; a
   missing plugin's state is kept as it was; video is referenced, never copied.
 - **Wine**: Magnolia uses the system's Wine and says plainly when its version is untested

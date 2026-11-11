@@ -19,19 +19,37 @@ It holds:
   checks that need one: RealtimeSanitizer, Miri and `cargo fuzz`
   ([ADR-0013](docs/adr/0013-a-pinned-stable-toolchain-and-a-nightly-for-checks.md));
 - `cargo deny`, which enforces the dependency policy of `deny.toml`;
-- `cargo fuzz`, for the fuzz targets that arrive with the first parser;
+- `cargo fuzz`, which runs the fuzz targets with libFuzzer on the nightly;
 - `lychee`, which checks the links between Markdown files.
 
 The first entry downloads both toolchains, about 1 GB.
 
 ## Building and testing
 
-There is nothing to run yet: the engine has no code. The commands that build and test it:
+The engine holds the time model so far, a library without a program to run. The commands that
+build and test it, and measure its conversions:
 
 ```sh
 cargo build --workspace
 cargo test --workspace
+cargo bench --bench time_conversions
 ```
+
+## Fuzzing
+
+Each crate's fuzz targets live in its `fuzz/` folder, a workspace of its own. To list them, then
+run one for a minute:
+
+```sh
+nightly cargo fuzz list --fuzz-dir crates/magnolia-engine/fuzz
+nightly cargo fuzz run --fuzz-dir crates/magnolia-engine/fuzz --target-dir target/fuzz tempo_map \
+    -- -max_total_time=60
+```
+
+`--target-dir target/fuzz` shares the builds of `scripts/check.sh`. A crash leaves its input in
+`crates/magnolia-engine/fuzz/artifacts/`; `cargo fuzz run` with that file's path after the
+target's name replays it. The corpus grows in `fuzz/corpus/`, which git
+ignores.
 
 ## The checks
 
@@ -47,12 +65,13 @@ fails. CI runs it unchanged, on each push to `main`, each pull request and once 
 | links | Links between Markdown files, anchors included, offline | `lychee --offline --include-fragments $(git ls-files --cached --others --exclude-standard '*.md')` |
 | AGENTS.md length | `AGENTS.md` under 1,500 words | `wc -w AGENTS.md` |
 | scripts | The scripts' syntax | `for script in scripts/*.sh; do bash -n "$script"; done` |
-| formatting | rustfmt's format | `cargo fmt --all --check` |
-| lints | Clippy and the compiler's lints of `Cargo.toml`, warnings as errors | `cargo clippy --workspace --all-targets --locked -- -D warnings` |
+| formatting | rustfmt's format, the fuzz targets' too | `cargo fmt --all --check` |
+| lints | Clippy and the compiler's lints of `Cargo.toml`, warnings as errors, the fuzz targets' too | `cargo clippy --workspace --all-targets --locked -- -D warnings` |
 | tests | Every test on the stable toolchain | `cargo test --workspace --locked` |
 | documentation | rustdoc, warnings as errors | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked` |
-| dependencies | Licenses, RustSec advisories and sources, by `deny.toml`; fetches the advisories | `cargo deny --locked check` |
-| RealtimeSanitizer | Clippy on the sanitizer's test, then the sanitizer stops an allocation in a function marked real-time | below |
+| dependencies | Licenses, RustSec advisories and sources, by `deny.toml`, the fuzz targets' too; fetches the advisories | `cargo deny --locked check` |
+| RealtimeSanitizer | Clippy on the sanitizer's test, then the sanitizer stops an allocation in a function marked real-time, and stays silent on a block's conversions of time | below |
+| fuzzing | Each fuzz target for 20 s, or `MAGNOLIA_FUZZ_SECONDS` | [Fuzzing](#fuzzing) |
 
 The sanitizer's test is built only with the `realtime-sanitizer` feature, on the nightly, in a
 target directory of its own. `scripts/check.sh` runs Clippy on it first, with the same arguments,
@@ -64,5 +83,8 @@ RUSTFLAGS="-Zsanitizer=realtime" nightly cargo test --locked -p magnolia-engine 
     --target x86_64-unknown-linux-gnu --target-dir "${CARGO_TARGET_DIR:-target}/realtime-sanitizer"
 ```
 
+The fuzz targets' own formatting, lints and dependencies are checked with the same commands, given
+`--manifest-path crates/magnolia-engine/fuzz/Cargo.toml`.
+
 How long a full check takes, and its budget, are in
-[`docs/measurements.md`](docs/measurements.md#m11--the-workspace-and-its-checks).
+[`docs/measurements.md`](docs/measurements.md#m12--the-time-model).

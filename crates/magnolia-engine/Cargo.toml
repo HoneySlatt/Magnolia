@@ -18,5 +18,10 @@ name = "realtime_sanitizer"
 harness = false
 required-features = ["realtime-sanitizer"]
 
+# Measures the time model's conversions per block; prints its figures (docs/measurements.md).
+[[bench]]
+name = "time_conversions"
+harness = false
+
 [lints]
 workspace = true
