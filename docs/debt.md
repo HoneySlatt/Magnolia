@@ -37,6 +37,14 @@ stage's audit triages the whole list.
 - **The total compensation of a path is not capped**: only each node's latency is, at
   `MAX_LATENCY`; k latent nodes in series at the cap need delay lines of k × 65,536 samples per
   channel, allocated on the controller's thread.
+- **A play waits for its cue's priming without a timeout**: if the disk reader's thread has died,
+  the play never starts; `wait_primed` reports it (`ReaderStopped`), the transport does not. Tracked
+  for the stage that brings the interface's transport.
+- **The disk reader's limits**: clips within ±2^41 frames of the timeline's zero; generations wrap
+  after 2^32 locates; `read_at` is Unix-only (the Windows stage replaces it); its I/O priority is the
+  default, and the lowest tier's storage is not measured yet (the owner's list, M1.4).
+- **The player copies with one relaxed atomic load per sample**, which the compiler does not
+  vectorise: cheap at 16 tracks; to measure at large track counts in M1.9.
 - **Paths without a test**: a generation mismatch (`processor.rs`), and the silence the JACK callback
   writes while the server's rate differs from the engine's, since a JACK2 server cannot change its
   rate while it runs.
