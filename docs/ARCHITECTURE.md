@@ -13,7 +13,8 @@ reverse ([`AGENTS.md`](../AGENTS.md#architecture-rules)).
 
 | Crate | Role | Depends on |
 |---|---|---|
-| `magnolia-engine` | The audio engine ([ADR-0007](adr/0007-the-audio-engine.md)): the graph of nodes, its swaps and its real-time processor (module `engine`), the node contract (`node`) and the engine's own nodes (`nodes`), what a backend lends each period (`device`), a backend without a device (`offline`), the engine's statistics (`stats`, `callback_times`), and the time model (`time`). No audio backend yet. | `rtrb` |
+| `magnolia-engine` | The audio engine ([ADR-0007](adr/0007-the-audio-engine.md)): the graph of nodes, its swaps and its real-time processor (module `engine`), the node contract (`node`) and the engine's own nodes (`nodes`), what a backend lends each period (`device`), a backend without a device (`offline`), the engine's statistics (`stats`, `callback_times`), and the time model (`time`). It holds no audio backend: backends are crates of their own. | `rtrb` |
+| `magnolia-jack` | The JACK backend: plays the engine's processor through the JACK API, on PipeWire and JACK2, and says whether its audio thread runs in real time ([below](#the-jack-backend)). | `magnolia-engine`, `jack`, `libc`, `rtrb` |
 
 Each crate's fuzz targets live in its `fuzz/` folder, a workspace of its own, so that the
 workspace's builds never compile libFuzzer. Its benchmarks live in `benches/`, built on the standard
@@ -187,11 +188,113 @@ compiler may turn a fresh allocation's zero fill into `calloc`, which leaves pag
 and popping through every slot at the start. `tests/engine/page_faults.rs` checks that the
 processing thread's minor faults do not change across swaps.
 
+## The JACK backend
+
+`magnolia_jack::JackBackend` plays an engine's processor through the JACK API, which PipeWire and
+JACK2 both serve ([ADR-0007](adr/0007-the-audio-engine.md)). The `jack` crate loads libjack when
+the first client opens, so a program that never opens one runs without it. Run through `pw-jack`,
+the process loads PipeWire's libjack; otherwise the first `libjack.so.0` on its library path.
+
+`JackBackend::open` connects to a running server and never starts one (`NO_START_SERVER`). It fails
+with a plain error when libjack is missing, when no server runs, and when the server's rate differs
+from the engine's. It registers one port per engine channel, `capture_1` and on, `playback_1` and
+on, and activates the client: the server calls the processor from its next period, capture and
+playback in one callback.
+
+### Its threads and callbacks
+
+| Part | Runs on | Does |
+|---|---|---|
+| the handle, `JackBackend` | the caller's thread | opens and closes the client, hands a replacement processor to the callback and drops the one it replaced, asks whether the audio thread runs in real time |
+| the process callback | JACK's audio thread, once a period | swaps in a replacement, counts gaps and its own overruns, counts the server's xruns into the engine's statistics, calls `Processor::process` on the ports, or writes silence while the server's rate differs from the engine's |
+| the thread-init callback | each thread JACK starts for the client: with JACK2 the audio thread, then its notification thread; with PipeWire the audio thread, before its first period | reads the thread's kernel id with `gettid` into the thread's own storage |
+| the xrun, shutdown and sample-rate callbacks | JACK2's notification thread; PipeWire's audio thread for an xrun | count an xrun, note the shutdown, note the server's rate: atomics only |
+
+Every callback but the process callback touches atomics only: PipeWire skips a process cycle while
+a notification handler runs, and the shutdown callback must be async-signal-safe.
+
+### What crosses the boundary
+
+- **Two rtrb queues of one place each**: replacement processors, from the handle to the callback,
+  and the processors they replaced, back. The callback swaps only when the queue back has room, so
+  it never drops a processor; the handle drops it at its next `replace_processor`, `poll` or
+  `close`.
+- **Atomics shared by the three parts**: the audio thread's id, the server's xruns, the shutdown,
+  the server's rate.
+- **The engine's statistics**, `EngineStats`, of the processor being played: the callback fills its
+  own overruns, gaps, server xruns and the audio thread's id there, beside the processor's own
+  figures.
+
+### What the callback counts
+
+- **A gap**: a period whose first frame (`current_frames` of `jack_get_cycle_times`) does not
+  follow on from the last one's, as when the server skipped the client's cycles. The frame time is
+  32 bits and wraps, so the comparison wraps; the first period, and the first after a change of
+  the period's length, are never gaps.
+- **An own overrun**: a callback that started before the next period's estimated start
+  (`next_usecs`) and ended after it, by `jack_get_time`, or whose work alone took longer than a
+  period. A callback the server started after its deadline is late by the server's doing. On
+  JACK2's dummy driver at 64 frames without real time, the server's clock estimate lags the wall
+  clock by about 24 ms, measured, so every callback starts after its estimated deadline: there,
+  only callbacks longer than a period count.
+- **A server xrun**: each xrun callback. JACK2 reports any xrun in its graph, whoever caused it;
+  PipeWire reports several between two cycles as one, and never the first.
+
+While the server's rate differs from the engine's, the callback writes silence without calling the
+processor, whose heartbeat then stops, until the rate is back.
+
+### Real-time rights
+
+The audio thread's id is read once, by the thread-init callback, into the thread's own storage;
+the process callback publishes it at its first period. JACK2 calls the thread-init callback on its
+notification thread too, so only the thread that runs the process callback can say which id is the
+audio thread's. `JackBackend::realtime_status`, from any other thread, asks the kernel for that
+thread's policy and priority (`sched_getscheduler`, the reset-on-fork flag masked, and
+`sched_getparam`): the C library's cached copy is stale once rtkit has changed the policy from
+outside ([ADR-0023](adr/0023-the-real-time-allowlist.md)). It names the server by the libjack the
+process mapped (`/proc/self/maps`): PipeWire when the path names it, JACK2 otherwise. On JACK2 alone
+it asks `jack_is_realtime`, which says whether the server runs with `-R`; PipeWire answers yes
+whatever its threads' rights. Its report says, in plain words, how that server grants the rights.
+rtkit grants them asynchronously, so a caller asks again after about a second.
+
+### A poisoned processor, rebuilt in place
+
+After a panic the processor writes silence and reports itself poisoned
+([ADR-0022](adr/0022-a-panic-on-the-real-time-path-gives-silence.md)). The owner of the backend
+makes a new engine at the same rate, hands its processor to `replace_processor`, and commits the
+graph again on the new controller. The callback swaps it in at a period's start: the client stays
+active and its connections stay.
+
+### Closing, and a server that dies
+
+`close`, or dropping the backend, deactivates the client on the caller's thread and returns the
+processor. When the server has stopped or died, JACK2 cannot deactivate the client: the `jack` crate
+then keeps the callback's state, the processor with it, for the process's life, since the server
+may still point into it. `close` returns an error that says so; the processor's memory and its
+collector thread are not freed. The tests show that nothing hangs or crashes.
+
+### The `jack` crate on the real-time path
+
+Read in its code, not measured: around each process callback it takes a `std::sync::Mutex` with
+`try_lock`, which never waits, and catches panics. Its own wrapper of the port-registration
+notification locks a mutex and may allocate, on JACK2's notification thread or, on PipeWire, while
+the process cycle is held. Its `log` feature is off, so libjack's messages go to standard error.
+
+### Its tests
+
+`crates/magnolia-jack/tests/jack/` runs each behaviour on a JACK2 server of its own, `jackd -n
+<name> -r -d dummy -r 48000 -p <period>`, without real time and without a sound card, one test at
+a time; a plain JACK client of the test's plays a signal into Magnolia and records it. Each test
+refuses to run when the libjack it would load is PipeWire's (`tests/common/mod.rs`), which would
+reach a live PipeWire. A server without real time on a busy machine may skip a client's cycle,
+which breaks a recording; the tests that compare a recording sample by sample take it again when
+the gap counters show a skipped cycle, five times at most.
+
 ## Checking the real-time path
 
-The engine's real-time functions are marked
+The real-time functions are marked
 `#[cfg_attr(magnolia_rtsan, sanitize(realtime = "nonblocking"))]`; so far `Processor::process`, the
-period's entry. Built on the nightly with
+period's entry, and the JACK backend's process callback around it. Built on the nightly with
 `-Zsanitizer=realtime --cfg magnolia_rtsan`, RealtimeSanitizer ends the process at the first
 allocation, free or system call made inside a marked function, on any thread
 ([ADR-0013](adr/0013-a-pinned-stable-toolchain-and-a-nightly-for-checks.md),
@@ -214,9 +317,9 @@ symbolized reports, so every run sets `allow_addr2line=true`, with binutils' `ad
 development shell.
 
 Because the sanitizer ends the process, a test of it runs each case in a child process and reads
-its exit status and standard error: `crates/magnolia-engine/tests/realtime_sanitizer.rs`. It sets
-the options of each run itself: `halt_on_error=true`, `allow_addr2line=true`, and the suppressions.
-Its cases:
+its exit status and standard error: `crates/magnolia-engine/tests/realtime_sanitizer.rs`, and
+`crates/magnolia-jack/tests/realtime_sanitizer.rs` for the backend. Each sets the options of each
+run itself: `halt_on_error=true`, `allow_addr2line=true`, and the suppressions. The engine's cases:
 
 - an allocation in a marked function is stopped at `malloc`;
 - work on memory allocated beforehand, a block's conversions of time, and the engine's processor
@@ -224,3 +327,13 @@ Its cases:
   sleeping node and a failing node, all stay silent;
 - the collector's wake, without the suppressions, is stopped at `syscall`; with them, it passes;
 - a lock's wait right after the wake is still stopped, at the `syscall` of the futex wait.
+
+The backend's cases, on a JACK2 server the test starts on the dummy driver:
+
+- an allocation in a marked function is stopped at `malloc`;
+- `gettid` in a marked function is not stopped: the sanitizer does not intercept it, so the
+  thread-init callback's one call needs no suppression, though it runs outside any real-time
+  context anyway;
+- the backend playing the engine through periods, capture, events, a crossfade, a dip and a
+  processor replaced in place stays silent: the sanitizer checks every call inside the process
+  callback, libjack's included.

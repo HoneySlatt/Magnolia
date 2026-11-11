@@ -1,0 +1,31 @@
+[package]
+name = "magnolia-jack"
+description = "Magnolia's JACK backend: the engine played through the JACK API, on PipeWire and JACK2"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The processor this backend plays, and the device buffers it lends it (docs/ARCHITECTURE.md).
+magnolia-engine.workspace = true
+# The JACK API, loaded at run time, which PipeWire and JACK2 both serve (ADR-0007).
+jack.workspace = true
+# The audio thread's id and its scheduling policy, asked of the kernel (ADR-0023).
+libc.workspace = true
+# The queues that carry a new processor to the process callback and the old one back
+# (ADR-0022): they never allocate, lock or block once built.
+rtrb.workspace = true
+
+# Proves RealtimeSanitizer's verdicts on the backend. Only scripts/check.sh runs it, naming it, with
+# the nightly toolchain, `-Zsanitizer=realtime` and `--cfg magnolia_rtsan` (ADR-0019); `cargo test`
+# skips it.
+[[test]]
+name = "realtime_sanitizer"
+harness = false
+test = false
+
+[lints]
+workspace = true

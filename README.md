@@ -14,10 +14,11 @@ loops and stems.
 
 **Designed; the engine being built.** The direction, the quality bar and the first decisions were
 taken on 2026-11-06, the quality bar measured against the market on 2026-11-10. The Rust workspace
-and its checks exist, and the engine's time model; nothing plays sound yet. The first stage builds the audio engine and plugin hosting, without
-an interface; the interface comes at Stage 3, on [uwui](https://github.com/HoneySlatt/uwui), once a
-stable release of uwui holds what Magnolia needs. Magnolia is a later client of uwui, not one of the
-programs of its first stage.
+and its checks exist, the engine's time model, and a graph of nodes that plays through the JACK API,
+on PipeWire and JACK2, from an example program. The first stage builds the audio engine and plugin
+hosting, without an interface; the interface comes at Stage 3, on
+[uwui](https://github.com/HoneySlatt/uwui), once a stable release of uwui holds what Magnolia needs.
+Magnolia is a later client of uwui, not one of the programs of its first stage.
 
 ## Read next
 
@@ -37,6 +38,20 @@ nix develop --command scripts/check.sh
 ```
 
 [`CONTRIBUTING.md`](CONTRIBUTING.md) says how to build, test and run each check alone.
+
+## Play a sine
+
+The JACK backend's example plays a quiet sine (-20 dBFS) on PipeWire, at a period of 64 frames,
+connected to the sound card, crossfading to another sine every two seconds so that a click would
+be heard; then it says whether its audio thread ran in real time, and prints the engine's figures:
+
+```sh
+nix develop --command pw-jack -p 64 cargo run --release -p magnolia-jack --example play -- --connect
+```
+
+`pw-jack` comes with PipeWire's JACK support, outside the development shell. Without `--connect`,
+it plays to no port; connect it with a patchbay such as `qpwgraph`. Its other options are in
+[`CONTRIBUTING.md`](CONTRIBUTING.md#playing-through-jack).
 
 ## License
 

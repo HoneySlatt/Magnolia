@@ -65,17 +65,20 @@ cargo deny "${fuzz[@]}" --locked check
 # scripts and procedural macros, as the Unstable Book asks; a target directory of its own keeps
 # these builds from evicting the stable ones. The test gives each case the sanitizer's options:
 # reports symbolized by binutils' addr2line, so that the suppressions of rtsan-suppressions.txt
-# match the allowed calls by name (ADR-0023).
-step "RealtimeSanitizer stops an allocation and a lock's wait, passes the allowed wake, a block's conversions and the engine's processor"
+# match the allowed calls by name (ADR-0023). Each crate with real-time code has its own sanitizer
+# test; the JACK backend's starts a JACK2 server of its own, on the dummy driver.
+step "RealtimeSanitizer stops an allocation and a lock's wait, passes the allowed wake, a block's conversions, the engine's processor and the JACK backend's callback"
 command -v addr2line >/dev/null || {
     echo "addr2line is missing: the sanitizer's suppressions need symbolized reports (ADR-0023)" >&2
     exit 1
 }
 sanitizer_flags="-Zsanitizer=realtime --cfg magnolia_rtsan"
-sanitized=(--locked -p magnolia-engine --test realtime_sanitizer
-    --target x86_64-unknown-linux-gnu --target-dir "${CARGO_TARGET_DIR:-target}/realtime-sanitizer")
-RUSTFLAGS="$sanitizer_flags" nightly cargo clippy "${sanitized[@]}" -- -D warnings
-RUSTFLAGS="$sanitizer_flags" nightly cargo test "${sanitized[@]}"
+for crate in magnolia-engine magnolia-jack; do
+    sanitized=(--locked -p "$crate" --test realtime_sanitizer
+        --target x86_64-unknown-linux-gnu --target-dir "${CARGO_TARGET_DIR:-target}/realtime-sanitizer")
+    RUSTFLAGS="$sanitizer_flags" nightly cargo clippy "${sanitized[@]}" -- -D warnings
+    RUSTFLAGS="$sanitizer_flags" nightly cargo test "${sanitized[@]}"
+done
 
 # cargo fuzz builds with the nightly, libFuzzer and AddressSanitizer; a crash fails the step and
 # leaves its input in crates/magnolia-engine/fuzz/artifacts/. It takes no --locked: the fuzz crate's

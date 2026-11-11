@@ -11,7 +11,7 @@ which is not ready yet. It is licensed under GPL-3.0-or-later, its copyright hel
 alone ([ADR-0002](docs/adr/0002-gpl-3-0-or-later-copyright-kept.md)).
 
 Its real state: the design is done (ADRs 0001 to 0018); the workspace and its checks exist (M1.1);
-the engine holds the time model (M1.2) and plays nothing yet.
+the engine holds the time model (M1.2) and plays a graph through JACK (M1.3, in progress).
 
 Agents develop it; the owner sets its direction and validates its decisions. Anyone must be able to
 understand it from the repository alone. Documentation is part of every deliverable.

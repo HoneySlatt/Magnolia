@@ -44,6 +44,8 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
   one phase each, when the union of both graphs would hold a cycle or too many nodes.
 - **Drop-frame**: a timecode at 29.97 or 59.94 frames a second that skips frame labels, two or
   four at the start of each minute but every tenth, to stay in step with the clock.
+- **Dummy driver**: JACK2's driver that runs periods on a timer, without a sound card; the JACK
+  backend's tests run on it.
 - **Duplex**: input and output of a period handled in one callback.
 - **Fade**: a raised cosine over 5 ms, by which a swap's edges come in or go out; on one edge, a
   fade-in and its fade-out sum to one at every sample.
@@ -53,6 +55,11 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
   as a plugin's GUI will be.
 - **Futex ping-pong**: two processes that wake each other in turn through a futex; the least that
   any bridge between processes pays for a round trip.
+- **Frame time**: the server's count of frames since it started, 32 bits, which wraps after about
+  25 hours at 48 kHz; each period's first frame has one.
+- **Gap**: a period whose frame time does not follow on from the last one's, as when the server
+  skipped the client's cycles; the JACK backend counts them
+  ([`ARCHITECTURE.md`](ARCHITECTURE.md#what-the-callback-counts)).
 - **Generation**: how many nodes have occupied an arena slot before; a node's id holds it, so that
   an old id never reaches the node that reuses its slot.
 - **Gesture**: one action of the user that changes the project, such as a note drawn or a clip
@@ -79,6 +86,9 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
 - **Null**: two renders that cancel exactly when one is subtracted from the other.
 - **OSARA**: an extension that makes REAPER usable with a screen reader; Magnolia's reference for
   accessibility.
+- **Own overrun**: a period that Magnolia's callback itself made late: it started before the
+  period's deadline and ended after it, or its work took longer than a period
+  ([`ARCHITECTURE.md`](ARCHITECTURE.md#what-the-callback-counts)).
 - **Own cost**: what a program costs above a blank window: memory, start, processor, GPU power and
   a frame's time.
 - **Pattern**: a reusable block of notes and automation, over one or several instrument tracks.
@@ -101,6 +111,11 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
 - **Primary modifier**: the key that shortcuts use, Ctrl on Linux and Windows, Cmd on macOS.
 - **Processor**: the engine's real-time half, which a backend calls once a period; it applies swaps,
   runs the nodes and fills the device's buffers ([`ARCHITECTURE.md`](ARCHITECTURE.md#a-period)).
+- **pw-jack**: PipeWire's command that runs a program with PipeWire's libjack first on its library
+  path, so that a JACK client plays on PipeWire.
+- **Real-time rights**: what lets a thread run at real-time priority: rtkit, or the user's
+  real-time priority limit (`RLIMIT_RTPRIO`); without them the audio thread shares the processor
+  with every other program.
 - **Reference project**: a session fixed in M1.3 for each tier, on which the sound's budgets are
   measured, never tuned for afterwards ([`reference-projects.md`](reference-projects.md)).
 - **Render-ahead**: rendering tracks without live input before the playhead reaches them, on worker
