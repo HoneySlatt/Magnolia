@@ -15,7 +15,9 @@ loops and stems.
 **Designed; the engine being built.** The direction, the quality bar and the first decisions were
 taken on 2026-11-06, the quality bar measured against the market on 2026-11-10. The Rust workspace
 and its checks exist, the engine's time model, and a graph of nodes that plays through the JACK API
-from an example program: tested on JACK2, built for PipeWire too, which the owner checks by ear. The first stage builds the audio engine and plugin
+from an example program: tested on JACK2, built for PipeWire too, which the owner checks by ear. A
+command line plays a test session of audio and MIDI clips from disk through JACK: tested on JACK2,
+it plays to the bit what it renders offline. The first stage builds the audio engine and plugin
 hosting, without an interface; the interface comes at Stage 3, on
 [uwui](https://github.com/HoneySlatt/uwui), once a stable release of uwui holds what Magnolia needs.
 Magnolia is a later client of uwui, not one of the programs of its first stage.
@@ -52,6 +54,21 @@ nix develop --command pw-jack -p 64 cargo run --release -p magnolia-jack --examp
 `pw-jack` comes with PipeWire's JACK support, outside the development shell. Without `--connect`,
 it plays to no port; connect it with a patchbay such as `qpwgraph`. Its other options are in
 [`CONTRIBUTING.md`](CONTRIBUTING.md#playing-through-jack).
+
+## Play a test session
+
+The command line, `magnolia`, plays a test session of audio and MIDI clips from disk through JACK,
+then prints the engine's figures, or renders it into a WAV file. Generate the small session, about
+8 seconds, into a new folder; play it on PipeWire, connected to the sound card; render it:
+
+```sh
+nix develop --command cargo run --release -p magnolia-session --example generate -- small /tmp/magnolia-small
+nix develop --command pw-jack -p 64 cargo run --release -p magnolia-cli -- play /tmp/magnolia-small/session.json --connect
+nix develop --command cargo run --release -p magnolia-cli -- render /tmp/magnolia-small/session.json /tmp/magnolia-small.wav
+```
+
+`magnolia --help` gives its options; [`CONTRIBUTING.md`](CONTRIBUTING.md#playing-and-rendering-a-session)
+says more.
 
 ## License
 

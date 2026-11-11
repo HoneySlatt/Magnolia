@@ -145,21 +145,12 @@ struct Recorder {
     /// Its capacity is the length to record: it never grows on the audio thread.
     recording: Vec<f32>,
     recorded: Arc<AtomicUsize>,
-    /// The first frame and length of its last period, to count its own gaps.
-    last_period: Option<(u32, u32)>,
-    gaps: Arc<AtomicU64>,
+    gaps: Gaps,
 }
 
 impl ProcessHandler for Recorder {
     fn process(&mut self, _: &Client, scope: &ProcessScope) -> Control {
-        let period = (scope.last_frame_time(), scope.n_frames());
-        if let Some((start, frames)) = self.last_period
-            && frames == period.1
-            && period.0 != start.wrapping_add(frames)
-        {
-            self.gaps.fetch_add(1, Ordering::Relaxed);
-        }
-        self.last_period = Some(period);
+        self.gaps.note(scope);
         for sample in self.output.as_mut_slice(scope) {
             *sample = (self.signal)(self.played);
             self.played += 1;
@@ -191,8 +182,7 @@ impl Probe {
             played: 0,
             recording: Vec::with_capacity(length),
             recorded: Arc::clone(&recorded),
-            last_period: None,
-            gaps: Arc::clone(&gaps),
+            gaps: Gaps::new(Arc::clone(&gaps)),
         };
         let client = client.activate_async((), recorder).unwrap();
         Self {
@@ -236,6 +226,36 @@ impl Probe {
     pub fn finish(self) -> Vec<f32> {
         let (_, _, recorder) = self.client.deactivate().unwrap();
         recorder.recording
+    }
+}
+
+/// Counts a plain client's periods that do not follow on from the one before: cycles the server
+/// skipped. The first period, and the first after a change of the period's length, are never gaps.
+pub struct Gaps {
+    /// The first frame and length of the last period.
+    last_period: Option<(u32, u32)>,
+    count: Arc<AtomicU64>,
+}
+
+impl Gaps {
+    /// Counts into `count`.
+    pub fn new(count: Arc<AtomicU64>) -> Self {
+        Self {
+            last_period: None,
+            count,
+        }
+    }
+
+    /// Notes the period the client runs now, on its audio thread.
+    pub fn note(&mut self, scope: &ProcessScope) {
+        let period = (scope.last_frame_time(), scope.n_frames());
+        if let Some((start, frames)) = self.last_period
+            && frames == period.1
+            && period.0 != start.wrapping_add(frames)
+        {
+            self.count.fetch_add(1, Ordering::Relaxed);
+        }
+        self.last_period = Some(period);
     }
 }
 

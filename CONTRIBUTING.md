@@ -31,8 +31,9 @@ The first entry downloads both toolchains, about 1 GB.
 
 The engine is a library; the JACK backend plays it, and its example plays a sine
 ([Playing through JACK](#playing-through-jack)); the test session's crate reads, renders and
-generates sessions ([Test sessions](#test-sessions)). The commands that build and test them, and
-measure the time model's conversions:
+generates sessions ([Test sessions](#test-sessions)); the command line, `magnolia`, plays a session
+through JACK and renders one ([Playing and rendering a session](#playing-and-rendering-a-session)).
+The commands that build and test them, and measure the time model's conversions:
 
 ```sh
 cargo build --workspace
@@ -52,6 +53,15 @@ without stopping cleanly keeps its place in JACK2's registry of servers, which h
 shared memory in `/dev/shm`; once eight places are held so, no server starts. So after killing its
 server, a test starts one under the same name and stops it cleanly, which frees both, and removes
 the socket and semaphores named after that server (`tests/common/mod.rs`).
+
+The null through JACK (`tests/jack/session.rs`) plays the small test session for nine seconds at 64
+and at 256 frames. Its server runs in JACK2's synchronous mode with a client timeout of 5 s, `-S -t
+5000` before `-d`: without real time at 64 frames, the default mode skips a client's cycle every few
+seconds, which spoils a take, while the synchronous mode waits for a late client and reports an
+xrun instead (`Settings` in `tests/common/mod.rs` says why the timeout).
+
+The command line's tests (`crates/magnolia-cli/tests/cli/`) start their servers the same way,
+through the same `tests/common/mod.rs`, and refuse PipeWire's libjack too.
 
 ### Playing through JACK
 
@@ -79,18 +89,48 @@ A test session is a JSON file beside the WAV and MIDI files it names
 ([ARCHITECTURE](docs/ARCHITECTURE.md#the-test-session)). The generator writes one into an empty or
 new folder, outside the repository: `lowest` and `high`, the [reference
 projects](docs/reference-projects.md) without their plugins (0.67 and 2.18 GB), or `small`, about
-8 seconds of every feature of the format (7 MB). The render example plays one offline, from its
-start, into a WAV file of 32-bit floats it creates, in blocks of 4,096 frames or `--block N`:
+8 seconds of every feature of the format (7 MB):
 
 ```sh
 cargo run --release -p magnolia-session --example generate -- small /tmp/magnolia-small
-cargo run --release -p magnolia-session --example render -- /tmp/magnolia-small/session.json \
-    /tmp/magnolia-small.wav
+cargo run --release -p magnolia-session --example generate -- lowest /tmp/magnolia-lowest
+cargo run --release -p magnolia-session --example generate -- high /tmp/magnolia-high
 ```
 
 Both print what they wrote and how long it took; the render also prints the memory the session
 asks for, which may not pass 1 GiB. The render never writes over a file, and one that fails leaves
 nothing behind. Delete the folders afterwards: nothing cleans them.
+
+### Playing and rendering a session
+
+The command line, `magnolia` ([ARCHITECTURE](docs/ARCHITECTURE.md#the-command-line)), renders a
+session offline, from its start to its last clip's end and one second of tail, into a WAV file of
+32-bit floats it creates, never over a file, in blocks of 4,096 frames or `--block N`:
+
+```sh
+cargo run --release -p magnolia-cli -- render /tmp/magnolia-small/session.json /tmp/magnolia-small.wav
+```
+
+It plays one through JACK, on PipeWire through `pw-jack`, connected to the sound card:
+
+```sh
+pw-jack -p 64 cargo run --release -p magnolia-cli -- play /tmp/magnolia-small/session.json --connect
+```
+
+or on a JACK2 server of one's own, without a sound card:
+
+```sh
+jackd -n magnolia-try -r -d dummy -r 48000 -p 256 &
+cargo run --release -p magnolia-cli -- play /tmp/magnolia-small/session.json --server magnolia-try
+```
+
+Its options: `--server NAME` (the default server otherwise; it never starts one), `--connect`
+(connect to the first physical playback ports; off by default), `--from SECONDS` (where the play
+starts on the timeline, 0 by default), `--seconds N` (how long it plays; by default to the
+session's end and one second of tail). The server must run at the session's rate, 48 kHz for the
+generated sessions. Once stopped, it prints whether the audio thread ran in real time, the callback
+times, the counters, the disk reader's figures and each audio track's low-water mark.
+`magnolia --help` gives the usage.
 
 ## Fuzzing
 

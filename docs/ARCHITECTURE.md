@@ -15,6 +15,7 @@ reverse ([`AGENTS.md`](../AGENTS.md#architecture-rules)).
 |---|---|---|
 | `magnolia-engine` | The audio engine ([ADR-0007](adr/0007-the-audio-engine.md)): the graph of nodes, its swaps and its real-time processor (module `engine`), the node contract (`node`) and the engine's own nodes (`nodes`), audio clips streamed from disk by the disk reader and played by the audio players (`disk`, [ADR-0026](adr/0026-one-stream-per-audio-track.md)), what a backend lends each period (`device`), a backend without a device (`offline`), the engine's statistics (`stats`, `callback_times`), the time model (`time`), and WAV files read, decoded and written by its own code (`wav`, [ADR-0029](adr/0029-magnolias-own-wav-and-midi-file-readers.md)). It holds no audio backend: backends are crates of their own. | `rtrb` |
 | `magnolia-jack` | The JACK backend: plays the engine's processor through the JACK API, on PipeWire and JACK2, and says whether its audio thread runs in real time ([below](#the-jack-backend)). | `magnolia-engine`, `jack`, `libc`, `rtrb` |
+| `magnolia-cli` | The command line, the binary `magnolia`, which drives Magnolia until the interface comes ([ADR-0006](adr/0006-the-interface-on-uwui-after-the-engine-and-the-project.md)): it plays a test session through the JACK backend and renders one offline ([below](#the-command-line)). | `magnolia-engine`, `magnolia-jack`, `magnolia-session` |
 | `magnolia-session` | The test session of M1.4, which only the tests and the command line read and Stage 2's project replaces ([ADR-0028](adr/0028-the-test-session-in-json.md), [below](#the-test-session)): its JSON file and the checks that need no file on disk (`file`), its loader (`load`), the graph it builds into an engine (`build`), the offline render (`render`), a player for the command line (`play`), the generator of the reference projects (`generate`), and Standard MIDI Files of format 0 and 1 read and written by its own code (`midi_file`, [ADR-0029](adr/0029-magnolias-own-wav-and-midi-file-readers.md)). | `magnolia-engine`, `serde`, `serde_json` |
 
 Each crate's fuzz targets live in its `fuzz/` folder, a workspace of its own, so that the
@@ -583,6 +584,16 @@ reach a live PipeWire. A server without real time on a busy machine may skip a c
 which breaks a recording; the tests that compare a recording sample by sample take it again when
 the gap counters show a skipped cycle, five times at most.
 
+`tests/jack/session.rs` is the null through JACK: the small test session, played by a
+`SessionPlayer` through the backend at 64 and at 256 frames, equals its offline render to the bit
+from the play's first audible sample. Its recorder reads, in each period, the engine sample at
+which Magnolia's period started (`EngineStats::block_start`): JACK runs it after Magnolia, whose
+outputs it reads, so the recording is aligned on the engine's own samples, and the first audible
+sample is where `EngineStats::play_start` says. A take lasts nine seconds, in which the default,
+asynchronous server skips a cycle every few seconds at 64 frames without real time; so its server
+runs in JACK2's synchronous mode, `-S`, which waits for a late client and reports an xrun instead,
+with a client timeout of 5 s, `-t 5000`, which a loaded machine needs there.
+
 ## The test session
 
 `magnolia-session` reads, plays and generates the test session of M1.4
@@ -725,7 +736,46 @@ to do when the generator changes on purpose.
 
 The test session's limits: the format holds no comments; buses have no sends; the only instrument
 is the test synth; only mono feeds a wider strip, and only a stereo one; a MIDI clip has no offset
-into its file. The command line that plays a session through JACK is not built yet.
+into its file.
+
+## The command line
+
+`magnolia`, the binary of `magnolia-cli`, plays a test session through the JACK backend and renders
+one offline; `magnolia --help` gives its usage, and
+[CONTRIBUTING](../CONTRIBUTING.md#playing-and-rendering-a-session) its commands. It reads its
+arguments by hand (`arguments.rs`). A misuse exits with 2 and the usage, any other failure with 1;
+each is one plain sentence on standard error, and bad arguments or a bad session never panic.
+Seconds, as `--from 1.5`, are read exactly into time units, digits and a fraction, then placed on
+the session's samples by `place`.
+
+`magnolia render <session.json> <out.wav> [--block FRAMES]` runs [`render`](#the-offline-render)
+into a file it creates, never over one, and removes that file when the render fails.
+
+`magnolia play <session.json> [--server NAME] [--connect] [--from SECONDS] [--seconds N]`
+(`play.rs`):
+
+1. opens the session, and the span to play: from `--from` for `--seconds`, or up to the session's
+   last sample and one second of tail, as the render;
+2. builds a `SessionPlayer` and opens the JACK backend on its processor, on the named server or the
+   default one; a server at another rate than the session's is an error;
+3. starts the play ([`SessionPlayer::start`](#the-offline-render), the disk reader given 30 s to
+   prime), then waits until the output has played the span, counted from the play's first audible
+   sample on the engine's own clock (`EngineStats::play_start` and `block_start`), not the wall
+   clock;
+4. stops, and waits for the stop to play out: the pre-roll's length, the fade and the test synth's
+   release, 5 ms each, and 100 ms of margin;
+5. asks the kernel whether the audio thread runs in real time, while it still runs, closes the
+   client, and prints that report, the player's `PlayReport` and the gaps in the server's frame
+   time.
+
+Between two looks at the engine, the main thread sleeps for what is left to play, at least a period
+and at most a second. It gives up when the server shuts the client down, when the backend's
+callback panics, or when no period has run for 2 s. A play during which the engine or the
+backend's callback panicked prints its figures, then exits with 1.
+
+Its limits: the disk reader reads the session's fixed 10 seconds ahead, as `SessionPlayer` takes no
+read-ahead; Ctrl-C ends the process at once, without the stop's fade or the figures; the play
+starts once, with no locate or loop while it rolls.
 
 ## Checking the real-time path
 

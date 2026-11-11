@@ -19,6 +19,10 @@ libc.workspace = true
 # (ADR-0022): they never allocate, lock or block once built.
 rtrb.workspace = true
 
+[dev-dependencies]
+# The test session, played through the backend and rendered offline: the null of tests/jack/session.rs.
+magnolia-session.workspace = true
+
 # Proves RealtimeSanitizer's verdicts on the backend. Only scripts/check.sh runs it, naming it, with
 # the nightly toolchain, `-Zsanitizer=realtime` and `--cfg magnolia_rtsan` (ADR-0019); `cargo test`
 # skips it.

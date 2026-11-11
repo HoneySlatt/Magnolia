@@ -1,0 +1,32 @@
+[package]
+name = "magnolia-cli"
+description = "Magnolia's command line, `magnolia`: a test session played through JACK, or rendered offline"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "magnolia"
+path = "src/main.rs"
+
+[dependencies]
+# The time model, which places the options' seconds on the session's samples, and the engine's
+# statistics, which `play` watches.
+magnolia-engine.workspace = true
+# The JACK backend that `play` plays through.
+magnolia-jack.workspace = true
+# The test session: opened, rendered offline, played through a backend.
+magnolia-session.workspace = true
+
+# The JACK backend's test server, which the tests of `play` share with the backend's own tests
+# (tests/cli/main.rs): it opens a JACK client to know when the server serves, and stops the server
+# by its pid.
+[dev-dependencies]
+jack.workspace = true
+libc.workspace = true
+
+[lints]
+workspace = true

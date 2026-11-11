@@ -8,6 +8,8 @@ members = ["crates/*"]
 # (AGENTS.md). Versions live here once; crates take them with `workspace = true`.
 [workspace.dependencies]
 magnolia-engine = { path = "crates/magnolia-engine" }
+magnolia-jack = { path = "crates/magnolia-jack" }
+magnolia-session = { path = "crates/magnolia-session" }
 # The JACK API, which PipeWire and JACK2 both serve (ADR-0007). It loads libjack at run time, so the
 # engine starts and says so when JACK is missing; its `log` feature is off.
 jack = { version = "0.14", default-features = false, features = ["dynamic_loading"] }
