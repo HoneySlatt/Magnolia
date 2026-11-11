@@ -67,8 +67,10 @@ average between 4 and 16.
 | A release build from nothing | 0.80 s | 10 min |
 | A full check from nothing | 84 s | 3 min |
 | A full check, nothing changed | 49 s | — |
+| The CI job | 2 min 17 s | 20 min |
 
-These were taken before the closing review's fixes, which added a few tests. The review measured a
+The CI job's time is that of run 42953280799, of commit `e3a3a7d`, one run. The other figures were
+taken before the closing review's fixes, which added a few tests. The review measured a
 full check from nothing again, at 118 s, while the load average rose from 16 to 89.
 
 Four-fifths of a check with nothing changed is the fuzzing, 20 s per target; a check from nothing
