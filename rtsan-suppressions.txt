@@ -8,3 +8,8 @@
 # The processor wakes the collector thread after handing it what it let go: a futex wake through
 # `Thread::unpark`, made only when the collector sleeps.
 call-stack-contains:magnolia_engine::engine::collector::wake_collector
+
+# An audio player wakes the disk reader's thread when its stream runs low: a futex wake through
+# `Thread::unpark`, made only when the reader sleeps and no other player has asked since it last
+# woke (ADR-0026).
+call-stack-contains:magnolia_engine::disk::reader::wake_disk_reader

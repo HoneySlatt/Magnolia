@@ -60,6 +60,12 @@ impl FadeTable {
         Self { fade_in }
     }
 
+    /// The fade-in gain at each sample of the fade, in order: what an audio clip is multiplied by
+    /// where a play starts inside it. The fade-out gain at a sample is one minus it.
+    pub(crate) fn fade_in(&self) -> &[f32] {
+        &self.fade_in
+    }
+
     /// An edge's gain over `frames` samples, from sample `elapsed` of its phase. Past the table, a
     /// fade-in has ended at 1 and a fade-out at 0; the processor cuts sub-blocks at a phase's end,
     /// so a fading phase never reads past it.

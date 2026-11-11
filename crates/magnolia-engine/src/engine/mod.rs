@@ -73,9 +73,10 @@ pub use processor::Processor;
 pub use sequence::{
     ControllerPoint, MidiClip, MidiNote, MidiSequence, PitchBendPoint, SequenceError,
 };
+pub use transport::Cue;
 
 pub(crate) use delay_line::DelayLine;
-pub(crate) use fade::fade_frames;
+pub(crate) use fade::{FadeTable, fade_frames};
 
 use arena::Arena;
 use collector::{RELEASED_PER_SWAP, start_collector};
@@ -83,7 +84,6 @@ use compensation::Compensated;
 use compile::{CompileContext, compile};
 use controller::{ControllerParts, MESSAGE_CAPACITY};
 use events::EventInbox;
-use fade::FadeTable;
 use pool::BufferPool;
 use processor::ProcessorParts;
 use sources::SourceReader;

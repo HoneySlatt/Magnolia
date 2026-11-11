@@ -140,6 +140,12 @@ pub struct Transport {
     /// The timeline samples that play since the last play: none before its start, none from its
     /// stop.
     pub audible: AudibleRegion,
+    /// The generation of the disk streams the last play reads: the one its
+    /// [`Cue`](crate::engine::Cue) carried, which the disk reader's
+    /// [`locate`](crate::disk::DiskReader::locate) gave; 0 for a play without one. An audio player
+    /// reads only what its stream holds for this generation
+    /// ([ADR-0026](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0026-one-stream-per-audio-track.md)).
+    pub generation: u64,
 }
 
 impl Transport {
@@ -151,6 +157,7 @@ impl Transport {
             start: SamplePosition(0),
             stop: Some(SamplePosition(0)),
         },
+        generation: 0,
     };
 }
 

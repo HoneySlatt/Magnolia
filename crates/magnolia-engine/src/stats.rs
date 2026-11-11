@@ -10,11 +10,12 @@
     clippy::arithmetic_side_effects
 )]
 
-use std::hint::{self, black_box};
+use std::hint::black_box;
 use std::sync::Arc;
-use std::sync::atomic::{self, AtomicBool, AtomicI32, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, Ordering};
 
 use crate::callback_times::CallbackTimes;
+use crate::seqlock::SeqLock;
 use crate::time::SamplePosition;
 
 /// The engine's counters, flags and histogram: atomics only, so the real-time thread updates them
@@ -35,12 +36,20 @@ pub struct EngineStats {
     non_finite_samples: AtomicU64,
     generation_mismatches: AtomicU64,
     missed_plugin_deadlines: AtomicU64,
+    disk_underruns: AtomicU64,
+    /// The last generation of disk streams handed out, by any disk reader of this engine.
+    generations: AtomicU64,
+    /// The latest generation a disk reader has primed.
+    primed_generation: AtomicU64,
     poisoned: AtomicBool,
     own_overruns: AtomicU64,
     frame_time_gaps: AtomicU64,
     server_xruns: AtomicU64,
     audio_thread_id: AtomicI32,
-    play_start: PlayStartCell,
+    /// The last play's start: its sequence number, then the engine sample at which the output
+    /// reaches its first timeline sample, as an `i64`'s bits. The processor writes it, never
+    /// waiting; a reader that meets a write tries again.
+    play_start: SeqLock<2>,
 }
 
 /// Where the last play started: the play's sequence number, as
@@ -54,16 +63,6 @@ pub struct PlayStart {
     pub sequence: u64,
     /// The engine sample at which the output plays the play's first timeline sample.
     pub audible_at: SamplePosition,
-}
-
-/// The last play's start, written by the processor and read whole by any thread: a sequence lock
-/// over two atomics. The processor never waits; a reader that meets a write tries again.
-#[derive(Debug, Default)]
-struct PlayStartCell {
-    /// Odd while the processor writes.
-    version: AtomicU64,
-    sequence: AtomicU64,
-    audible_at: AtomicI64,
 }
 
 impl EngineStats {
@@ -131,6 +130,21 @@ impl EngineStats {
         self.missed_plugin_deadlines.load(Ordering::Relaxed)
     }
 
+    /// How many frames the audio players lacked, summed over every player: frames of a play's
+    /// audible region that their disk stream did not hold ready when the player reached them, and
+    /// which it played as silence
+    /// ([ADR-0026](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0026-one-stream-per-audio-track.md)).
+    pub fn disk_underruns(&self) -> u64 {
+        self.disk_underruns.load(Ordering::Relaxed)
+    }
+
+    /// The latest generation of disk streams that a disk reader has primed: every stream holds what
+    /// a play from its cue reads first. A play of a later generation waits for it
+    /// ([`Controller::play`](crate::engine::Controller::play)); 0 before any.
+    pub fn primed_generation(&self) -> u64 {
+        self.primed_generation.load(Ordering::Acquire)
+    }
+
     /// Whether a panic poisoned the processor: from then on it writes silence
     /// ([ADR-0022](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0022-a-panic-on-the-real-time-path-gives-silence.md)).
     pub fn poisoned(&self) -> bool {
@@ -162,22 +176,11 @@ impl EngineStats {
 
     /// Where the last play started, once a play has; the controller numbers plays from 1.
     pub fn play_start(&self) -> Option<PlayStart> {
-        let cell = &self.play_start;
-        loop {
-            let before = cell.version.load(Ordering::Acquire);
-            let sequence = cell.sequence.load(Ordering::Relaxed);
-            let audible_at = cell.audible_at.load(Ordering::Relaxed);
-            // Orders the reads of the values before the second read of the version.
-            atomic::fence(Ordering::Acquire);
-            let after = cell.version.load(Ordering::Relaxed);
-            if before == after && before.is_multiple_of(2) {
-                return (sequence > 0).then_some(PlayStart {
-                    sequence,
-                    audible_at: SamplePosition(audible_at),
-                });
-            }
-            hint::spin_loop();
-        }
+        let [sequence, audible_at] = self.play_start.read();
+        (sequence > 0).then_some(PlayStart {
+            sequence,
+            audible_at: SamplePosition(audible_at as i64),
+        })
     }
 
     /// Counts one period the processor finished after the device's deadline. Real-time safe.
@@ -217,6 +220,9 @@ impl EngineStats {
             &stats.non_finite_samples,
             &stats.generation_mismatches,
             &stats.missed_plugin_deadlines,
+            &stats.disk_underruns,
+            &stats.generations,
+            &stats.primed_generation,
             &stats.own_overruns,
             &stats.frame_time_gaps,
             &stats.server_xruns,
@@ -225,12 +231,6 @@ impl EngineStats {
             counter.store(zero, Ordering::Relaxed);
         }
         stats.block_start.store(black_box(0), Ordering::Relaxed);
-        stats.play_start.version.store(zero, Ordering::Relaxed);
-        stats.play_start.sequence.store(zero, Ordering::Relaxed);
-        stats
-            .play_start
-            .audible_at
-            .store(black_box(0), Ordering::Relaxed);
         stats.poisoned.store(black_box(false), Ordering::Relaxed);
         stats.audio_thread_id.store(black_box(0), Ordering::Relaxed);
         stats
@@ -244,18 +244,10 @@ impl EngineStats {
         self.block_start.store(position.0, Ordering::Relaxed);
     }
 
-    /// Publishes a play's start. Never waits: the readers are the ones that try again.
+    /// Publishes a play's start. Never waits: the readers are the ones that try again. Only the
+    /// processor writes it.
     pub(crate) fn publish_play_start(&self, sequence: u64, audible_at: SamplePosition) {
-        let cell = &self.play_start;
-        let version = cell.version.load(Ordering::Relaxed);
-        cell.version
-            .store(version.wrapping_add(1), Ordering::Relaxed);
-        // Orders the odd version before the values' writes, for a reader that sees a value.
-        atomic::fence(Ordering::Release);
-        cell.sequence.store(sequence, Ordering::Relaxed);
-        cell.audible_at.store(audible_at.0, Ordering::Relaxed);
-        cell.version
-            .store(version.wrapping_add(2), Ordering::Release);
+        self.play_start.write([sequence, audible_at.0 as u64]);
     }
 
     pub(crate) fn publish_swap_applied(&self, sequence: u64) {
@@ -298,6 +290,26 @@ impl EngineStats {
             self.generation_mismatches
                 .fetch_add(count, Ordering::Relaxed);
         }
+    }
+
+    pub(crate) fn count_disk_underruns(&self, frames: u64) {
+        if frames > 0 {
+            self.disk_underruns.fetch_add(frames, Ordering::Relaxed);
+        }
+    }
+
+    /// A new generation of disk streams, above every one handed out before on this engine, so that
+    /// a disk reader made again, or a second one, never reuses one. From 1.
+    pub(crate) fn next_generation(&self) -> u64 {
+        self.generations
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1)
+    }
+
+    /// Publishes that a disk reader has primed `generation`. Never lowers what was published.
+    pub(crate) fn publish_primed(&self, generation: u64) {
+        self.primed_generation
+            .fetch_max(generation, Ordering::Release);
     }
 
     pub(crate) fn count_latency_capped(&self) {

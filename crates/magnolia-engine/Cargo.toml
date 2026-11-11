@@ -24,5 +24,11 @@ test = false
 name = "time_conversions"
 harness = false
 
+# Measures the disk reader's refills and throughput, cold and warm, and the players' low-water mark
+# over 30 s of playing; prints its figures (docs/measurements.md).
+[[bench]]
+name = "disk_reader"
+harness = false
+
 [lints]
 workspace = true

@@ -20,6 +20,15 @@
 //! - **Play while rolling**: a stop as above, then the new play at the first period after it ends;
 //!   at once if the stop is.
 //!
+//! A play starts from a [`Cue`]: its timeline sample, and the generation of the disk streams it
+//! reads, which the disk reader's `locate` gave, or 0 for none. Each node sees the generation of
+//! the play under way in its [`Transport`], so that an audio player reads only what its stream
+//! holds for that play
+//! ([ADR-0026](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0026-one-stream-per-audio-track.md)).
+//! A play of a generation above 0 starts only once a disk reader has published it primed
+//! ([`EngineStats::primed_generation`]): it waits, as a play while rolling waits for its stop, and
+//! the transport looks again at each period's start, never waiting itself.
+//!
 //! Commands come through a queue of their own and apply at a period's start, after any swap, so a
 //! play pre-rolls by the compensation of the graph about to play. A swap that changes the
 //! compensation while the transport rolls keeps the running clock.
@@ -53,11 +62,61 @@ pub(crate) enum TransportCommand {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Play {
     pub(crate) from: SamplePosition,
+    /// The generation of the disk streams it reads; 0 for none.
+    pub(crate) generation: u64,
     pub(crate) sequence: u64,
 }
 
+/// Where a play starts: a timeline sample, and the generation of the disk streams it reads
+/// ([ADR-0026](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0026-one-stream-per-audio-track.md)).
+///
+/// [`DiskReader::locate`](crate::disk::DiskReader::locate) gives a cue whose streams it fills from
+/// that sample, of a generation the engine numbers; [`Controller::play`](super::Controller::play)
+/// plays it, once the reader has primed it. A sample alone is a cue of generation 0, which no
+/// stream ever holds: enough for MIDI, silent for audio players, which count what they lack as
+/// underruns. Only the cue of the reader's last locate plays its streams, and once: the controller
+/// refuses a cue of a generation it has sent already, or older.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Cue {
+    start: SamplePosition,
+    generation: u64,
+}
+
+impl Cue {
+    /// A cue of a generation the disk reader has located.
+    pub(crate) fn new(start: SamplePosition, generation: u64) -> Self {
+        Self { start, generation }
+    }
+
+    /// The timeline sample the play starts from.
+    pub fn start(&self) -> SamplePosition {
+        self.start
+    }
+
+    /// The generation of the disk streams the play reads; 0 for none.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
+impl From<SamplePosition> for Cue {
+    /// A cue that reads no disk stream.
+    fn from(start: SamplePosition) -> Self {
+        Self {
+            start,
+            generation: 0,
+        }
+    }
+}
+
+/// Whether a play may start, as far as its disk streams go: it reads none, or a disk reader has
+/// primed its generation.
+fn is_primed(play: &Play, stats: &EngineStats) -> bool {
+    play.generation == 0 || stats.primed_generation() >= play.generation
+}
+
 /// The processor's transport: its clock, the audible region, and a play that waits for a stop to
-/// end.
+/// end or for its cue to be primed.
 pub(crate) struct TransportClock {
     commands: Consumer<TransportCommand>,
     /// The 5 ms by which a stop lets every path reach the same sample.
@@ -70,10 +129,13 @@ pub(crate) struct TransportClock {
     from: i64,
     /// The audible region's stop, once asked for.
     stop: Option<i64>,
-    /// A play asked while rolling, which starts at the first period after the stop ends.
+    /// A play that waits: asked while rolling, it starts at the first period after the stop ends;
+    /// of a generation not yet primed, at the first period that finds it primed.
     waiting: Option<Play>,
     /// The number of the last play started; 0 before any.
     play: u64,
+    /// The generation of the disk streams the last play started reads; 0 for none.
+    generation: u64,
 }
 
 impl TransportClock {
@@ -88,6 +150,7 @@ impl TransportClock {
             stop: Some(0),
             waiting: None,
             play: 0,
+            generation: 0,
         }
     }
 
@@ -102,7 +165,7 @@ impl TransportClock {
     ) {
         let compensation = i64::try_from(compensation).unwrap_or(i64::MAX);
         if !self.rolling
-            && let Some(play) = self.waiting.take()
+            && let Some(play) = self.waiting.take_if(|play| is_primed(play, stats))
         {
             self.start(play, period_start, compensation, stats);
         }
@@ -112,9 +175,10 @@ impl TransportClock {
                     if self.rolling {
                         self.ask_to_stop(compensation);
                     }
-                    if self.rolling {
+                    if self.rolling || !is_primed(&play, stats) {
                         self.waiting = Some(play);
                     } else {
+                        self.waiting = None;
                         self.start(play, period_start, compensation, stats);
                     }
                 }
@@ -133,6 +197,7 @@ impl TransportClock {
     fn start(&mut self, play: Play, period_start: i64, compensation: i64, stats: &EngineStats) {
         self.rolling = true;
         self.play = play.sequence;
+        self.generation = play.generation;
         self.from = play.from.0;
         self.stop = None;
         self.clock = play.from.0.saturating_sub(compensation);
@@ -181,6 +246,7 @@ impl TransportClock {
                 start: SamplePosition(self.from),
                 stop: self.stop.map(SamplePosition),
             },
+            generation: self.generation,
         }
     }
 

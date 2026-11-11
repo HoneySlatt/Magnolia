@@ -21,10 +21,10 @@ use super::graph::{Destination, Edge, GraphError, NodeId, Source};
 use super::pool::BufferPool;
 use super::sequence::MidiSequence;
 use super::sources::TimelineSources;
-use super::transport::{Play, TransportCommand};
+use super::transport::{Cue, Play, TransportCommand};
 use crate::node::{MAX_LATENCY, Node};
 use crate::stats::EngineStats;
-use crate::time::{SamplePosition, TempoMap};
+use crate::time::TempoMap;
 
 /// The engine's non-real-time half, made with its [`Processor`](super::Processor) by
 /// [`engine::new`](super::new).
@@ -59,6 +59,8 @@ pub struct Controller {
     transport: Producer<TransportCommand>,
     /// How many plays have been sent, to number the next.
     plays_sent: u64,
+    /// The highest generation of disk streams a play has been sent with; 0 before any.
+    last_generation_played: u64,
     /// How many events the processor holds at once, queued or pending; the controller holds as
     /// many at most, waiting for their swap.
     event_capacity: usize,
@@ -156,6 +158,9 @@ pub enum TransportError {
     /// The queue of transport commands is full: the processor takes them all at its next period.
     /// Send the command again after a period.
     QueueFull,
+    /// The cue's generation was played already, or an older one than a generation played: locate
+    /// again for a new cue.
+    CueAlreadyPlayed,
 }
 
 /// Capacity of the queue that carries swaps. One swap is in flight at most; a second place lets
@@ -188,6 +193,7 @@ impl Controller {
             events: parts.events,
             transport: parts.transport,
             plays_sent: 0,
+            last_generation_played: 0,
             event_capacity: parts.event_capacity,
             events_pushed: 0,
             draft: Description::default(),
@@ -268,26 +274,44 @@ impl Controller {
         self.sources.tempo_map = Some(tempo_map);
     }
 
-    /// Plays from a timeline sample, `from`: the processor applies it at its next period's start.
-    /// Returns the play's sequence number, from 1, by which [`EngineStats::play_start`] says when
-    /// the output reaches `from`: the transport pre-rolls by the graph's largest compensation, so
-    /// that every path reaches the output on `from` together. While the transport rolls, it stops
-    /// first, as [`stop`](Self::stop) does, and the play starts at the first period after the stop
-    /// ends.
-    pub fn play(&mut self, from: SamplePosition) -> Result<u64, TransportError> {
+    /// Plays from a cue: a timeline sample, `from`, and the generation of the disk streams the
+    /// play reads, which [`DiskReader::locate`](crate::disk::DiskReader::locate) gave; a sample
+    /// alone reads none. The processor applies it at its next period's start. Returns the play's
+    /// sequence number, from 1, by which [`EngineStats::play_start`] says when the output reaches
+    /// `from`: the transport pre-rolls by the graph's largest compensation, so that every path
+    /// reaches the output on `from` together. While the transport rolls, it stops first, as
+    /// [`stop`](Self::stop) does, and the play starts at the first period after the stop ends. A
+    /// play of a generation above 0 starts only at a period that finds that generation primed
+    /// ([`EngineStats::primed_generation`]): send its cue at once after its locate, rolling or not.
+    ///
+    /// A cue plays once: the engine numbers generations, across every disk reader made on it, and
+    /// a cue whose generation is not above every generation sent before is refused,
+    /// [`TransportError::CueAlreadyPlayed`].
+    pub fn play(&mut self, cue: impl Into<Cue>) -> Result<u64, TransportError> {
+        let cue = cue.into();
+        let generation = cue.generation();
+        if generation != 0 && generation <= self.last_generation_played {
+            return Err(TransportError::CueAlreadyPlayed);
+        }
         let sequence = self.plays_sent + 1;
+        let play = Play {
+            from: cue.start(),
+            generation,
+            sequence,
+        };
         self.transport
-            .push(TransportCommand::Play(Play { from, sequence }))
+            .push(TransportCommand::Play(play))
             .map_err(|_| TransportError::QueueFull)?;
         self.plays_sent = sequence;
+        self.last_generation_played = self.last_generation_played.max(generation);
         Ok(sequence)
     }
 
     /// Stops the transport, applied at the processor's next period's start. Every path ends on
     /// the same timeline sample: what the most latent node has read, plus a fade's 5 ms. There each
     /// node's sources end the notes it holds, release the sustain pedal and reset the pitch bend.
-    /// A stop asked before anything audible was read stops at once, silent. A play waiting for a
-    /// stop is cancelled.
+    /// A stop asked before anything audible was read stops at once, silent. A play that waits, for
+    /// a stop or for its cue to be primed, is cancelled.
     pub fn stop(&mut self) -> Result<(), TransportError> {
         self.transport
             .push(TransportCommand::Stop)
@@ -707,6 +731,10 @@ impl fmt::Display for TransportError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::QueueFull => write!(formatter, "the queue of transport commands is full"),
+            Self::CueAlreadyPlayed => write!(
+                formatter,
+                "the cue's generation of the disk streams was played already: locate again"
+            ),
         }
     }
 }

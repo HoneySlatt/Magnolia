@@ -1,13 +1,18 @@
 //! A swap takes no page fault on the processing thread: every page the processor will touch was
-//! written by the controller first. RealtimeSanitizer cannot see a page fault, which is not a
-//! call; the kernel counts them per thread, in field 10 of `/proc/thread-self/stat`.
+//! written by the controller first; nor do audio players, whose streams' slots are written when
+//! they are made. RealtimeSanitizer cannot see a page fault, which is not a call; the kernel counts
+//! them per thread, in field 10 of `/proc/thread-self/stat`.
 
 use std::fs::File;
 use std::io::Read;
+use std::time::Duration;
 
+use magnolia_engine::disk::BLOCK_FRAMES;
 use magnolia_engine::engine::{Commit, Destination, NodeId, Source};
 use magnolia_engine::nodes::{Gain, Sine, TestLatency};
+use magnolia_engine::wav::SampleFormat;
 
+use crate::disk_support::{DiskRig, Reader, TempDir, TrackSpec, clip, write_wav};
 use crate::support::{Rig, rate};
 
 const PERIOD: usize = 64;
@@ -160,5 +165,44 @@ fn a_swap_that_adds_or_removes_a_delay_line_takes_no_page_fault_after_warm_up() 
     assert!(
         faults[2..].iter().all(|&faults| faults == 0),
         "faults per swap with a delay line: {faults:?}"
+    );
+}
+
+#[test]
+fn audio_players_take_no_page_fault_on_the_processing_thread_after_warm_up() {
+    let dir = TempDir::new("page-faults");
+    let tracks: Vec<TrackSpec> = (0..2)
+        .map(|track| {
+            let name = format!("track-{track}.wav");
+            let file = write_wav(&dir, &name, SampleFormat::Int24, 2, 120_000, 20 + track);
+            TrackSpec {
+                channels: 2,
+                clips: vec![clip(&file, 0, 0, 120_000, 1.0)],
+            }
+        })
+        .collect();
+    // Eight blocks ahead: a ring of ten slots, 40,960 frames.
+    let mut rig = DiskRig::new(&tracks, Reader::Thread, PERIOD, 8 * BLOCK_FRAMES as u64);
+    rig.play_from(0);
+    // Each round plays 400 periods of 64 frames, 25,600 frames, five eighths of the ring; the three
+    // rounds measured go nearly twice round it, so the reader rewrites every slot while the players
+    // read. The first round warms the code and the stack.
+    let mut rounds = Vec::new();
+    for _ in 0..4 {
+        let mut faults = 0;
+        for _ in 0..400 {
+            assert!(rig.reader.wait_idle(Duration::from_secs(10)));
+            let before = minor_faults();
+            rig.rig.backend.play_period(PERIOD, &[]);
+            faults += minor_faults() - before;
+            rig.rig.controller.poll();
+        }
+        rounds.push(faults);
+    }
+    println!("minor faults per round of audio playing: {rounds:?}");
+    assert_eq!(rig.rig.controller.stats().disk_underruns(), 0);
+    assert!(
+        rounds[1..].iter().all(|&faults| faults == 0),
+        "faults per round of audio playing: {rounds:?}"
     );
 }

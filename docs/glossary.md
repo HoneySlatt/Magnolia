@@ -13,12 +13,15 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
 - **Audible region**: the timeline samples a play makes heard, from the position asked for up to
   the stop; a timeline source plays only the events inside it
   ([`ARCHITECTURE.md`](ARCHITECTURE.md#the-transport)).
+- **Audio player**: the node that plays an audio track's stream on the real-time thread, at its own
+  position on the timeline ([`ARCHITECTURE.md`](ARCHITECTURE.md#audio-clips-from-disk)).
 - **BBT**: a musical position in bars, beats and ticks.
 - **Best rival**: on a criterion, the rival that does best, measured; a lead is a margin over it
   ([ADR-0014](adr/0014-the-quality-bar-measured-against-the-market.md)).
 - **Blank window**: a window that only clears and presents. What a program adds above it is its
   *own cost* ([ADR-0014](adr/0014-the-quality-bar-measured-against-the-market.md)).
-- **Block**: the frames the engine processes in one callback, a period's worth.
+- **Block**: the frames the engine processes in one callback, a period's worth. A stream's block is
+  another thing: 4,096 frames of a track's clips, mixed, what one slot holds.
 - **Buffer pool**: the one set of channel buffers the engine's processor works in, an input region and
   an output region, each channel a stride long; compiled graphs name its channels by index
   ([`ARCHITECTURE.md`](ARCHITECTURE.md#memory-the-real-time-thread-touches)).
@@ -42,12 +45,16 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
 - **Crossfade**: a swap whose one fading phase runs the union of the old and new graphs, the paths
   removed fading out while the paths added fade in, one fade on each path that changes
   ([`ARCHITECTURE.md`](ARCHITECTURE.md#a-swap)).
+- **Cue**: where a play starts: a timeline sample, and the generation of the disk streams it reads,
+  which a locate gives ([`ARCHITECTURE.md`](ARCHITECTURE.md#the-transport)).
 - **DAWbench's method**: instances of one plugin, or an instrument's voices, added until the first
   xrun or missed deadline; the count measures a DAW's processing power.
 - **Deadline**: the share of a period past which a plugin's answer is not awaited and its block is
   silent ([ADR-0003](adr/0003-every-plugin-out-of-the-engines-process.md)).
 - **Dip**: a swap that fades the old graph's removed edges out, then the new graph's added edges in,
   one phase each, when the union of both graphs would hold a cycle or too many nodes.
+- **Disk reader**: the thread that reads audio clips from their files ahead of the playhead and
+  fills each audio track's stream ([ADR-0026](adr/0026-one-stream-per-audio-track.md)).
 - **Drop-frame**: a timecode at 29.97 or 59.94 frames a second that skips frame labels, two or
   four at the start of each minute but every tenth, to stay in step with the clock.
 - **Dummy driver**: JACK2's driver that runs periods on a timer, without a sound card; the JACK
@@ -67,7 +74,9 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
   skipped the client's cycles; the JACK backend counts them
   ([`ARCHITECTURE.md`](ARCHITECTURE.md#what-the-callback-counts)).
 - **Generation**: how many nodes have occupied an arena slot before; a node's id holds it, so that
-  an old id never reaches the node that reuses its slot.
+  an old id never reaches the node that reuses its slot. A disk stream's generation is another
+  thing: the number the engine gives each locate, which a stream's blocks were filled for; an audio
+  player reads only its play's ([`ARCHITECTURE.md`](ARCHITECTURE.md#audio-clips-from-disk)).
 - **Gesture**: one action of the user that changes the project, such as a note drawn or a clip
   moved; one transaction in the project's file.
 - **Grid**: a way of measuring time, whose positions each lie at an exact moment: samples, time
@@ -86,6 +95,10 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
   compared from outside, input to photon.
 - **Linked instance**: one placement of a pattern; an edit in one shows in all, except its own
   offset, length, loop, transposition and velocity scale.
+- **Locate**: the disk reader's start of a new generation from a timeline sample, which it fills
+  every stream from; it gives the cue a play from there takes.
+- **Low-water mark**: the fewest frames an audio player found ready ahead of it since its play
+  started.
 - **MCP**: the Model Context Protocol, through which agents drive Magnolia.
 - **Moment**: the exact instant of a position, through which every conversion of time goes
   ([ADR-0018](adr/0018-the-time-model.md)).
@@ -118,15 +131,21 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
   ([ADR-0025](adr/0025-delay-compensation-by-reading-ahead.md)).
 - **Prefix**: a folder holding one Windows installation for Wine, its programs and its registry.
 - **Primary modifier**: the key that shortcuts use, Ctrl on Linux and Windows, Cmd on macOS.
+- **Primed**: a cue is primed when every stream holds what a play from it reads first: half a
+  second from its sample, or half the read-ahead if shorter, or up to the track's last clip's end.
+  A play of the cue waits until then ([`ARCHITECTURE.md`](ARCHITECTURE.md#the-transport)).
 - **Processor**: the engine's real-time half, which a backend calls once a period; it applies swaps,
   runs the nodes and fills the device's buffers ([`ARCHITECTURE.md`](ARCHITECTURE.md#a-period)).
 - **pw-jack**: PipeWire's command that runs a program with PipeWire's libjack first on its library
   path, so that a JACK client plays on PipeWire.
+- **Read-ahead**: how many frames ahead of its player the disk reader keeps each stream, 10 seconds
+  by default; a player that holds less than half of it asks for a refill.
 - **Real-time rights**: what lets a thread run at real-time priority: rtkit, or the user's
   real-time priority limit (`RLIMIT_RTPRIO`); without them the audio thread shares the processor
   with every other program.
 - **Reference project**: a session fixed in M1.3 for each tier, on which the sound's budgets are
   measured, never tuned for afterwards ([`reference-projects.md`](reference-projects.md)).
+- **Refill**: a pass of the disk reader that fills some stream.
 - **Render-ahead**: rendering tracks without live input before the playhead reaches them, on worker
   threads, as REAPER does.
 - **Rest**: the transport stopped, nothing armed or monitored, plugin GUIs closed. Magnolia then
@@ -146,6 +165,9 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
 - **Steady phase**: a swap's last phase, which lasts until the next swap; when it begins, the nodes
   the swap dropped leave the arena.
 - **Stems**: a mix exported as several files, one per group of tracks, that sum to the mix.
+- **Stream**: an audio track's ring of slots, each holding one block of its clips mixed and a word
+  saying which block of which generation it holds; the disk reader fills it, the track's audio
+  player plays it ([ADR-0026](adr/0026-one-stream-per-audio-track.md)).
 - **Stride**: the length of every channel buffer in the buffer pool: the engine's largest block,
   rounded up to 16 floats.
 - **Sub-block**: a stretch of a period that the processor runs at once, never longer than the
@@ -172,6 +194,8 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
 - **Transport**: what plays and stops the timeline. Its clock is the timeline sample the output
   plays; the engine's own clock counts every sample, rolling or not
   ([`ARCHITECTURE.md`](ARCHITECTURE.md#the-transport)).
+- **Underrun**: a frame an audio player needed that its stream did not hold ready; it plays silence
+  there, never waits, and counts it in `EngineStats::disk_underruns`.
 - **WAL**: SQLite's write-ahead log, which makes each transaction whole or absent after a crash.
 - **Winelib**: a program built for Linux that also calls Windows' functions through Wine.
 - **Wine bridge**: the plugin host built for Windows, run under the system's Wine

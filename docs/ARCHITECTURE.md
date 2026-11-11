@@ -13,7 +13,7 @@ reverse ([`AGENTS.md`](../AGENTS.md#architecture-rules)).
 
 | Crate | Role | Depends on |
 |---|---|---|
-| `magnolia-engine` | The audio engine ([ADR-0007](adr/0007-the-audio-engine.md)): the graph of nodes, its swaps and its real-time processor (module `engine`), the node contract (`node`) and the engine's own nodes (`nodes`), what a backend lends each period (`device`), a backend without a device (`offline`), the engine's statistics (`stats`, `callback_times`), the time model (`time`), and WAV files read, decoded and written by its own code (`wav`, [ADR-0029](adr/0029-magnolias-own-wav-and-midi-file-readers.md)). It holds no audio backend: backends are crates of their own. | `rtrb` |
+| `magnolia-engine` | The audio engine ([ADR-0007](adr/0007-the-audio-engine.md)): the graph of nodes, its swaps and its real-time processor (module `engine`), the node contract (`node`) and the engine's own nodes (`nodes`), audio clips streamed from disk by the disk reader and played by the audio players (`disk`, [ADR-0026](adr/0026-one-stream-per-audio-track.md)), what a backend lends each period (`device`), a backend without a device (`offline`), the engine's statistics (`stats`, `callback_times`), the time model (`time`), and WAV files read, decoded and written by its own code (`wav`, [ADR-0029](adr/0029-magnolias-own-wav-and-midi-file-readers.md)). It holds no audio backend: backends are crates of their own. | `rtrb` |
 | `magnolia-jack` | The JACK backend: plays the engine's processor through the JACK API, on PipeWire and JACK2, and says whether its audio thread runs in real time ([below](#the-jack-backend)). | `magnolia-engine`, `jack`, `libc`, `rtrb` |
 | `magnolia-session` | The test session of M1.4, which only the tests and the command line read and Stage 2's project replaces ([ADR-0028](adr/0028-the-test-session-in-json.md)). For now, Standard MIDI Files of format 0 and 1 read and written by its own code (`midi_file`, [ADR-0029](adr/0029-magnolias-own-wav-and-midi-file-readers.md)). | none |
 
@@ -55,8 +55,10 @@ ten hours; `tests/common/mod.rs` holds the checks it shares with the fuzz target
 node implements the contract of [ADR-0021](adr/0021-the-node-contract.md): fixed channel counts, a
 latency fixed for its life, and a `process` that returns *continue*, *sleep* or *error*. A
 transport plays the timeline, pre-rolled by the graph's largest compensation, and nodes may have
-timeline sources, MIDI sequences, whose events they receive as the transport rolls.
-`engine::new` makes the engine's two halves and starts its collector.
+timeline sources, MIDI sequences, whose events they receive as the transport rolls. Audio clips
+stream from disk: the disk reader fills one stream per audio track, which the track's audio player,
+a node, plays. `engine::new` makes the engine's two halves and starts its collector;
+`disk::DiskReader::start` makes the disk reader and the players.
 
 ### Threads and what each owns
 
@@ -65,22 +67,25 @@ timeline sources, MIDI sequences, whose events they receive as the transport rol
 | `Controller` | any thread but the audio one | the graph's description being edited, the nodes not yet sent, the slots and their generations |
 | `Processor` | the audio thread: a backend calls `process` once a period | the compiled graph being played, the arena of nodes and the notes their sources hold, the buffer pool, the pending events, the transport |
 | collector | a thread of its own, `magnolia-collector` | nothing for long: it drops what the processor lets go |
+| disk reader | a thread of its own, `magnolia-disk`; or the owner's, for an offline render | the audio tracks' clips and their files; it fills the streams the audio players play ([below](#audio-clips-from-disk)) |
 
 The halves share no mutable memory but four queues and the statistics; the timeline's snapshots,
-which never change, cross inside compiled graphs ([below](#timeline-sources)). The queues are
-rtrb's single-producer, single-consumer rings, allocated once, which never lock or block:
+which never change, cross inside compiled graphs ([below](#timeline-sources)). The audio players,
+nodes of the processor's arena, share their streams with the disk reader, atomics only. The queues
+are rtrb's single-producer, single-consumer rings, allocated once, which never lock or block:
 
 | Queue | From, to | Carries | Capacity |
 |---|---|---|---|
 | swaps | controller, processor | one message per swap: the compiled graph, its new nodes, new chunks of the arena, a larger buffer pool when needed | 2: one swap is in flight at most |
 | events | controller, processor | timed events: a node, a sample position, and a note on or off, a pitch bend, a controller's or a parameter's new value | `EngineConfig::event_capacity`, which also bounds the events queued and pending together ([below](#events)) |
-| transport | controller, processor | play from a timeline sample, numbered, and stop ([below](#the-transport)) | 4 |
+| transport | controller, processor | play from a cue, numbered, and stop ([below](#the-transport)) | 4 |
 | garbage | processor, collector | old graphs, old pools, used messages, the nodes a swap dropped, a panic's payload | `EngineConfig::garbage_capacity` |
 
 `EngineStats` goes the other way, atomics only: the heartbeat (periods run), the start of the last
 period, the last swap applied and the last one steady, where the last play started, counts of node
-errors, events taken and events dropped, non-finite samples, generation mismatches, latencies capped and missed plugin
-deadlines, the poisoned flag, the histogram of callback times, and the counters a backend fills
+errors, events taken and events dropped, non-finite samples, generation mismatches, latencies capped,
+missed plugin deadlines and the frames the audio players lacked (`disk_underruns`), the generations
+of disk streams handed out and the latest primed, the poisoned flag, the histogram of callback times, and the counters a backend fills
 (its own overruns, gaps in the device's frame time, the server's xruns, the audio thread's id).
 
 ### A swap
@@ -172,17 +177,25 @@ The processor keeps two clocks ([ADR-0025](adr/0025-delay-compensation-by-readin
 controller stamps events with it. The transport's clock is the timeline sample the output plays,
 and moves only while the transport rolls. A node sees the transport at its own input, the clock
 plus its `ahead_in`: `ProcessContext::transport` gives it whether the transport rolls, the timeline
-sample of the sub-block's first frame at its input, and the **audible region**, the timeline
-samples that play.
+sample of the sub-block's first frame at its input, the **audible region**, the timeline samples
+that play, and the **generation** of the disk streams the play reads.
 
-`Controller::play(from)` and `Controller::stop()` push commands into a queue of their own; a full
+A play starts from a **cue**, `engine::Cue`: a timeline sample, `from`, and the generation of the
+disk streams the play reads, which the disk reader's `locate` gave ([below](#audio-clips-from-disk)).
+A sample alone is a cue of generation 0, which no stream holds: enough for MIDI. The engine numbers
+generations, across every disk reader made on it (`EngineStats`), and a cue plays once:
+`Controller::play` refuses one whose generation is not above every generation it has sent,
+`TransportError::CueAlreadyPlayed`.
+
+`Controller::play(cue)` and `Controller::stop()` push commands into a queue of their own; a full
 queue is an error, `TransportError::QueueFull`. The processor applies them at a period's start,
 after any swap. With `P` the largest compensation of the graph about to play:
 
 - **Play**, stopped: the clock starts at `from - P`, the **pre-roll**. The most latent source reads
   `from` at once, and every path reaches the output on `from` together, `P` samples after the
   period's start. `EngineStats::play_start` publishes that engine sample with the play's sequence
-  number, which `play` returned. The audible region is `[from, stop)`, its stop unknown.
+  number, which `play` returned. The audible region is `[from, stop)`, its stop unknown. Every node
+  sees the cue's generation from the play's start on.
 - **Stop** at clock `c`: if `c + P <= from`, no node has read anything audible, so the region is
   empty, its stop at `from`, and the transport stops at once, silent; that happens when a play and
   its stop reach one period. Otherwise `stop = c + P + F`: what the most latent node has read, plus
@@ -195,7 +208,13 @@ after any swap. With `P` the largest compensation of the graph about to play:
   transport never stops inside one. Its clock then holds `stop + 1`, the next sample it would play.
 - **Play while rolling**: a stop as above, then the play at the first period after the stop ends;
   at once when the stop is.
-- A stop while stopped does nothing; a stop cancels a play that waits for its stop.
+- **A play that reads disk streams**, of a generation above 0, starts only at a period whose start
+  finds that generation primed: `EngineStats::primed_generation`, which the disk reader publishes
+  once every stream holds what the play reads first. Until then it waits, as a play while rolling
+  waits for its stop, and the transport looks again at each period's start, never waiting itself.
+  So `locate` then `play(cue)` is always right, rolling or not; the cost is the silence between a
+  stop's end, or the command, and a late priming. `play_start` gives the period it did start.
+- A stop while stopped does nothing; a stop cancels a play that waits, for its stop or its cue.
 
 A swap that changes `P` while the transport rolls keeps the running clock: a node whose
 compensation changes jumps by the difference ([debt](debt.md)).
@@ -252,10 +271,113 @@ playback.
 half its level, with a linear attack and release of 5 ms whose step is fixed per sample, every
 change at its event's sample, so that its output does not depend on how blocks are cut.
 
+### Audio clips from disk
+
+Audio clips play from WAV files through one **stream** per audio track
+([ADR-0026](adr/0026-one-stream-per-audio-track.md), module `disk`). The **disk reader** owns the
+clips and fills the streams; each track's **audio player**, a node of the graph, plays its stream.
+
+| Part | Runs on | Does |
+|---|---|---|
+| `DiskReader` | its owner's thread | made from the tracks with a thread (`start`) or without (`offline`), with one player per track; locates, waits until primed, fills (without a thread), reports |
+| the reader's thread | `magnolia-disk` | sleeps until a locate or a player asks, then fills every stream that needs it |
+| `AudioPlayer` | the audio thread, as a node | copies the frames of the play under way from its stream |
+
+A track's clips must be at the engine's rate, have the track's channels, and not overlap; the
+reader sorts them and refuses any other with a plain `DiskError`. Each file is opened once, its
+header read by `wav::read_info`; its frames are read with `FileExt::read_at`, which moves no file
+position.
+
+**The stream** is a ring of `N` slots: the read-ahead in blocks of 4,096 frames, plus two. Block
+`b`, the frames from `b × 4,096`, lives in slot `b mod N`. A slot holds the block's frames, channel after
+channel, as the bits of `AtomicU32`s, and one atomic word: the low 32 bits of the generation it was
+filled for, the block's number, whether it holds a block, and whether that block is silent. The
+reader empties the word, writes the samples, then publishes the word (Release); the player reads the
+word (Acquire), copies, reads the word again, and takes the block as missing if it changed. A slot
+is not rewritten while it holds the block of the generation about to be written, so a copy that
+straddles a write always sees the word change. Beside the ring, three things: the reader's word, the generation
+it fills and the first block after those it filled in a row; the player's **cursor**, the generation
+of its play, where it reads next, whether it rolls, and the play's stop once known, a sequence lock
+the player writes without waiting; and the player's **low-water mark**.
+
+**Locate, prime, play.** `DiskReader::locate(from)` takes the engine's next **generation** and
+returns its cue; the reader fills every stream from `from`. Once every stream holds half a second
+from `from` (half the read-ahead if shorter), or up to its last clip's end, the reader publishes the
+generation primed, in `EngineStats`: after the run that primes it, without waiting to fill the whole
+read-ahead. `Controller::play(cue)`, sent at once, starts at the first
+period that finds it primed ([above](#the-transport)); `wait_primed(cue)` waits for the same, for a
+caller that wants a timeout and an error. A player reads only slots of its play's generation, so
+what an older locate filled never plays; a play from an older cue lacks every frame, counted.
+
+**The reader** fills, round after round, the stream that holds the fewest frames ahead of its player
+first, one **run** of consecutive blocks per stream and round, until each holds its window: the
+read-ahead from where its player reads next, or from the cue's sample for a player that has not
+started its play, up to its last clip's end. A run reads each clip it covers in one read, of at
+least 256 KB when the clip covers the whole run: 11 blocks for 24-bit stereo. It renders the run from
+zeros, then adds each clip's frames, decoded by `wav::decode`, times its gain, and, for a clip that
+starts before the cue's sample, times the fade-in over the 5 ms from that sample (the swap's raised
+cosine, `engine/fade.rs`); frames before the cue's sample stay zero. A block of zeros is marked
+silent, and its samples are not written. Frames a file does not hold, past its end or after a failed
+read, are zeros, counted in `DiskStats::unread_frames`. A stream is left until it lacks a whole run,
+unless it holds less than half its read-ahead or its window reaches its last clip's end, so that
+reads stay large. Each pass that fills something is a **refill**, timed in `DiskStats`.
+
+**A player**, for each sub-block, at its own position, its compensation included, so that a player
+on a latent path reads ahead by that latency ([ADR-0025](adr/0025-delay-compensation-by-reading-ahead.md)):
+
+1. notes a new play, which starts a new low-water mark;
+2. reads how many frames its stream holds ahead of what it needs, and records the fewest;
+3. copies the frames of the audible region within its clips from slots of its play's generation, and
+   writes zeros elsewhere. A frame it lacks is silence, counted in `EngineStats::disk_underruns`,
+   never waited for;
+4. fades out over the 5 ms before the play's stop, as a swap fades an edge out;
+5. flags its outputs silent when it copied no block that sounds: over silent blocks, outside its
+   clips, stopped;
+6. publishes its cursor;
+7. asks for a refill if it holds less than half the read-ahead, lacked a frame, or if its play's
+   stop has just become known or it has just passed it: after its cursor, so that the pass the
+   request starts sees where it reads next.
+
+It never sleeps: it has no input that could wake it. A refill is asked through one flag shared by
+every player, set once, and one wake, `disk::wake_disk_reader`, which calls `Thread::unpark`: a
+futex wake when the reader sleeps, on the real-time allowlist
+([ADR-0023](adr/0023-the-real-time-allowlist.md), [below](#checking-the-real-time-path)). The reader
+clears the flag as each pass begins. Every set of the flag, a player's, a locate's or the end of a
+pause, and its clearing, is a read-modify-write: a chain of them carries every cursor published
+before a request to the pass that clears it, where a plain store would cut the chain.
+`DiskStats::refill_latency` times each request that wakes the reader, to the end of the first run
+that follows it.
+
+**A play while rolling.** Its locate makes the reader fill the new generation at once, while the old
+play still rolls. The reader leaves alone every slot that holds a block of the rolling play's
+generation that the play may still read: everything ahead of its position until its stop is asked,
+since it may roll on; once the player has published the stop, up to that stop, which holds every
+path's compensation and the fade, whatever the graph. What is kept only ever shrinks, so a cursor
+the reader read a moment ago never lets it overwrite what the play still reads. So the old play
+fades out over its own audio. A block of the new generation whose slot is kept waits until the
+player has passed it. A player asks for a refill when its play's stop becomes known, so that the
+reader may write past it, and when it passes the stop, which frees all it kept, each time after the
+cursor that says so, whatever it believes its stream holds: the reader may start the new
+generation during the player's sub-block, and the new play waits for it. The new play waits for its
+cue to be primed, then starts exactly at its sample.
+
+**An offline render** uses a reader made by `DiskReader::offline`, without a thread: `fill` does the
+reader's work on the caller's thread, and the render calls it before each block, no longer than half
+the read-ahead, so that it never underruns.
+
+Its limits:
+
+- a play waits for its cue's priming without a timeout: if the reader's thread has stopped after a
+  panic, the play never starts; `wait_primed` reports it (`PrimeError::ReaderStopped`);
+- generations count modulo 2^32 in the slots; clips lie within 2^41 frames of the timeline's zero;
+- `read_at` is Unix's: Windows' `seek_read` comes with the port; the reader's I/O priority is left
+  as it is ([ADR-0026](adr/0026-one-stream-per-audio-track.md)).
+
 ### A period
 
 `Processor::process` runs on the real-time thread. It never allocates, frees, locks or blocks;
-its one system call wakes the collector ([ADR-0023](adr/0023-the-real-time-allowlist.md)).
+its system calls wake the collector and, from an audio player, the disk reader
+([ADR-0023](adr/0023-the-real-time-allowlist.md), [ADR-0026](adr/0026-one-stream-per-audio-track.md)).
 
 1. Poisoned, it writes silence on every playback channel and goes to the last step.
 2. Otherwise it runs the period inside `catch_unwind`. A panic poisons it: silence from then on,
@@ -338,14 +460,16 @@ gets it:
   chunk never reallocates and a node never moves; each slot holds its node, its sleep flag and the
   notes its sources hold;
 - **the event buffers**, **the source reader's buffers**, **the vectors reserved for dropped
-  nodes** and **each delay line's history**.
+  nodes** and **each delay line's history**;
+- **each disk stream**: its slots, words and cursor, and the flag the players set, written when the
+  disk reader is made, off the real-time thread.
 
 The controller writes every page of each before sending it, through `black_box`, since the
 compiler may turn a fresh allocation's zero fill into `calloc`, which leaves pages unwritten
 (`engine/memory.rs`). The garbage queue, which the processor writes first, is warmed by pushing
 and popping through every slot at the start. `tests/engine/page_faults.rs` checks that the
 processing thread's minor faults do not change across swaps, those that add or remove a delay line
-included.
+included, nor while audio players play as the reader rewrites their slots.
 
 ## The JACK backend
 
@@ -480,8 +604,9 @@ and each use off the real-time path carries an `#[expect]` that names its thread
 
 The allowlist's calls are suppressed by name ([ADR-0023](adr/0023-the-real-time-allowlist.md)):
 `rtsan-suppressions.txt`, at the workspace's root, holds one `call-stack-contains:` line per
-function of Magnolia's that makes an allowed call, so far `wake_collector`; never an intercepted
-function such as `syscall`, which a lock's wait goes through too. The names match only in
+function of Magnolia's that makes an allowed call, so far `wake_collector` and `wake_disk_reader`
+([ADR-0026](adr/0026-one-stream-per-audio-track.md)); never an intercepted function such as
+`syscall`, which a lock's wait goes through too. The names match only in
 symbolized reports, so every run sets `allow_addr2line=true`, with binutils' `addr2line` from the
 development shell.
 
@@ -493,9 +618,14 @@ run itself: `halt_on_error=true`, `allow_addr2line=true`, and the suppressions. 
 - an allocation in a marked function is stopped at `malloc`;
 - work on memory allocated beforehand, a block's conversions of time, and the engine's processor
   through a crossfade, a dip, a larger pool, events, removed nodes handed to the collector, a
-  sleeping node, a failing node, swaps that add and remove a delay line, and MIDI sequences played
-  through a `TestSynth` with a play, a stop and a play while rolling, all stay silent;
+  sleeping node, a failing node, swaps that add and remove a delay line, MIDI sequences played
+  through a `TestSynth` with a play, a stop and a play while rolling, and two audio tracks streamed
+  by the disk reader on its thread, whose players wake it, with a play, a stop and a play while
+  rolling, all stay silent;
 - the collector's wake, without the suppressions, is stopped at `syscall`; with them, it passes;
+- the disk reader's wake, without the suppressions or with the collector's line alone, is stopped at
+  `syscall`; with its own line, it passes; and the audio tracks' case, without that line, is stopped
+  at a player's wake, so its silence rests on the players' real wakes;
 - a lock's wait right after the wake is still stopped, at the `syscall` of the futex wait.
 
 The backend's cases, on a JACK2 server the test starts on the dummy driver:

@@ -5,6 +5,8 @@
 //!   click, played by the processor on the real-time thread, freed by the collector; the transport,
 //!   and the MIDI sequences that nodes play from the timeline;
 //! - [`nodes`]: the engine's own nodes, a sine, a gain, a test latency and a test synth;
+//! - [`disk`]: the disk reader, which streams audio clips from WAV files ahead of the playhead, and
+//!   the audio players, the nodes that play those streams;
 //! - [`device`] and [`offline`]: what a backend lends the processor each period, and a backend
 //!   without a device, for tests;
 //! - [`stats`] and [`callback_times`]: what the engine reports of itself while it plays;
@@ -19,10 +21,12 @@
 
 pub mod callback_times;
 pub mod device;
+pub mod disk;
 pub mod engine;
 pub mod node;
 pub mod nodes;
 pub mod offline;
+mod seqlock;
 pub mod stats;
 pub mod time;
 pub mod wav;

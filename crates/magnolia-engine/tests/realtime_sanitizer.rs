@@ -3,13 +3,14 @@
 //! beforehand. Without this proof, a check of the real-time path that finds nothing would mean
 //! nothing. It also checks that a block's conversions of time, as the engine makes them, neither
 //! allocate nor make a system call, and that the engine's processor stays silent through swaps,
-//! events, removals, sleeping and failing nodes, swaps that add and remove a delay line, and MIDI
-//! sequences played through the test synth, with play, stop and play while rolling.
+//! events, removals, sleeping and failing nodes, swaps that add and remove a delay line, MIDI
+//! sequences played through the test synth, and audio tracks streamed from disk, with play, stop
+//! and play while rolling.
 //!
-//! The processor's one allowed system call, the collector's wake, is suppressed by name
-//! (`rtsan-suppressions.txt`, ADR-0023). Two cases prove the suppression right: the wake is a
-//! system call the sanitizer stops without it, and a lock's wait made beside the wake is still
-//! stopped with it.
+//! The processor's allowed system calls, the collector's wake and the disk reader's, are suppressed
+//! by name (`rtsan-suppressions.txt`, ADR-0023, ADR-0026). Cases prove the suppressions right: each
+//! wake is a system call the sanitizer stops without its own line, and a lock's wait made beside
+//! the collector's wake is still stopped with them.
 //!
 //! The sanitizer ends the process at its first report, so each case runs in a child process: this
 //! same executable, started again with `MAGNOLIA_RTSAN_CASE` naming the case. The parent reads the
@@ -21,14 +22,18 @@
 #![cfg_attr(magnolia_rtsan, feature(sanitize))]
 
 use std::env;
+use std::fs;
 use std::hint::black_box;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Output};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, Thread};
 use std::time::Duration;
 
+use magnolia_engine::disk::{
+    AudioClip, AudioFile, AudioTrack, DiskConfig, DiskReader, wake_disk_reader,
+};
 use magnolia_engine::engine::{
     self, ControllerPoint, Destination, EngineConfig, MidiClip, MidiNote, MidiSequence, NodeId,
     PitchBendPoint, Source, SwapStatus, TimedEvent, wake_collector,
@@ -40,9 +45,14 @@ use magnolia_engine::time::{
     Meter, MusicalPosition, SamplePosition, SampleRate, TICKS_PER_QUARTER, Tempo, TempoMap,
     TimePosition, place,
 };
+use magnolia_engine::wav::{SampleFormat, WavWriter};
 
 /// Names the case a child process runs; the parent leaves it unset.
 const CASE_VARIABLE: &str = "MAGNOLIA_RTSAN_CASE";
+
+/// Names the folder the parent made for the children's files, which it removes once they are done,
+/// even a child the sanitizer stopped.
+const FOLDER_VARIABLE: &str = "MAGNOLIA_RTSAN_FOLDER";
 
 /// The text of the sanitizer's report of a call that a real-time function must not make.
 const VIOLATION: &str = "RealtimeSanitizer: unsafe-library-call";
@@ -85,6 +95,12 @@ fn convert_block(map: &TempoMap, rate: SampleRate, start: SamplePosition, frames
 #[cfg_attr(magnolia_rtsan, sanitize(realtime = "nonblocking"))]
 fn wake(collector: &Thread) {
     wake_collector(collector);
+}
+
+/// Wakes a sleeping thread from a real-time context, as an audio player wakes the disk reader.
+#[cfg_attr(magnolia_rtsan, sanitize(realtime = "nonblocking"))]
+fn wake_reader(reader: &Thread) {
+    wake_disk_reader(reader);
 }
 
 /// Wakes a sleeping thread, then waits for a lock another thread holds, from a real-time context.
@@ -454,6 +470,100 @@ fn play_sequences() {
     assert!(!stats.poisoned());
 }
 
+/// Writes a WAV file of `frames` frames of a sine at the tests' rate into `dir`, and opens it.
+fn sine_file(dir: &Path, name: &str, format: SampleFormat, channels: u16) -> Arc<AudioFile> {
+    let path = dir.join(name);
+    let file = std::io::BufWriter::new(fs::File::create(&path).unwrap());
+    let mut writer = WavWriter::new(file, format, channels, 48_000).unwrap();
+    let samples: Vec<f32> = (0..60_000 * usize::from(channels))
+        .map(|sample| (sample as f32 * 0.001).sin() * 0.5)
+        .collect();
+    writer.write_frames(&samples).unwrap();
+    writer.finish().unwrap();
+    AudioFile::open(&path).unwrap()
+}
+
+/// Plays two audio tracks streamed from disk by a reader on its own thread, which reads four
+/// blocks ahead, so that the players wake it often: a play from inside a clip, a stop, a play, and
+/// a play while rolling. Only the processor runs in a real-time context; between periods the test
+/// waits until the reader has done what it was asked, so that nothing underruns.
+fn play_audio() {
+    let dir = PathBuf::from(env::var_os(FOLDER_VARIABLE).expect("the parent names a folder"));
+    let stereo = sine_file(&dir, "stereo.wav", SampleFormat::Int24, 2);
+    let mono = sine_file(&dir, "mono.wav", SampleFormat::Float32, 1);
+    let clip = |file: &Arc<AudioFile>, start, file_offset, length, gain| AudioClip {
+        file: Arc::clone(file),
+        start: SamplePosition(start),
+        file_offset,
+        length,
+        gain,
+    };
+    let tracks = [
+        AudioTrack {
+            channels: 2,
+            clips: vec![
+                clip(&stereo, 0, 0, 30_000, 1.0),
+                clip(&stereo, 35_000, 1_000, 25_000, 0.5),
+            ],
+        },
+        AudioTrack {
+            channels: 1,
+            clips: vec![clip(&mono, 1_000, 0, 59_000, 1.0)],
+        },
+    ];
+    let rate = SampleRate::new(48_000).unwrap();
+    let (mut controller, processor) = engine::new(EngineConfig::new(rate, 256, 0, 3)).unwrap();
+    let mut config = DiskConfig::new(rate);
+    config.read_ahead = 4 * 4_096;
+    let (mut reader, players) = DiskReader::start(config, &tracks, controller.stats()).unwrap();
+    let mut channel = 0;
+    for player in players {
+        let channels = magnolia_engine::node::Node::output_channels(&player);
+        let player = controller.add_node(Box::new(player)).unwrap();
+        for output in 0..channels {
+            controller.connect(Source::Node(player, output), Destination::Playback(channel));
+            channel += 1;
+        }
+    }
+    controller.commit().unwrap();
+    let mut backend = OfflineBackend::new(processor);
+    let mut sounding = 0;
+    let mut play = |controller: &mut engine::Controller, reader: &DiskReader, periods: usize| {
+        for period in 0..periods {
+            assert!(reader.wait_idle(Duration::from_secs(10)));
+            let frames = [64, 1_000, 100, 256][period % 4];
+            let played = backend.play_period(frames, &[]);
+            sounding += played[0].iter().filter(|&&sample| sample != 0.0).count();
+            controller.poll();
+        }
+    };
+    play(&mut controller, &reader, 4);
+    let cue = reader.locate(SamplePosition(5_000));
+    reader.wait_primed(cue, Duration::from_secs(10)).unwrap();
+    controller.play(cue).unwrap();
+    play(&mut controller, &reader, 60);
+    controller.stop().unwrap();
+    play(&mut controller, &reader, 8);
+    let cue = reader.locate(SamplePosition(2_000));
+    reader.wait_primed(cue, Duration::from_secs(10)).unwrap();
+    controller.play(cue).unwrap();
+    play(&mut controller, &reader, 30);
+    // A play while rolling: its cue goes at once after its locate.
+    let cue = reader.locate(SamplePosition(40_000));
+    controller.play(cue).unwrap();
+    play(&mut controller, &reader, 40);
+    controller.stop().unwrap();
+    play(&mut controller, &reader, 8);
+    let stats = controller.stats();
+    assert!(sounding > 10_000, "the tracks played");
+    assert_eq!(stats.disk_underruns(), 0);
+    assert_eq!(stats.play_start().map(|start| start.sequence), Some(3));
+    // Each locate fills at most five blocks per stream before its play: more came from the
+    // players' wakes.
+    assert!(reader.stats().blocks_filled() > 3 * 2 * 5, "refills came");
+    assert!(!stats.poisoned());
+}
+
 /// A silent node whose drop keeps the collector busy until `open` is set, or ten seconds pass;
 /// `entered` tells the test it has started.
 struct BlockingDrop {
@@ -620,9 +730,14 @@ fn run_case(case: &str) -> ExitCode {
         "engine" => on_new_thread(play_the_engine),
         "delay_lines" => on_new_thread(play_delay_lines),
         "sequences" => on_new_thread(play_sequences),
+        "audio" => on_new_thread(play_audio),
         "wake" => {
             let collector = sleeping_thread();
             on_new_thread(move || wake(&collector));
+        }
+        "disk_wake" => {
+            let reader = sleeping_thread();
+            on_new_thread(move || wake_reader(&reader));
         }
         "wake_then_wait" => {
             let collector = sleeping_thread();
@@ -637,24 +752,49 @@ fn run_case(case: &str) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// The workspace's suppressions file.
+fn suppressions_file() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../rtsan-suppressions.txt")
+        .canonicalize()
+        .expect("rtsan-suppressions.txt is at the workspace's root")
+}
+
 /// The sanitizer's options for a case: stop at the first report, and symbolize the reports with
 /// `addr2line` (ADR-0023), so that the suppressions see function names. `suppressed` adds the
 /// workspace's suppressions.
 fn sanitizer_options(suppressed: bool) -> String {
+    let suppressions = suppressed.then(suppressions_file);
+    options_with(suppressions.as_deref())
+}
+
+/// The sanitizer's options, with the suppressions of `file` if any.
+fn options_with(file: Option<&Path>) -> String {
     let mut options = String::from("halt_on_error=true:allow_addr2line=true");
-    if suppressed {
-        let suppressions = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../rtsan-suppressions.txt")
-            .canonicalize()
-            .expect("rtsan-suppressions.txt is at the workspace's root");
+    if let Some(file) = file {
         options.push_str(":suppressions=");
-        options.push_str(
-            suppressions
-                .to_str()
-                .expect("the workspace's path is UTF-8"),
-        );
+        options.push_str(file.to_str().expect("the workspace's path is UTF-8"));
     }
     options
+}
+
+/// A copy of the workspace's suppressions without the lines that hold `left_out`, in the children's
+/// folder.
+fn suppressions_without(left_out: &str) -> PathBuf {
+    let kept: String = fs::read_to_string(suppressions_file())
+        .expect("the suppressions are readable")
+        .lines()
+        .filter(|line| !line.contains(left_out))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    let path = children_folder().join("suppressions-without-a-line.txt");
+    fs::write(&path, kept).expect("the children's folder is writable");
+    path
+}
+
+/// The folder for the children's files, which `main` makes and removes.
+fn children_folder() -> PathBuf {
+    env::temp_dir().join(format!("magnolia-rtsan-{}", std::process::id()))
 }
 
 /// Starts this executable again on one case, under the sanitizer's options.
@@ -662,6 +802,7 @@ fn run_child(case: &str, options: &str) -> Output {
     let executable = env::current_exe().expect("the test's executable has no path");
     Command::new(executable)
         .env(CASE_VARIABLE, case)
+        .env(FOLDER_VARIABLE, children_folder())
         .env("RTSAN_OPTIONS", options)
         .output()
         .expect("the child process did not start")
@@ -729,12 +870,25 @@ fn main() -> ExitCode {
         println!("  RealtimeSanitizer is not active in this build; the other cases are not run");
         return ExitCode::FAILURE;
     }
+    fs::create_dir_all(children_folder()).expect("the temporary folder is writable");
+    let without_disk_line = suppressions_without("wake_disk_reader");
     let results = [
         check("halve", Expected::Silent),
         check("convert", Expected::Silent),
         check("engine", Expected::Silent),
         check("delay_lines", Expected::Silent),
         check("sequences", Expected::Silent),
+        check("audio", Expected::Silent),
+        // The players' wakes are what the case's silence rests on: without the disk reader's line,
+        // the first is stopped.
+        check_under(
+            "audio",
+            Expected::StoppedAtSystemCall {
+                from: "wake_disk_reader",
+            },
+            &options_with(Some(&without_disk_line)),
+            "audio_without_the_disk_line",
+        ),
         // The wake is a system call the sanitizer stops, until the suppressions name it.
         check_under(
             "wake",
@@ -743,12 +897,31 @@ fn main() -> ExitCode {
             "wake_unsuppressed",
         ),
         check("wake", Expected::Silent),
+        // The disk reader's wake too, which the collector's line does not cover: it needs its own.
+        check_under(
+            "disk_wake",
+            Expected::StoppedAtSystemCall {
+                from: "wake_disk_reader",
+            },
+            &sanitizer_options(false),
+            "disk_wake_unsuppressed",
+        ),
+        check_under(
+            "disk_wake",
+            Expected::StoppedAtSystemCall {
+                from: "wake_disk_reader",
+            },
+            &options_with(Some(&without_disk_line)),
+            "disk_wake_without_its_line",
+        ),
+        check("disk_wake", Expected::Silent),
         // A lock's wait beside the wake is still stopped: the suppression hides the wake alone.
         check(
             "wake_then_wait",
             Expected::StoppedAtSystemCall { from: "futex_wait" },
         ),
     ];
+    let _ = fs::remove_dir_all(children_folder());
     if results.iter().all(|&passed| passed) {
         ExitCode::SUCCESS
     } else {
