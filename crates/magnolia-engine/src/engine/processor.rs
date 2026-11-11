@@ -148,7 +148,7 @@ impl Processor {
     }
 
     /// The largest compensation of the graph being played, in samples: the largest `ahead_in` of
-    /// its steady phase, by which the transport pre-rolls (ADR-0025). For tests.
+    /// its steady phase's audible nodes, by which the transport pre-rolls (ADR-0025). For tests.
     #[doc(hidden)]
     pub fn largest_ahead_in(&self) -> u64 {
         self.graph.largest_ahead_in

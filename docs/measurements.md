@@ -225,8 +225,10 @@ the builds, 1.7 to 7.2 for the checks.
 | A change to the engine, `magnolia play` rebuilt, relaunched and playing the `small` session on a dummy JACK2 | 1.1 s (the build 1.0 s) | 2 s |
 | A full check from nothing, one run | 146 s | 3 min |
 | A full check, nothing changed, one run | 92 s | — |
+| The CI job | 5 min 25 s | 20 min |
 
-Before the fuzz targets ran side by side, the full check took 298 s from nothing and 232 s with
+The CI job's time is that of run 43099839265, of commit `1efc4bd`, one run. Before the fuzz targets
+ran side by side, the full check took 298 s from nothing and 232 s with
 nothing changed, over its budget: five targets of 20 s one after the other. `scripts/check.sh` now
 prints each step's time; the tests take about a minute, the JACK backend's playing in real time on
 their dummy servers.

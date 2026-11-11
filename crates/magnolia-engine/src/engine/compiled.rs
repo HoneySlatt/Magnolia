@@ -36,8 +36,9 @@ pub(crate) struct CompiledGraph {
     /// Where the processor moves the dropped nodes, written and reserved for all of them, so that
     /// moving them neither allocates nor faults. It goes to the collector, full.
     pub(crate) dropped_nodes: Vec<Box<dyn Node>>,
-    /// The largest `ahead_in` of the steady phase's steps, in samples: the session's largest
-    /// compensation, by which the transport pre-rolls (ADR-0025).
+    /// The largest `ahead_in` of the steady phase's audible nodes, those from which a playback
+    /// channel can be reached, in samples: the session's largest compensation, by which the
+    /// transport pre-rolls (ADR-0025).
     pub(crate) largest_ahead_in: u64,
     /// The timeline sources' sequences, node after node; each step names its own (ADR-0027). The
     /// graph holds them, so that a replaced snapshot reaches the collector inside the old graph.

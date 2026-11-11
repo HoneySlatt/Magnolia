@@ -33,13 +33,19 @@ The engine is a library; the JACK backend plays it, and its example plays a sine
 ([Playing through JACK](#playing-through-jack)); the test session's crate reads, renders and
 generates sessions ([Test sessions](#test-sessions)); the command line, `magnolia`, plays a session
 through JACK and renders one ([Playing and rendering a session](#playing-and-rendering-a-session)).
-The commands that build and test them, and measure the time model's conversions:
+The commands that build and test them, and measure the time model's conversions and the disk
+reader:
 
 ```sh
 cargo build --workspace
 cargo test --workspace
 cargo bench --bench time_conversions
+cargo bench --bench disk_reader
 ```
+
+The disk reader's benchmark writes 16 files of 8.6 MB into the folder `MAGNOLIA_BENCH_DIR` names, or
+the system's temporary folder, and removes them at the end; it needs GNU `dd` to drop them from the
+page cache for its cold runs.
 
 ### The JACK backend's tests
 
@@ -170,7 +176,7 @@ request and once a week.
 | page faults in release | A swap takes no page fault on the processing thread in an optimised build, where a zero fill may become `calloc` | `cargo test --release --locked -p magnolia-engine --test engine page_faults` |
 | documentation | rustdoc, warnings as errors | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked` |
 | dependencies | Licenses, RustSec advisories and sources, by `deny.toml`, the fuzz targets' too; fetches the advisories | `cargo deny --locked check` |
-| RealtimeSanitizer | Clippy on each crate's sanitizer test, then the sanitizer stops an allocation and a lock's wait in functions marked real-time, lets the collector's wake pass by its suppression, and stays silent on a block's conversions of time, on the engine's processor and on the JACK backend's process callback, played on a dummy JACK2 server | below |
+| RealtimeSanitizer | Clippy on each crate's sanitizer test, then the sanitizer stops an allocation and a lock's wait in functions marked real-time, lets the collector's and the disk reader's wakes pass by their suppressions, and stays silent on a block's conversions of time, on the engine's processor (audio tracks and MIDI sequences included) and on the JACK backend's process callback, played on a dummy JACK2 server | below |
 | fuzzing | Each fuzz target of every `crates/*/fuzz/` folder for 20 s, or `MAGNOLIA_FUZZ_SECONDS`, side by side, one per core at most; each target's output in `target/fuzz/logs/`, printed when it fails | [Fuzzing](#fuzzing) |
 
 The sanitizer's tests, one in `magnolia-engine` and one in `magnolia-jack`, run only on the
@@ -195,8 +201,9 @@ RTSAN_OPTIONS=halt_on_error=true:allow_addr2line=true:suppressions=<workspace>/r
 `halt_on_error` ends the child at the first report. `allow_addr2line` symbolizes the reports with
 binutils' `addr2line`, which the development shell provides, so that the suppressions see function
 names. `rtsan-suppressions.txt` names the functions that make the calls of the real-time allowlist
-([ADR-0023](docs/adr/0023-the-real-time-allowlist.md)). One of the engine's cases runs without
-the suppressions, to show that the collector's wake is a system call the sanitizer stops. To read a
+([ADR-0023](docs/adr/0023-the-real-time-allowlist.md)). Some of the engine's cases run without
+the suppressions, or without one line of them, to show that the collector's and the disk reader's
+wakes are system calls the sanitizer stops. To read a
 case's report, start the test's executable with `MAGNOLIA_RTSAN_CASE` set to the case's name and
 the options above; the backend's `backend` case also needs `MAGNOLIA_RTSAN_SERVER`, the name of a
 running JACK2 server.
@@ -206,4 +213,4 @@ each fuzz folder's manifest, such as `--manifest-path crates/magnolia-session/fu
 the script finds every `crates/*/fuzz/` folder.
 
 How long a full check takes, and its budget, are in
-[`docs/measurements.md`](docs/measurements.md#m13--the-jack-backend-and-the-graph).
+[`docs/measurements.md`](docs/measurements.md#m14--a-session-plays).
