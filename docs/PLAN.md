@@ -201,10 +201,6 @@ milestone first needs it.
 - **The sanitizer's reports name addresses, not functions**, until the shell has a symbolizer or the
   runs set `allow_addr2line=true`. ADR-0007's allowlist, suppressed by name, needs names: settled in
   M1.3, taking care that a suppression of `syscall` does not hide a blocking wait.
-- **The `realtime-sanitizer` feature builds only on the nightly**, so `--all-features` fails on the
-  stable toolchain. The owner chose on 2026-11-11 to gate the nightly parts on a cfg that only
-  the sanitizer's flags set, by an ADR that amends ADR-0013, before M1.3.
-
 - **The time model's conversions were measured under load** (load average 34 to 36): their figures
   are upper bounds until taken again on a quiet machine
   ([measurements](measurements.md#m12--the-time-model)).

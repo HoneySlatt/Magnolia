@@ -54,14 +54,16 @@ step "dependencies (licenses, advisories, sources)"
 cargo deny --locked check
 cargo deny "${fuzz[@]}" --locked check
 
-# RealtimeSanitizer ships with the nightly's standard library (ADR-0013). `--target` keeps the flag
-# off build scripts and procedural macros, as the Unstable Book asks; a target directory of its own
-# keeps these builds from evicting the stable ones.
+# RealtimeSanitizer ships with the nightly's standard library (ADR-0013). `--cfg magnolia_rtsan`
+# turns on the code that only the nightly builds (ADR-0019). `--target` keeps both flags off build
+# scripts and procedural macros, as the Unstable Book asks; a target directory of its own keeps
+# these builds from evicting the stable ones.
 step "RealtimeSanitizer stops an allocation in a function marked real-time, passes a block's conversions"
-sanitized=(--locked -p magnolia-engine --features realtime-sanitizer --test realtime_sanitizer
+sanitizer_flags="-Zsanitizer=realtime --cfg magnolia_rtsan"
+sanitized=(--locked -p magnolia-engine --test realtime_sanitizer
     --target x86_64-unknown-linux-gnu --target-dir "${CARGO_TARGET_DIR:-target}/realtime-sanitizer")
-nightly cargo clippy "${sanitized[@]}" -- -D warnings
-RUSTFLAGS="-Zsanitizer=realtime" nightly cargo test "${sanitized[@]}"
+RUSTFLAGS="$sanitizer_flags" nightly cargo clippy "${sanitized[@]}" -- -D warnings
+RUSTFLAGS="$sanitizer_flags" nightly cargo test "${sanitized[@]}"
 
 # cargo fuzz builds with the nightly, libFuzzer and AddressSanitizer; a crash fails the step and
 # leaves its input in crates/magnolia-engine/fuzz/artifacts/. It takes no --locked: the fuzz crate's

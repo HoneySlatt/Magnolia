@@ -49,11 +49,13 @@ ten hours; `tests/common/mod.rs` holds the checks it shares with the fuzz target
 
 ## Checking the real-time path
 
-The engine's real-time functions will be marked `#[sanitize(realtime = "nonblocking")]` under the
-crate's `realtime-sanitizer` feature. With that feature, the nightly toolchain and
-`-Zsanitizer=realtime`, RealtimeSanitizer ends the process at the first allocation, free or system
-call made inside a marked function, on any thread
-([ADR-0013](adr/0013-a-pinned-stable-toolchain-and-a-nightly-for-checks.md)).
+The engine's real-time functions will be marked
+`#[cfg_attr(magnolia_rtsan, sanitize(realtime = "nonblocking"))]`. Built on the nightly with
+`-Zsanitizer=realtime --cfg magnolia_rtsan`, RealtimeSanitizer ends the process at the first
+allocation, free or system call made inside a marked function, on any thread
+([ADR-0013](adr/0013-a-pinned-stable-toolchain-and-a-nightly-for-checks.md),
+[ADR-0019](adr/0019-the-sanitizers-nightly-code-behind-a-cfg.md)). Elsewhere the attribute is
+not there.
 
 Its limit, measured on the pinned nightly: an uncontended `std::sync::Mutex` or `RwLock` and
 `thread::sleep` pass unreported. std's locks on Linux use a futex directly, which the sanitizer sees

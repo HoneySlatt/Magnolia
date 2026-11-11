@@ -21,9 +21,10 @@ New ADRs copy [`0000-template.md`](0000-template.md) and take the next free numb
 | [0010](0010-the-quality-bar.md) | The quality bar | Accepted; amended by 0011 and 0014 |
 | [0011](0011-magnolia-no-longer-a-program-of-uwuis-first-stage.md) | Magnolia no longer a program of uwui's first stage | Accepted |
 | [0012](0012-the-logo-its-rights-kept.md) | The logo, its rights kept | Accepted |
-| [0013](0013-a-pinned-stable-toolchain-and-a-nightly-for-checks.md) | A pinned stable toolchain, and a nightly for checks only | Accepted |
+| [0013](0013-a-pinned-stable-toolchain-and-a-nightly-for-checks.md) | A pinned stable toolchain, and a nightly for checks only | Accepted; amended by 0019 |
 | [0014](0014-the-quality-bar-measured-against-the-market.md) | The quality bar measured against the market | Accepted; amends 0010 |
 | [0015](0015-the-interface-in-a-process-of-its-own.md) | The interface in a process of its own | Accepted; amends 0005 |
 | [0016](0016-agents-on-the-shape-of-uwuis-agent-core.md) | Agents on the shape of uwui's agent core | Accepted |
 | [0017](0017-macos-a-candidate-stage-after-stage-4.md) | macOS, a candidate stage after Stage 4 | Accepted; amends 0001 |
 | [0018](0018-the-time-model.md) | The time model | Accepted; amends 0007 |
+| [0019](0019-the-sanitizers-nightly-code-behind-a-cfg.md) | The sanitizer's nightly code behind a cfg | Accepted; amends 0013 |

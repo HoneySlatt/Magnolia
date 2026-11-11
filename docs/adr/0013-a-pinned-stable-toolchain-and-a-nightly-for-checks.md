@@ -1,6 +1,6 @@
 # 0013. A pinned stable toolchain, and a nightly for checks only
 
-- Status: Accepted
+- Status: Accepted; amended by 0019
 - Date: 2026-11-07
 
 ## Context

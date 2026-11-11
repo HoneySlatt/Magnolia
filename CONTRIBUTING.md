@@ -73,13 +73,14 @@ fails. CI runs it unchanged, on each push to `main`, each pull request and once 
 | RealtimeSanitizer | Clippy on the sanitizer's test, then the sanitizer stops an allocation in a function marked real-time, and stays silent on a block's conversions of time | below |
 | fuzzing | Each fuzz target for 20 s, or `MAGNOLIA_FUZZ_SECONDS` | [Fuzzing](#fuzzing) |
 
-The sanitizer's test is built only with the `realtime-sanitizer` feature, on the nightly, in a
-target directory of its own. `scripts/check.sh` runs Clippy on it first, with the same arguments,
-then the test:
+The sanitizer's test runs only on the nightly, with the sanitizer's flags, in a target directory of
+its own; `cargo test` leaves it out
+([ADR-0019](docs/adr/0019-the-sanitizers-nightly-code-behind-a-cfg.md)). `scripts/check.sh` runs
+Clippy on it first, with the same arguments, then the test:
 
 ```sh
-RUSTFLAGS="-Zsanitizer=realtime" nightly cargo test --locked -p magnolia-engine \
-    --features realtime-sanitizer --test realtime_sanitizer \
+RUSTFLAGS="-Zsanitizer=realtime --cfg magnolia_rtsan" nightly cargo test --locked \
+    -p magnolia-engine --test realtime_sanitizer \
     --target x86_64-unknown-linux-gnu --target-dir "${CARGO_TARGET_DIR:-target}/realtime-sanitizer"
 ```
 

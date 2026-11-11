@@ -8,10 +8,10 @@
 //! same executable, started again with `MAGNOLIA_RTSAN_CASE` naming the case. The parent reads the
 //! child's exit status and standard error.
 //!
-//! Built only with the `realtime-sanitizer` feature, on the nightly toolchain, with
-//! `-Zsanitizer=realtime`; scripts/check.sh runs it.
+//! Meaningful only on the nightly toolchain, built with `-Zsanitizer=realtime --cfg magnolia_rtsan`
+//! (ADR-0019); scripts/check.sh runs it so, and `cargo test` leaves it out.
 
-#![feature(sanitize)]
+#![cfg_attr(magnolia_rtsan, feature(sanitize))]
 
 use std::env;
 use std::hint::black_box;
@@ -29,14 +29,14 @@ const CASE_VARIABLE: &str = "MAGNOLIA_RTSAN_CASE";
 const VIOLATION: &str = "RealtimeSanitizer: unsafe-library-call";
 
 /// Allocates in a real-time context, as a bug on the audio thread would.
-#[sanitize(realtime = "nonblocking")]
+#[cfg_attr(magnolia_rtsan, sanitize(realtime = "nonblocking"))]
 fn allocate() -> usize {
     let buffer: Vec<f32> = Vec::with_capacity(black_box(64));
     black_box(buffer).capacity()
 }
 
 /// Works on memory allocated beforehand, as the audio thread must.
-#[sanitize(realtime = "nonblocking")]
+#[cfg_attr(magnolia_rtsan, sanitize(realtime = "nonblocking"))]
 fn halve(buffer: &mut [f32]) {
     for sample in buffer.iter_mut() {
         *sample *= 0.5;
@@ -45,7 +45,7 @@ fn halve(buffer: &mut [f32]) {
 
 /// Converts time as the engine does for each block: the ticks whose events play in the block, then
 /// the sample of each event, on a tempo map built beforehand. Returns the sum of the samples.
-#[sanitize(realtime = "nonblocking")]
+#[cfg_attr(magnolia_rtsan, sanitize(realtime = "nonblocking"))]
 fn convert_block(map: &TempoMap, rate: SampleRate, start: SamplePosition, frames: u32) -> i64 {
     let ticks = map
         .ticks_in_block(rate, start, frames)
@@ -140,8 +140,8 @@ fn check(case: &str, expected: Expected) -> bool {
     if !passed {
         match expected {
             Expected::Stopped => println!(
-                "  expected the sanitizer to stop the child at its call to `malloc`; \
-                 was the test built with -Zsanitizer=realtime?"
+                "  expected the sanitizer to stop the child at its call to `malloc`; was the \
+                 test built with -Zsanitizer=realtime --cfg magnolia_rtsan (scripts/check.sh)?"
             ),
             Expected::Silent => println!("  expected the child to exit successfully, unreported"),
         }

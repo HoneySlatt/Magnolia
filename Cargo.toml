@@ -15,6 +15,9 @@ publish = false
 # scripts/check.sh turns every warning into an error.
 [workspace.lints.rust]
 missing_docs = "warn"
+# `magnolia_rtsan` gates what only the nightly builds, for RealtimeSanitizer; scripts/check.sh sets
+# it beside `-Zsanitizer=realtime` (ADR-0019).
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(magnolia_rtsan)"] }
 
 [workspace.lints.clippy]
 # AGENTS.md: every `unsafe` block says why it is sound, in a `// SAFETY:` comment.
