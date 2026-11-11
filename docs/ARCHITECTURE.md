@@ -593,9 +593,9 @@ module's documentation gives the format, an example and every rule; this section
 | Step | Code | Does |
 |---|---|---|
 | parse | `file::parse` | reads the format and the version first, so that a newer version is refused as such; then the whole file into `SessionFile` with serde, `deny_unknown_fields`; then every check that needs no file on disk ([below](#what-parse-checks)) |
-| open | `Session::open` | reads the file, at most 64 MiB, and parses it; opens each audio file once and checks its rate, its channels and that it holds every frame of its clips; reads each MIDI file once, at most 64 MiB, and makes each MIDI track's clips one `MidiSequence`; resolves every output and send |
+| open | `Session::open` | reads the file, at most 64 MiB, and parses it; holds the memory the session asks for to a budget of 1 GiB, before allocating it ([below](#the-memory-budget)); reads each MIDI file once, at most 64 MiB; opens each audio file once and checks its rate, its channels and that it holds every frame of its clips; makes each MIDI track's clips one `MidiSequence`; resolves every output and send |
 | build | `Session::build` | makes the engine, the disk reader and the graph, and commits it with the tempo map ([below](#the-graph-a-session-builds)) |
-| render | `render` | plays the session offline from sample 0 into a WAV file of 32-bit floats ([below](#the-offline-render)) |
+| render | `render`, `render_to_file` | plays the session offline from sample 0 into a WAV file of 32-bit floats ([below](#the-offline-render)) |
 | play | `SessionPlayer` | builds the session with the disk reader's thread and hands its processor to a backend: the JACK backend, or the device-less backend in tests |
 | generate | `generate::generate` | writes the reference projects without their plugins, or a small session of every feature, the same to the byte on every machine ([below](#the-generator)) |
 
@@ -603,23 +603,50 @@ module's documentation gives the format, an example and every rule; this section
 
 The ranges of every value: the rate is one the time model takes, a tempo lies from 1 to 1,000
 quarter notes a minute, channels from 1 to 1,024 (the master's from 2), a latency up to 65,536
-samples, every gain finite, every clip at least a frame or a tick long and at or after the
-timeline's zero, an audio clip within 2^41 frames of it. The tempo map builds. Each track has the
+samples, every gain finite, every clip at least a frame or a tick long, at or after the timeline's
+zero and ending within 2^41 samples of it, so that no session asks for an endless render. The tempo
+map builds. Each track has the
 fields of its kind and no other: an audio track its channels, a MIDI track its instrument; an audio
 clip its file offset and gain, a MIDI clip neither. Bus names are unique and none is `master`;
 every output and send names `master` or a bus; what feeds a bus or the master has its channels, or
 is mono into stereo; no bus feeds itself back, through any chain of buses, checked once per bus. A
 track's audio clips, placed on the sample grid, do not overlap
-([ADR-0026](adr/0026-one-stream-per-audio-track.md)). Paths are relative; at most 512 distinct audio
-files, each kept open while the session plays, `.` components ignored in telling them apart.
+([ADR-0026](adr/0026-one-stream-per-audio-track.md)). Paths are relative and stay inside the session
+file's folder: an absolute path or a `..` is refused, a `.` ignored, so that one file has one
+spelling, and is read once; a symbolic link inside the folder is followed wherever it leads. At most
+512 distinct audio files, each kept open while the session plays.
 
 An error names the field by its path, such as `tracks[1].clips[0].start`, and says what is wrong.
 serde_json gives an error's line and column, and names an unknown or missing field, but not the
 path to it, so `file/position.rs` walks the text up to the error's position to name the field. The
 checks the loader needs again, such as resolving the routing or placing a clip, are the same
 functions, so that one rule has one copy. The fuzz target `session_file` feeds the parser text, raw
-or built like a session with arbitrary values, and checks that a session that parses writes back to
-text that parses.
+or built like a session with arbitrary values, and checks that a session that parses names no file
+outside its folder and writes back to text that parses.
+
+### The memory budget
+
+A session file of a few hundred bytes can ask for gigabytes: an audio track of 1,024 channels holds
+2 GiB of stream, a latency of 65,536 samples on a bus of 1,024 channels 256 MiB, and 400 clips of one
+dense MIDI file expand it 400 times. So `Session::open` estimates what the session asks for before
+it allocates anything large, and refuses it over 1 GiB (`MEMORY_BUDGET`), with an error that says
+what takes the memory (`load/budget.rs`):
+
+- each audio track's stream: its channels times the read-ahead in frames, rounded up to whole
+  blocks of 4,096 and two blocks more, as the disk reader rounds, times 4 bytes;
+- each test latency's history, and each delay line's that the engine will add: channels times
+  samples of delay, times 4 bytes. The delay lines are worked out by the engine's rule
+  ([above](#delay-compensation)) on the graph a session builds: a track's gain runs as far ahead as
+  the most demanding of its output and its sends, and every other one gets a delay line;
+- the engine's buffers: a largest block of 1,024 frames for each input and output of every node and
+  each playback channel, times 4 bytes;
+- each MIDI file, read and parsed once, at 16 bytes an event, and the events each clip expands it to,
+  at 128 bytes an event, above the 78 measured at the peak of 400 clips of a file of 40,000 events.
+
+The first three come from the file alone, and are checked first. Then the MIDI files are read, each
+once, the budget checked after each; then the clips' events are counted and checked, before any
+clip expands. `Session::memory_estimate` gives the estimate of a session that opened. The high
+tier's reference project asks for 142 MiB, the lowest tier's 44 MiB.
 
 ### The graph a session builds
 
@@ -635,9 +662,12 @@ The engine has the session's rate, the master's channels as playback channels, n
 largest block of 1,024. A strip's input is its first insert, else its gain; the master without
 inserts sums straight into the playback channels. Sends leave after the track's gain. A mono source
 feeds both channels of a stereo input. The disk reader reads 10 seconds ahead, one stream per audio
-track, its players in the tracks' order. Inserts are the engine's test nodes, `TestLatency` and
-`Gain`, until plugins come (M1.6); the engine compensates their latencies
-([above](#delay-compensation)).
+track; its players come in the audio tracks' order, and are paired with them by that order. Inserts
+are the engine's test nodes, `TestLatency` and `Gain`, until plugins come (M1.6); the engine
+compensates their latencies ([above](#delay-compensation)). `tests/session.rs` renders impulses
+through each kind of path: a send after its track's gain, compensated onto its output's sample; a
+bus into a bus; mono into stereo; a clip that starts between two samples; a note of a MIDI file of
+1,000 ticks a quarter; and a compensation longer than the read-ahead.
 
 A MIDI clip plays its whole file from its start: every track of the file merged, at one tick in the
 order of the tracks then of the file; each tick scaled from the file's division to the time model's
@@ -656,7 +686,9 @@ to half the read-ahead (240,000 frames at 48 kHz), the reader filled before each
 underruns. It writes from the engine sample where the output reaches timeline sample 0, which the
 largest compensation delays (`PlayStart::audible_at`), up to the session's last clip's end and one
 second of tail, every playback channel, in 32-bit floats. Its report gives the frames written, the
-underruns and the largest compensation.
+underruns and the largest compensation. `render_to_file` renders into a new file so that it appears
+whole or not at all: into `.<name>.partial` beside it, synced to disk, then renamed; a render that
+fails removes its partial file, and a file in the way is never written over.
 
 The render is the same to the bit whatever its blocks, and a play from sample 0 through a
 `SessionPlayer`, in periods of any length, plays the same bits from where its output reaches that
@@ -687,7 +719,9 @@ the sine from a table computed by its Taylor series, the equal temperament from 
 two found by bisection, decays by one multiplication a sample; never `sin`, `exp` or `powf`, whose
 precision differs between C libraries. The JSON is serde_json's, the MIDI files the module's own
 writer's: format 1, a first track of the song's tempo and meters, which Magnolia ignores and REAPER
-reads, then the part. `tests/session.rs` generates the small session twice and compares the bytes.
+reads, then the part. `tests/session.rs` generates the small session twice and compares the bytes,
+and pins a digest of its files, which a machine that computes otherwise fails; the test says what
+to do when the generator changes on purpose.
 
 The test session's limits: the format holds no comments; buses have no sends; the only instrument
 is the test synth; only mono feeds a wider strip, and only a stereo one; a MIDI clip has no offset

@@ -1,5 +1,5 @@
-//! Fuzzes the test session's parser with arbitrary text. Nothing may panic, and a session that
-//! parses must write back to text that parses.
+//! Fuzzes the test session's parser with arbitrary text. Nothing may panic; a session that parses
+//! must name no file outside its folder, and must write back to text that parses.
 //!
 //! From an empty corpus, as in CI, raw bytes seldom grow into JSON that follows the schema within
 //! seconds. So most inputs build a session shaped like a real one, whose every number, name and
@@ -7,6 +7,8 @@
 //! byte changed; the rest are read as text as they are.
 
 #![no_main]
+
+use std::path::{Component, Path};
 
 use libfuzzer_sys::arbitrary::{Result, Unstructured};
 use libfuzzer_sys::fuzz_target;
@@ -56,6 +58,19 @@ fn check(text: &str) {
     let Ok(session) = file::parse(text) else {
         return;
     };
+    // `../c.mid`, which the builder offers, is always refused: no path leaves the session's folder.
+    for track in &session.tracks {
+        for clip in &track.clips {
+            let inside = Path::new(&clip.file)
+                .components()
+                .all(|component| matches!(component, Component::Normal(_) | Component::CurDir));
+            assert!(
+                inside,
+                "a path that leaves the session's folder parsed: {:?}",
+                clip.file
+            );
+        }
+    }
     let written = session.to_json().expect("a parsed session writes");
     if let Err(error) = file::parse(&written) {
         panic!("a session that parsed does not parse once written: {error}\n{written}");

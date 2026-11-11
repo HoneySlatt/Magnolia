@@ -37,4 +37,4 @@ pub mod render;
 pub use build::{BuildError, BuiltSession, ReaderMode};
 pub use load::{LoadError, Session};
 pub use play::{PlayReport, SessionPlayer, StartError};
-pub use render::{RenderError, RenderReport, render};
+pub use render::{RenderError, RenderReport, render, render_to_file};

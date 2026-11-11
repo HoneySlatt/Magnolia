@@ -2,8 +2,11 @@
 //! thread, into a WAV file.
 
 use std::error::Error;
+use std::ffi::OsString;
 use std::fmt;
-use std::io::{Seek, Write};
+use std::fs::{self, File};
+use std::io::{self, BufWriter, Seek, Write};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use magnolia_engine::disk::{DiskConfig, PrimeError};
@@ -119,6 +122,74 @@ pub fn render<W: Write + Seek>(
     })
 }
 
+/// Renders `session` as [`render`] does into a new WAV file at `path`, which must not exist, so
+/// that the file appears whole or not at all: it renders into `.<name>.partial` beside it, syncs
+/// it to disk, then renames it to `path`. A render that fails removes its partial file.
+///
+/// It refuses a `path` that exists. A file made at `path` by another program during the render
+/// would be replaced by the rename; the check before it is all that guards against that.
+///
+/// # Errors
+///
+/// [`RenderError::OutputExists`] for a file in the way; [`RenderError::Output`] when the partial
+/// file cannot be made, synced or renamed, or exists already from a render that was killed;
+/// otherwise what [`render`] refuses.
+pub fn render_to_file(
+    session: &Session,
+    block_frames: usize,
+    path: &Path,
+) -> Result<RenderReport, RenderError> {
+    if path.symlink_metadata().is_ok() {
+        return Err(RenderError::OutputExists(path.to_path_buf()));
+    }
+    let partial = partial_path(path)?;
+    let file = File::create_new(&partial).map_err(output_error(&partial))?;
+    let rendered = render_and_sync(session, block_frames, file, &partial).and_then(|report| {
+        fs::rename(&partial, path).map_err(output_error(path))?;
+        Ok(report)
+    });
+    if rendered.is_err() {
+        // The error reported is the render's; a partial file that cannot be removed stays, and
+        // the next render into `path` says so.
+        let _ = fs::remove_file(&partial);
+    }
+    rendered
+}
+
+/// `.<name>.partial` beside `path`.
+fn partial_path(path: &Path) -> Result<PathBuf, RenderError> {
+    let name = path.file_name().ok_or_else(|| RenderError::Output {
+        path: path.to_path_buf(),
+        error: io::Error::new(io::ErrorKind::InvalidInput, "the path names no file"),
+    })?;
+    let mut partial = OsString::from(".");
+    partial.push(name);
+    partial.push(".partial");
+    Ok(path.with_file_name(partial))
+}
+
+/// Renders into `file`, at `path`, and syncs it to disk.
+fn render_and_sync(
+    session: &Session,
+    block_frames: usize,
+    file: File,
+    path: &Path,
+) -> Result<RenderReport, RenderError> {
+    let mut writer = BufWriter::new(file);
+    let report = render(session, block_frames, &mut writer)?;
+    let file = writer
+        .into_inner()
+        .map_err(|error| output_error(path)(error.into_error()))?;
+    file.sync_all().map_err(output_error(path))?;
+    Ok(report)
+}
+
+/// An error of the file at `path`.
+fn output_error(path: &Path) -> impl FnOnce(io::Error) -> RenderError + use<> {
+    let path = path.to_path_buf();
+    move |error| RenderError::Output { path, error }
+}
+
 /// Why a render failed.
 #[derive(Debug)]
 pub enum RenderError {
@@ -139,6 +210,15 @@ pub enum RenderError {
     PlayDidNotStart,
     /// The WAV file could not be written.
     Wav(WavError),
+    /// The file to render into exists already: a render never writes over a file.
+    OutputExists(PathBuf),
+    /// The file to render into could not be made, completed or put in place.
+    Output {
+        /// The file.
+        path: PathBuf,
+        /// Why.
+        error: io::Error,
+    },
 }
 
 impl From<BuildError> for RenderError {
@@ -180,6 +260,12 @@ impl fmt::Display for RenderError {
                 formatter.write_str("the play did not start at the render's first block")
             }
             Self::Wav(error) => write!(formatter, "the render could not be written: {error}"),
+            Self::OutputExists(path) => write!(
+                formatter,
+                "{} exists already; a render never writes over a file",
+                path.display()
+            ),
+            Self::Output { path, error } => write!(formatter, "{}: {error}", path.display()),
         }
     }
 }
@@ -191,7 +277,8 @@ impl Error for RenderError {
             Self::Prime(error) => Some(error),
             Self::Transport(error) => Some(error),
             Self::Wav(error) => Some(error),
-            Self::BlockOutOfRange { .. } | Self::PlayDidNotStart => None,
+            Self::Output { error, .. } => Some(error),
+            Self::BlockOutOfRange { .. } | Self::PlayDidNotStart | Self::OutputExists(_) => None,
         }
     }
 }

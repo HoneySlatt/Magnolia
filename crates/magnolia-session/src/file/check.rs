@@ -19,12 +19,12 @@ use super::{
 /// The channels of a MIDI track's instrument: the test synth's two outputs.
 pub(crate) const INSTRUMENT_CHANNELS: u16 = 2;
 
-/// The furthest from the timeline's zero an audio clip may end: 2^41 frames, the disk reader's
-/// limit.
+/// The furthest from the timeline's zero a clip may end: 2^41 samples, the disk reader's limit,
+/// 530 days at 48 kHz. A MIDI clip keeps to it too, so that no session asks for an endless render.
 const TIMELINE_LIMIT: i64 = 1 << 41;
 
 /// Where an output or a send goes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Target {
     /// The master.
     Master,
@@ -508,13 +508,13 @@ pub(crate) fn place_midi_clip(
             tempo_map,
             &rate,
         )?;
-        Some((length, end))
+        (end.0 <= TIMELINE_LIMIT).then_some((length, end))
     });
     let (length, end) = placed.ok_or_else(|| {
         out_of_range(
             format!("{field}.length"),
             clip.length,
-            "the clip must end within the timeline's range",
+            "the clip must end within 2^41 samples of the timeline's zero",
         )
     })?;
     Ok(PlacedMidiClip {
@@ -524,8 +524,9 @@ pub(crate) fn place_midi_clip(
     })
 }
 
-/// A file's path, given at `field`, without its `.` components: the key by which a session reads
-/// each file once. It must be relative, and not empty.
+/// A file's path, given at `field`, without its `.` components and repeated separators: the key by
+/// which a session reads each file once. It must be relative, not empty, and stay inside the
+/// session file's folder: no `..`. A symbolic link inside the folder is followed wherever it leads.
 pub(crate) fn relative_path(field: &str, path: &str) -> Result<PathBuf, FileError> {
     if path.is_empty() {
         return Err(FileError::new(field, Problem::EmptyPath));
@@ -536,8 +537,11 @@ pub(crate) fn relative_path(field: &str, path: &str) -> Result<PathBuf, FileErro
             Component::Prefix(_) | Component::RootDir => {
                 return Err(FileError::new(field, Problem::AbsolutePath));
             }
+            Component::ParentDir => {
+                return Err(FileError::new(field, Problem::PathLeavesFolder));
+            }
             Component::CurDir => {}
-            Component::ParentDir | Component::Normal(_) => relative.push(component),
+            Component::Normal(_) => relative.push(component),
         }
     }
     Ok(relative)

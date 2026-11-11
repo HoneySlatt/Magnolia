@@ -88,7 +88,9 @@ cargo run --release -p magnolia-session --example render -- /tmp/magnolia-small/
     /tmp/magnolia-small.wav
 ```
 
-Both print what they wrote and how long it took. Delete the folders afterwards: nothing cleans them.
+Both print what they wrote and how long it took; the render also prints the memory the session
+asks for, which may not pass 1 GiB. The render never writes over a file, and one that fails leaves
+nothing behind. Delete the folders afterwards: nothing cleans them.
 
 ## Fuzzing
 

@@ -1,8 +1,19 @@
 //! Building a session into an engine: [`Session::build`] makes the engine, the disk reader and the
 //! graph of nodes that plays the session.
 
+// A session comes from a file from outside; building it must never crash Magnolia, so nothing here
+// may panic.
+#![warn(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
+
 use std::error::Error;
 use std::fmt;
+use std::sync::Arc;
 
 use magnolia_engine::disk::{AudioTrack, DiskConfig, DiskError, DiskReader};
 use magnolia_engine::engine::{
@@ -70,14 +81,17 @@ impl Session {
             usize::from(self.master_channels),
         );
         let (mut controller, processor) = engine::new(config)?;
-        let audio_tracks: Vec<AudioTrack> = self
+        // The audio tracks in the session's order, with their strips: the reader makes one player
+        // for each, in that order, so that zipping the players with the strips pairs them.
+        let (audio_tracks, audio_strips): (Vec<AudioTrack>, Vec<&Strip>) = self
             .tracks
             .iter()
-            .filter_map(|track| match &track.source {
-                LoadedSource::Audio(audio) => Some(audio.clone()),
+            .zip(&self.routing.tracks)
+            .filter_map(|(track, strip)| match &track.source {
+                LoadedSource::Audio(audio) => Some((audio.clone(), strip)),
                 LoadedSource::Midi { .. } => None,
             })
-            .collect();
+            .unzip();
         let disk = DiskConfig::new(self.rate);
         let (reader, players) = match mode {
             ReaderMode::Thread => DiskReader::start(disk, &audio_tracks, controller.stats())?,
@@ -101,46 +115,27 @@ impl Session {
                 .collect(),
         };
         for (strip, chain) in self.routing.buses.iter().zip(&buses) {
-            graph.feed(chain.output, strip.channels, inputs.of(strip.output));
+            graph.feed(chain.output, strip.channels, inputs.of(strip.output)?);
         }
-        let mut players = players.into_iter();
+        for (player, strip) in players.into_iter().zip(audio_strips) {
+            let source = graph.add(player)?;
+            graph.track(source, strip, &inputs)?;
+        }
         for (track, strip) in self.tracks.iter().zip(&self.routing.tracks) {
-            let source = match &track.source {
-                LoadedSource::Audio(_) => {
-                    let player = players
-                        .next()
-                        .expect("the disk reader makes one player per audio track, in order");
-                    graph.add(player)?
-                }
-                LoadedSource::Midi {
-                    instrument,
-                    sequence,
-                } => {
-                    let node = match instrument {
-                        Instrument::TestSynth {} => graph.add(TestSynth::new(self.rate))?,
-                    };
-                    graph
-                        .controller
-                        .set_sequences(node, vec![sequence.clone()])?;
-                    node
-                }
+            let LoadedSource::Midi {
+                instrument,
+                sequence,
+            } = &track.source
+            else {
+                continue;
             };
-            let chain = graph.chain(strip)?;
-            graph.feed(
-                source,
-                strip.channels,
-                Input::Node(chain.input, strip.channels),
-            );
-            graph.feed(chain.output, strip.channels, inputs.of(strip.output));
-            for &(to, gain) in &strip.sends {
-                let send = graph.add(Gain::new(usize::from(strip.channels), gain))?;
-                graph.feed(
-                    chain.output,
-                    strip.channels,
-                    Input::Node(send, strip.channels),
-                );
-                graph.feed(send, strip.channels, inputs.of(to));
-            }
+            let source = match instrument {
+                Instrument::TestSynth {} => graph.add(TestSynth::new(self.rate))?,
+            };
+            graph
+                .controller
+                .set_sequences(source, vec![Arc::clone(sequence)])?;
+            graph.track(source, strip, &inputs)?;
         }
         controller.set_tempo_map(self.tempo_map.clone());
         controller.commit()?;
@@ -177,11 +172,14 @@ struct Inputs {
 }
 
 impl Inputs {
-    fn of(&self, target: Target) -> Input {
+    fn of(&self, target: Target) -> Result<Input, BuildError> {
         match target {
-            Target::Master => self.master,
-            // The routing resolves names to the session's own buses, from the same list.
-            Target::Bus(index) => self.buses[index],
+            Target::Master => Ok(self.master),
+            Target::Bus(index) => self
+                .buses
+                .get(index)
+                .copied()
+                .ok_or(BuildError::UnknownBus(index)),
         }
     }
 }
@@ -194,6 +192,28 @@ struct Graph<'a> {
 impl Graph<'_> {
     fn add(&mut self, node: impl Node + 'static) -> Result<NodeId, GraphError> {
         self.controller.add_node(Box::new(node))
+    }
+
+    /// A track's chain after its `source`, into its output's input, and from after its gain one
+    /// gain per send into the send's input.
+    fn track(&mut self, source: NodeId, strip: &Strip, inputs: &Inputs) -> Result<(), BuildError> {
+        let chain = self.chain(strip)?;
+        self.feed(
+            source,
+            strip.channels,
+            Input::Node(chain.input, strip.channels),
+        );
+        self.feed(chain.output, strip.channels, inputs.of(strip.output)?);
+        for &(to, gain) in &strip.sends {
+            let send = self.add(Gain::new(usize::from(strip.channels), gain))?;
+            self.feed(
+                chain.output,
+                strip.channels,
+                Input::Node(send, strip.channels),
+            );
+            self.feed(send, strip.channels, inputs.of(to)?);
+        }
+        Ok(())
     }
 
     /// The master's inserts in series into the playback channels, and the input that feeds them.
@@ -275,6 +295,9 @@ pub enum BuildError {
     Disk(DiskError),
     /// The graph refused a node or an edge: the arena has no slot left for a session this large.
     Graph(GraphError),
+    /// An output or a send names a bus, by its index, that the session does not hold: a fault of
+    /// the loader, which resolves names to the session's own buses.
+    UnknownBus(usize),
 }
 
 impl From<EngineError> for BuildError {
@@ -301,6 +324,10 @@ impl fmt::Display for BuildError {
             Self::Engine(error) => write!(formatter, "the engine could not be made: {error}"),
             Self::Disk(error) => write!(formatter, "the disk reader could not be made: {error}"),
             Self::Graph(error) => write!(formatter, "the session's graph was refused: {error}"),
+            Self::UnknownBus(index) => write!(
+                formatter,
+                "the session's routing names bus {index}, which the session does not hold"
+            ),
         }
     }
 }
@@ -311,6 +338,7 @@ impl Error for BuildError {
             Self::Engine(error) => Some(error),
             Self::Disk(error) => Some(error),
             Self::Graph(error) => Some(error),
+            Self::UnknownBus(_) => None,
         }
     }
 }

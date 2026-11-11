@@ -32,7 +32,9 @@
 //! start placed on the first sample at or after it; a tempo change's `tick`, and a MIDI clip's
 //! `start` and `length`, in ticks, [`TICKS_PER_QUARTER`] to a quarter note; a tempo is a fraction
 //! of quarter notes a minute, `[numerator, denominator]`; an audio clip's `file_offset` and
-//! `length` are in frames of its file. Paths are relative to the session file's folder.
+//! `length` are in frames of its file. Paths are relative to the session file's folder and stay
+//! inside it: an absolute path or a `..` is refused, a `.` ignored, so that one file has one
+//! spelling; a symbolic link inside the folder is followed wherever it leads.
 //!
 //! The signal flows from each track's source (an audio track's clips, a MIDI track's instrument)
 //! through its inserts in series, then its gain, to its output, and from after its gain through
@@ -45,9 +47,12 @@
 //! The schema is strict: a field unknown or missing, a value of the wrong type or out of range, a
 //! version newer than this reader's, each refuses the file with a [`FileError`] that names the
 //! field by its path, such as `tracks[1].clips[0].start`. Other limits: every position lies at or
-//! after the timeline's zero, where a render starts; a track's audio clips do not overlap
+//! after the timeline's zero, where a render starts, and every clip ends within 2^41 samples of
+//! it; a track's audio clips do not overlap
 //! ([ADR-0026](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0026-one-stream-per-audio-track.md));
-//! a session reads at most [`MAX_AUDIO_FILES`] audio files, each kept open while it plays.
+//! a session reads at most [`MAX_AUDIO_FILES`] audio files, each kept open while it plays. The
+//! memory a session asks for is checked when it is opened, against
+//! [`MEMORY_BUDGET`](crate::load::MEMORY_BUDGET).
 
 // The loader runs this module on files from outside; a bad file must never crash Magnolia, so
 // nothing here may panic.
@@ -422,6 +427,9 @@ pub enum Problem {
     AbsolutePath,
     /// A file's path is empty.
     EmptyPath,
+    /// A file's path climbs out of a folder with `..`; paths stay inside the session file's
+    /// folder.
+    PathLeavesFolder,
     /// The clip's audio file is past the [`MAX_AUDIO_FILES`]th the session reads.
     TooManyAudioFiles,
     /// The tempo map cannot be built.
@@ -476,6 +484,10 @@ impl fmt::Display for Problem {
             Self::AbsolutePath => formatter
                 .write_str("the path is absolute; paths are relative to the session file's folder"),
             Self::EmptyPath => formatter.write_str("the path is empty"),
+            Self::PathLeavesFolder => formatter.write_str(
+                "the path climbs out of a folder with `..`; paths stay inside the session file's \
+                 folder",
+            ),
             Self::TooManyAudioFiles => write!(
                 formatter,
                 "the session reads at most {MAX_AUDIO_FILES} audio files, and this is one more"

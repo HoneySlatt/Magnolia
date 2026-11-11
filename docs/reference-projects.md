@@ -98,8 +98,9 @@ its double, harmonies, the bridge or ad-libs, each in some sections, resting two
 files hold silence between phrases, and their clips leave gaps between sections; the guitars play
 the verses and choruses. Stems and pianos play from the start to the end, the drums and bass
 percussive, the voices, backing vocals and pads sustained. The room and hall buses hold a gain where
-their reverb will go; the other plugins' places hold nothing yet. The master peaks near -3 dBFS.
-The live input of the high tier comes with recording (M1.5).
+their reverb will go; the other plugins' places hold nothing yet. Rendered offline, the master
+peaks at -3.0 dBFS in the lowest tier's project and -4.3 dBFS in the high tier's. The live input of
+the high tier comes with recording (M1.5).
 
 To render one offline into a WAV file of floats:
 

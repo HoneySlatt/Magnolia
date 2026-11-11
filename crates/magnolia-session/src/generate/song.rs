@@ -91,8 +91,9 @@ const SCALE: [u8; 21] = [
 ];
 
 impl Song {
-    /// The reference projects' song: 3 minutes 30 seconds at 140 BPM in 4/4, 490 quarter notes,
-    /// in sections of 8 and 16 bars.
+    /// The reference projects' song: 3 minutes 30 seconds at 140 BPM in 4/4, 490 quarter notes:
+    /// an intro of 8 bars, verses and choruses of 16, a bridge of 8, then an outro of 26 bars and a
+    /// half, where the song ends.
     pub(super) fn reference() -> Result<Self, GenerateError> {
         let tempo = TempoSection {
             origin: 0,

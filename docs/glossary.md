@@ -100,6 +100,8 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
 - **Low-water mark**: the fewest frames an audio player found ready ahead of it since its play
   started.
 - **MCP**: the Model Context Protocol, through which agents drive Magnolia.
+- **Memory budget**: the most memory a test session may ask for, 1 GiB, estimated from its file
+  before anything large is allocated ([`ARCHITECTURE.md`](ARCHITECTURE.md#the-memory-budget)).
 - **Moment**: the exact instant of a position, through which every conversion of time goes
   ([ADR-0018](adr/0018-the-time-model.md)).
 - **Null**: two renders that cancel exactly when one is subtracted from the other.

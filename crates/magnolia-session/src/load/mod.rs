@@ -1,6 +1,7 @@
-//! Opening a test session: [`Session::open`] reads its file and checks it, opens its audio files,
-//! reads its MIDI files into sequences, and resolves its routing, so that
-//! [`Session::build`](crate::build) only makes nodes.
+//! Opening a test session: [`Session::open`] reads its file and checks it, holds the memory it
+//! asks for to a budget ([`MemoryEstimate`]), opens its audio files, reads its MIDI files into
+//! sequences, and resolves its routing, so that [`Session::build`](crate::build) only makes
+//! nodes.
 
 // The loader reads files from outside; a bad file must never crash Magnolia, so nothing here may
 // panic.
@@ -12,6 +13,7 @@
     clippy::arithmetic_side_effects
 )]
 
+mod budget;
 mod midi;
 
 #[cfg(test)]
@@ -37,6 +39,8 @@ use crate::file::{
 };
 use crate::midi_file::{self, MidiFile, MidiFileError};
 
+pub use budget::{MEMORY_BUDGET, MemoryEstimate};
+
 /// The most bytes a session's JSON file, or one of its MIDI files, may hold: 64 MiB.
 pub const MAX_FILE_BYTES: u64 = 64 << 20;
 
@@ -53,6 +57,8 @@ pub struct Session {
     /// Each track's name and what it plays, in the file's order, as `routing.tracks`.
     pub(crate) tracks: Vec<LoadedTrack>,
     pub(crate) last_sample: SamplePosition,
+    /// What it asks for in memory, estimated before anything was allocated.
+    pub(crate) memory: MemoryEstimate,
 }
 
 /// A track's name and what it plays, loaded.
@@ -76,10 +82,13 @@ pub(crate) enum LoadedSource {
 
 impl Session {
     /// Opens the test session at `path`: reads it, at most [`MAX_FILE_BYTES`], and checks it
-    /// ([`file::parse`]); opens each audio file once, and checks that it is at the session's rate,
-    /// has its track's channels and holds every frame of its clips; reads each MIDI file once,
-    /// at most `MAX_FILE_BYTES`, and makes each MIDI track's clips one sequence. Paths are relative
-    /// to the session file's folder.
+    /// ([`file::parse`]); estimates the memory it asks for from the file alone and refuses it over
+    /// [`MEMORY_BUDGET`]; reads each MIDI file once, at most `MAX_FILE_BYTES`, however its clips
+    /// spell it, adds it and the events its clips expand to, and refuses the session again if it
+    /// passes the budget, before any clip expands; opens each audio file once, and checks that it
+    /// is at the session's rate, has its track's channels and holds every frame of its clips; and
+    /// makes each MIDI track's clips one sequence. Paths are relative to the session file's
+    /// folder.
     ///
     /// A MIDI clip plays its whole file, every track merged, its ticks scaled from the file's
     /// division by the first tick at or after; each note off ends the earliest note of its channel
@@ -128,6 +137,12 @@ impl Session {
     pub fn master_channels(&self) -> u16 {
         self.master_channels
     }
+
+    /// What the session asks for in memory, estimated before anything was allocated, within
+    /// [`MEMORY_BUDGET`].
+    pub fn memory_estimate(&self) -> MemoryEstimate {
+        self.memory
+    }
 }
 
 /// Why a loader stopped: the session's file, at a field, or one of the files it names.
@@ -154,6 +169,8 @@ struct Loader<'a> {
     folder: &'a Path,
     audio_files: HashMap<PathBuf, Arc<AudioFile>>,
     midi_files: HashMap<PathBuf, MidiFile>,
+    /// What the session asks for so far, checked against the budget at each step.
+    memory: MemoryEstimate,
 }
 
 impl<'a> Loader<'a> {
@@ -163,13 +180,59 @@ impl<'a> Loader<'a> {
             folder,
             audio_files: HashMap::new(),
             midi_files: HashMap::new(),
+            memory: MemoryEstimate::default(),
         }
+    }
+
+    /// Refuses the session once it asks for more than the budget.
+    fn check_budget(&self) -> Result<(), Failed> {
+        if self.memory.fits() {
+            Ok(())
+        } else {
+            Err(LoadError::OverBudget(self.memory).into())
+        }
+    }
+
+    /// Reads every MIDI file the session's clips name, each once, and counts it and the events each
+    /// clip will expand it to, so that a session over the budget is refused before any clip
+    /// expands.
+    fn read_midi_files(&mut self, sources: &[TrackSource]) -> Result<(), Failed> {
+        let file = self.file;
+        for (index, (track, source)) in file.tracks.iter().zip(sources).enumerate() {
+            if let TrackSource::Audio { .. } = source {
+                continue;
+            }
+            for (clip_index, clip) in track.clips.iter().enumerate() {
+                let field = format!("tracks[{index}].clips[{clip_index}].file");
+                let (_, midi) = self.midi_file(&field, &clip.file)?;
+                let events = event_count(midi);
+                self.memory.add_midi_clip(events);
+            }
+        }
+        self.check_budget()
     }
 
     fn load(mut self) -> Result<Session, Failed> {
         let rate = self.file.rate()?;
         let tempo_map = self.file.tempo.map()?;
         let routing = self.file.routing()?;
+        let sources = self
+            .file
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(index, track)| track.source(&format!("tracks[{index}]")))
+            .collect::<Result<Vec<_>, _>>()?;
+        // Nothing large is allocated before the estimate fits the budget: the streams, delays and
+        // buffers from the file alone; then the MIDI files, each read once, and their clips.
+        self.memory = MemoryEstimate::of_session(
+            rate,
+            (self.file.master.channels, &self.file.master.inserts),
+            &routing,
+            &sources,
+        );
+        self.check_budget()?;
+        self.read_midi_files(&sources)?;
         let mut tracks = Vec::with_capacity(self.file.tracks.len());
         let mut last_sample = 0;
         for (index, track) in self.file.tracks.iter().enumerate() {
@@ -196,6 +259,7 @@ impl<'a> Loader<'a> {
             routing,
             tracks,
             last_sample: SamplePosition(last_sample),
+            memory: self.memory,
         })
     }
 
@@ -311,8 +375,9 @@ impl<'a> Loader<'a> {
         }
     }
 
-    /// The MIDI file `path` names, at `field`, read the first time it is asked for, and its path on
-    /// disk.
+    /// The MIDI file `path` names, at `field`, and its path on disk. It is read and parsed the
+    /// first time it is asked for, and counted against the budget then; each file is one key,
+    /// however its clips spell it.
     fn midi_file(&mut self, field: &str, path: &str) -> Result<(PathBuf, &MidiFile), Failed> {
         let key = relative_path(field, path)?;
         let on_disk = self.folder.join(&key);
@@ -332,11 +397,23 @@ impl<'a> Loader<'a> {
                 })?;
                 let read = midi_file::read(&bytes)
                     .map_err(|error| failure(MidiProblem::Malformed(error)))?;
+                self.memory.add_midi_file(event_count(&read));
+                if !self.memory.fits() {
+                    return Err(LoadError::OverBudget(self.memory).into());
+                }
                 entry.insert(read)
             }
         };
         Ok((on_disk, file))
     }
+}
+
+/// The events of a MIDI file, every track's.
+fn event_count(file: &MidiFile) -> u64 {
+    file.tracks
+        .iter()
+        .map(|track| track.events.len() as u64)
+        .fold(0, u64::saturating_add)
 }
 
 /// Why a file could not be read whole.
@@ -408,6 +485,9 @@ pub enum LoadError {
         /// What is wrong with it.
         problem: MidiProblem,
     },
+    /// The session asks for more memory than [`MEMORY_BUDGET`], by this estimate, made before
+    /// anything was allocated.
+    OverBudget(MemoryEstimate),
     /// A MIDI track's clips do not make a sequence.
     Sequence {
         /// The track, by its path in the session, such as `tracks[3]`.
@@ -481,6 +561,12 @@ impl fmt::Display for LoadError {
                 problem,
             } => write!(formatter, "{field}: {}: {problem}", path.display()),
             Self::Sequence { field, error } => write!(formatter, "{field}: {error}"),
+            Self::OverBudget(estimate) => write!(
+                formatter,
+                "the session asks for more memory than the {} MiB a test session may take: \
+                 {estimate}",
+                MEMORY_BUDGET >> 20
+            ),
         }
     }
 }

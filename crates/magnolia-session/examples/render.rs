@@ -7,16 +7,16 @@
 //!
 //! It plays the session from its start, in blocks of 4,096 frames or `--block N`, until its last
 //! clip's end, its compensation and one second of tail, and says how many frames it wrote, how
-//! long it took, the underruns (always 0) and the session's largest compensation. It refuses to
-//! write over a file.
+//! long it took, the underruns (always 0), the session's largest compensation and the memory it
+//! asks for, estimated. It never writes over a file, and a render that fails leaves nothing
+//! behind (`render_to_file`).
 
 use std::env;
-use std::fs::File;
-use std::io::BufWriter;
+use std::path::Path;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use magnolia_session::{Session, render};
+use magnolia_session::{Session, render_to_file};
 
 const USAGE: &str = "usage: render <session.json> <out.wav> [--block FRAMES]";
 
@@ -45,27 +45,21 @@ fn main() -> ExitCode {
         }
     };
     let opened = start.elapsed();
-    let out = match File::create_new(out_path) {
-        Ok(out) => out,
-        Err(error) => {
-            eprintln!("{out_path}: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
-    match render(&session, block, BufWriter::new(out)) {
+    match render_to_file(&session, block, Path::new(out_path)) {
         Ok(report) => {
             let rate = f64::from(session.sample_rate().hertz());
             let seconds = start.elapsed().as_secs_f64();
             println!(
                 "rendered {} frames ({:.1} s of audio) into {out_path} in {seconds:.2} s, the \
                  session opened in {:.3} s: {:.0} times real time; {} underruns; largest \
-                 compensation {} samples",
+                 compensation {} samples; memory asked for, estimated: {}",
                 report.frames,
                 report.frames as f64 / rate,
                 opened.as_secs_f64(),
                 report.frames as f64 / rate / seconds,
                 report.underruns,
-                report.largest_compensation
+                report.largest_compensation,
+                session.memory_estimate()
             );
             ExitCode::SUCCESS
         }
