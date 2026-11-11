@@ -15,6 +15,7 @@ reverse ([`AGENTS.md`](../AGENTS.md#architecture-rules)).
 |---|---|---|
 | `magnolia-engine` | The audio engine ([ADR-0007](adr/0007-the-audio-engine.md)): the graph of nodes, its swaps and its real-time processor (module `engine`), the node contract (`node`) and the engine's own nodes (`nodes`), what a backend lends each period (`device`), a backend without a device (`offline`), the engine's statistics (`stats`, `callback_times`), the time model (`time`), and WAV files read, decoded and written by its own code (`wav`, [ADR-0029](adr/0029-magnolias-own-wav-and-midi-file-readers.md)). It holds no audio backend: backends are crates of their own. | `rtrb` |
 | `magnolia-jack` | The JACK backend: plays the engine's processor through the JACK API, on PipeWire and JACK2, and says whether its audio thread runs in real time ([below](#the-jack-backend)). | `magnolia-engine`, `jack`, `libc`, `rtrb` |
+| `magnolia-session` | The test session of M1.4, which only the tests and the command line read and Stage 2's project replaces ([ADR-0028](adr/0028-the-test-session-in-json.md)). For now, Standard MIDI Files of format 0 and 1 read and written by its own code (`midi_file`, [ADR-0029](adr/0029-magnolias-own-wav-and-midi-file-readers.md)). | none |
 
 Each crate's fuzz targets live in its `fuzz/` folder, a workspace of its own, so that the
 workspace's builds never compile libFuzzer. Its benchmarks live in `benches/`, built on the standard

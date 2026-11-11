@@ -74,7 +74,8 @@ cargo run --release -p magnolia-jack --example play -- --server magnolia-try --l
 
 ## Fuzzing
 
-Each crate's fuzz targets live in its `fuzz/` folder, a workspace of its own. To list them, then
+Each crate's fuzz targets live in its `fuzz/` folder, a workspace of its own:
+`crates/magnolia-engine/fuzz` and `crates/magnolia-session/fuzz`. To list a crate's targets, then
 run one for a minute:
 
 ```sh
@@ -83,10 +84,9 @@ nightly cargo fuzz run --fuzz-dir crates/magnolia-engine/fuzz --target-dir targe
     -- -max_total_time=60
 ```
 
-`--target-dir target/fuzz` shares the builds of `scripts/check.sh`. A crash leaves its input in
-`crates/magnolia-engine/fuzz/artifacts/`; `cargo fuzz run` with that file's path after the
-target's name replays it. The corpus grows in `fuzz/corpus/`, which git
-ignores.
+`--target-dir target/fuzz` shares the builds of `scripts/check.sh`. A crash leaves its input in the
+crate's `fuzz/artifacts/`; `cargo fuzz run` with that file's path after the target's name replays
+it. The corpus grows in `fuzz/corpus/`, which git ignores.
 
 ## The checks
 
@@ -109,7 +109,7 @@ fails. CI runs it unchanged, on each push to `main`, each pull request and once 
 | documentation | rustdoc, warnings as errors | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked` |
 | dependencies | Licenses, RustSec advisories and sources, by `deny.toml`, the fuzz targets' too; fetches the advisories | `cargo deny --locked check` |
 | RealtimeSanitizer | Clippy on each crate's sanitizer test, then the sanitizer stops an allocation and a lock's wait in functions marked real-time, lets the collector's wake pass by its suppression, and stays silent on a block's conversions of time, on the engine's processor and on the JACK backend's process callback, played on a dummy JACK2 server | below |
-| fuzzing | Each fuzz target for 20 s, or `MAGNOLIA_FUZZ_SECONDS` | [Fuzzing](#fuzzing) |
+| fuzzing | Each fuzz target of every `crates/*/fuzz/` folder for 20 s, or `MAGNOLIA_FUZZ_SECONDS` | [Fuzzing](#fuzzing) |
 
 The sanitizer's tests, one in `magnolia-engine` and one in `magnolia-jack`, run only on the
 nightly, with the sanitizer's flags, in a target directory of their own; `cargo test` leaves them
@@ -140,7 +140,8 @@ the options above; the backend's `backend` case also needs `MAGNOLIA_RTSAN_SERVE
 running JACK2 server.
 
 The fuzz targets' own formatting, lints and dependencies are checked with the same commands, given
-`--manifest-path crates/magnolia-engine/fuzz/Cargo.toml`.
+each fuzz folder's manifest, such as `--manifest-path crates/magnolia-session/fuzz/Cargo.toml`;
+the script finds every `crates/*/fuzz/` folder.
 
 How long a full check takes, and its budget, are in
 [`docs/measurements.md`](docs/measurements.md#m13--the-jack-backend-and-the-graph).

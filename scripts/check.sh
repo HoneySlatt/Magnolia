@@ -14,8 +14,18 @@ command -v nightly >/dev/null || {
 
 step() { printf '\n==> %s\n' "$*"; }
 
-# The fuzz targets live in a workspace of their own (ADR-0013); their builds share target/.
-fuzz=(--manifest-path crates/magnolia-engine/fuzz/Cargo.toml)
+# Each crate's fuzz targets live in its fuzz/ folder, a workspace of its own (ADR-0013); their
+# builds share target/fuzz.
+fuzz_dirs=()
+for dir in crates/*/fuzz; do
+    if [ -d "$dir" ]; then
+        fuzz_dirs+=("$dir")
+    fi
+done
+if [ ${#fuzz_dirs[@]} -eq 0 ]; then
+    echo "no crate has a fuzz/ folder in crates/*/fuzz" >&2
+    exit 1
+fi
 fuzz_target_dir="${CARGO_TARGET_DIR:-target}/fuzz"
 # How long each fuzz target runs; set it higher to fuzz longer by hand.
 fuzz_seconds="${MAGNOLIA_FUZZ_SECONDS:-20}"
@@ -38,11 +48,16 @@ done
 
 step "formatting"
 cargo fmt --all --check
-cargo fmt "${fuzz[@]}" --check
+for dir in "${fuzz_dirs[@]}"; do
+    cargo fmt --manifest-path "$dir/Cargo.toml" --check
+done
 
 step "lints"
 cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo clippy "${fuzz[@]}" --locked --target-dir "$fuzz_target_dir" -- -D warnings
+for dir in "${fuzz_dirs[@]}"; do
+    cargo clippy --manifest-path "$dir/Cargo.toml" --locked --target-dir "$fuzz_target_dir" \
+        -- -D warnings
+done
 
 step "tests"
 cargo test --workspace --locked
@@ -58,7 +73,9 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 
 step "dependencies (licenses, advisories, sources)"
 cargo deny --locked check
-cargo deny "${fuzz[@]}" --locked check
+for dir in "${fuzz_dirs[@]}"; do
+    cargo deny --manifest-path "$dir/Cargo.toml" --locked check
+done
 
 # RealtimeSanitizer ships with the nightly's standard library (ADR-0013). `--cfg magnolia_rtsan`
 # turns on the code that only the nightly builds (ADR-0019). `--target` keeps both flags off build
@@ -81,18 +98,20 @@ for crate in magnolia-engine magnolia-jack; do
 done
 
 # cargo fuzz builds with the nightly, libFuzzer and AddressSanitizer; a crash fails the step and
-# leaves its input in crates/magnolia-engine/fuzz/artifacts/. It takes no --locked: the fuzz crate's
-# Clippy above has checked its lock file.
+# leaves its input in the crate's fuzz/artifacts/. It takes no --locked: the fuzz crates' Clippy
+# above has checked their lock files.
 step "fuzzing, ${fuzz_seconds} s per target"
-# The list is read apart: a command that fails inside a `for` list would not stop the script.
-fuzz_targets=$(nightly cargo fuzz list --fuzz-dir crates/magnolia-engine/fuzz)
-if [ -z "$fuzz_targets" ]; then
-    echo "cargo fuzz lists no fuzz target in crates/magnolia-engine/fuzz" >&2
-    exit 1
-fi
-for target in $fuzz_targets; do
-    nightly cargo fuzz run --fuzz-dir crates/magnolia-engine/fuzz --target-dir "$fuzz_target_dir" \
-        "$target" -- -max_total_time="$fuzz_seconds"
+for dir in "${fuzz_dirs[@]}"; do
+    # The list is read apart: a command that fails inside a `for` list would not stop the script.
+    fuzz_targets=$(nightly cargo fuzz list --fuzz-dir "$dir")
+    if [ -z "$fuzz_targets" ]; then
+        echo "cargo fuzz lists no fuzz target in $dir" >&2
+        exit 1
+    fi
+    for target in $fuzz_targets; do
+        nightly cargo fuzz run --fuzz-dir "$dir" --target-dir "$fuzz_target_dir" \
+            "$target" -- -max_total_time="$fuzz_seconds"
+    done
 done
 
 step "all checks passed"

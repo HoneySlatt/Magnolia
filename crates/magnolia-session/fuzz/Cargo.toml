@@ -1,0 +1,35 @@
+# The fuzz targets of magnolia-session, which `cargo fuzz` builds on the nightly toolchain with
+# libFuzzer and AddressSanitizer (ADR-0013). Kept out of Magnolia's workspace, as cargo fuzz asks,
+# so that the workspace's builds never compile libFuzzer. scripts/check.sh runs each target briefly.
+[package]
+name = "magnolia-session-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+# Approved by the owner on 2026-11-11 (docs/PLAN.md, M1.2): the libFuzzer runtime that cargo fuzz
+# drives, (MIT OR Apache-2.0) AND NCSA. The same version as magnolia-engine's fuzz targets.
+libfuzzer-sys = "0.4.13"
+magnolia-session = { path = ".." }
+
+# A workspace of its own: Magnolia's workspace holds crates/* only.
+[workspace]
+
+# The workspace's lints (Cargo.toml), which a workspace of its own does not inherit.
+[lints.rust]
+missing_docs = "warn"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "warn"
+
+[[bin]]
+name = "midi_file_reader"
+path = "fuzz_targets/midi_file_reader.rs"
+test = false
+doc = false
+bench = false
