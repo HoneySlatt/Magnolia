@@ -12,7 +12,12 @@ command -v nightly >/dev/null || {
     exit 1
 }
 
-step() { printf '\n==> %s\n' "$*"; }
+# Each step prints the time the previous one took, so that a slow step shows (docs/measurements.md).
+step_started=$SECONDS
+step() {
+    printf '    (%d s)\n\n==> %s\n' "$((SECONDS - step_started))" "$*"
+    step_started=$SECONDS
+}
 
 # Each crate's fuzz targets live in its fuzz/ folder, a workspace of its own (ADR-0013); their
 # builds share target/fuzz.
@@ -100,7 +105,13 @@ done
 # cargo fuzz builds with the nightly, libFuzzer and AddressSanitizer; a crash fails the step and
 # leaves its input in the crate's fuzz/artifacts/. It takes no --locked: the fuzz crates' Clippy
 # above has checked their lock files.
-step "fuzzing, ${fuzz_seconds} s per target"
+# libFuzzer runs one target on one core, so the targets run side by side, as many at once as the
+# machine has cores: each keeps a whole core for its time, and the step takes a fraction of their
+# sum. Each target's output goes to its own log, printed whole when it fails.
+step "fuzzing, ${fuzz_seconds} s per target, up to $(nproc) at once"
+fuzz_logs="$fuzz_target_dir/logs"
+mkdir -p "$fuzz_logs"
+runs=()
 for dir in "${fuzz_dirs[@]}"; do
     # The list is read apart: a command that fails inside a `for` list would not stop the script.
     fuzz_targets=$(nightly cargo fuzz list --fuzz-dir "$dir")
@@ -108,10 +119,40 @@ for dir in "${fuzz_dirs[@]}"; do
         echo "cargo fuzz lists no fuzz target in $dir" >&2
         exit 1
     fi
+    # Built first, one at a time, so that the runs below never wait on cargo's lock.
+    nightly cargo fuzz build --fuzz-dir "$dir" --target-dir "$fuzz_target_dir"
     for target in $fuzz_targets; do
-        nightly cargo fuzz run --fuzz-dir "$dir" --target-dir "$fuzz_target_dir" \
-            "$target" -- -max_total_time="$fuzz_seconds"
+        runs+=("$dir $target")
     done
 done
+# xargs runs them, at most one per core. Each run writes its output to its log and its status
+# beside it, which tell, once all are done, which failed.
+fuzz_one() {
+    local dir=$1 target=$2
+    if nightly cargo fuzz run --fuzz-dir "$dir" --target-dir "$fuzz_target_dir" \
+        "$target" -- -max_total_time="$fuzz_seconds" >"$fuzz_logs/$target.log" 2>&1; then
+        echo 0 >"$fuzz_logs/$target.status"
+    else
+        echo 1 >"$fuzz_logs/$target.status"
+    fi
+}
+export -f fuzz_one
+export fuzz_target_dir fuzz_seconds fuzz_logs
+rm -f "$fuzz_logs"/*.status
+printf '%s\n' "${runs[@]}" | xargs -P "$(nproc)" -L 1 bash -c 'fuzz_one "$0" "$1"'
+fuzz_failed=0
+for run in "${runs[@]}"; do
+    read -r dir target <<<"$run"
+    if [ "$(cat "$fuzz_logs/$target.status" 2>/dev/null)" = 0 ]; then
+        echo "$target: $(grep -E '^Done [0-9]+ runs' "$fuzz_logs/$target.log" || echo done)"
+    else
+        echo "$target failed; its crash, if any, is in $dir/artifacts/$target/" >&2
+        cat "$fuzz_logs/$target.log" >&2
+        fuzz_failed=1
+    fi
+done
+if [ "$fuzz_failed" -ne 0 ]; then
+    exit 1
+fi
 
 step "all checks passed"

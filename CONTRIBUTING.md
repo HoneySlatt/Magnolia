@@ -156,7 +156,8 @@ scripts/check.sh
 ```
 
 runs every automated check of the definition of done, in this order, and stops at the first that
-fails. CI runs it unchanged, on each push to `main`, each pull request and once a week.
+fails, printing how long each step took. CI runs it unchanged, on each push to `main`, each pull
+request and once a week.
 
 | Step | What it checks | Alone |
 |---|---|---|
@@ -170,7 +171,7 @@ fails. CI runs it unchanged, on each push to `main`, each pull request and once 
 | documentation | rustdoc, warnings as errors | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked` |
 | dependencies | Licenses, RustSec advisories and sources, by `deny.toml`, the fuzz targets' too; fetches the advisories | `cargo deny --locked check` |
 | RealtimeSanitizer | Clippy on each crate's sanitizer test, then the sanitizer stops an allocation and a lock's wait in functions marked real-time, lets the collector's wake pass by its suppression, and stays silent on a block's conversions of time, on the engine's processor and on the JACK backend's process callback, played on a dummy JACK2 server | below |
-| fuzzing | Each fuzz target of every `crates/*/fuzz/` folder for 20 s, or `MAGNOLIA_FUZZ_SECONDS` | [Fuzzing](#fuzzing) |
+| fuzzing | Each fuzz target of every `crates/*/fuzz/` folder for 20 s, or `MAGNOLIA_FUZZ_SECONDS`, side by side, one per core at most; each target's output in `target/fuzz/logs/`, printed when it fails | [Fuzzing](#fuzzing) |
 
 The sanitizer's tests, one in `magnolia-engine` and one in `magnolia-jack`, run only on the
 nightly, with the sanitizer's flags, in a target directory of their own; `cargo test` leaves them
