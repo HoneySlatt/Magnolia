@@ -29,7 +29,9 @@ pub struct EngineStats {
     last_swap_applied: AtomicU64,
     last_swap_steady: AtomicU64,
     node_errors: AtomicU64,
+    events_taken: AtomicU64,
     events_dropped: AtomicU64,
+    latencies_capped: AtomicU64,
     non_finite_samples: AtomicU64,
     generation_mismatches: AtomicU64,
     missed_plugin_deadlines: AtomicU64,
@@ -69,9 +71,22 @@ impl EngineStats {
         self.node_errors.load(Ordering::Relaxed)
     }
 
+    /// How many events the processor has taken out of its buffer of pending events, delivered or
+    /// dropped. The controller sends no more events than that buffer holds beyond this count
+    /// ([ADR-0027](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0027-timeline-events-from-sources-on-nodes.md)).
+    pub fn events_taken(&self) -> u64 {
+        self.events_taken.load(Ordering::Relaxed)
+    }
+
     /// How many events were dropped because no node of the current graph took them.
     pub fn events_dropped(&self) -> u64 {
         self.events_dropped.load(Ordering::Relaxed)
+    }
+
+    /// How many nodes declared a latency above [`MAX_LATENCY`](crate::node::MAX_LATENCY), which
+    /// the engine took as `MAX_LATENCY`.
+    pub fn latencies_capped(&self) -> u64 {
+        self.latencies_capped.load(Ordering::Relaxed)
     }
 
     /// How many samples bound for the device were not finite, and were replaced by zero.
@@ -150,7 +165,9 @@ impl EngineStats {
             &stats.last_swap_applied,
             &stats.last_swap_steady,
             &stats.node_errors,
+            &stats.events_taken,
             &stats.events_dropped,
+            &stats.latencies_capped,
             &stats.non_finite_samples,
             &stats.generation_mismatches,
             &stats.missed_plugin_deadlines,
@@ -190,6 +207,14 @@ impl EngineStats {
         }
     }
 
+    /// Counts events taken out of the pending buffer. The count only grows, after the events have
+    /// left the buffer, so the controller never reads more room than there is: relaxed is enough.
+    pub(crate) fn count_events_taken(&self, count: u64) {
+        if count > 0 {
+            self.events_taken.fetch_add(count, Ordering::Relaxed);
+        }
+    }
+
     pub(crate) fn count_events_dropped(&self, count: u64) {
         if count > 0 {
             self.events_dropped.fetch_add(count, Ordering::Relaxed);
@@ -207,6 +232,10 @@ impl EngineStats {
             self.generation_mismatches
                 .fetch_add(count, Ordering::Relaxed);
         }
+    }
+
+    pub(crate) fn count_latency_capped(&self) {
+        self.latencies_capped.fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn set_poisoned(&self) {

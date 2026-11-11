@@ -24,6 +24,7 @@ use super::collector::{Garbage, GarbageOut};
 use super::compiled::{Channels, CompiledGraph, Phase, Step, Sum, SwapMessage};
 use super::events::EventInbox;
 use super::fade::{FadeTable, Gain};
+use super::graph::NodeId;
 use super::pool::{self, BufferPool};
 use crate::device::DeviceBuffers;
 use crate::node::{Event, ProcessContext, ProcessStatus};
@@ -127,6 +128,23 @@ impl Processor {
         self.playback_channels
     }
 
+    /// How far ahead of the output a node's input runs in the phase being played, in samples, as
+    /// its step records it; `None` for a node the phase does not run. For tests: the transport
+    /// will read the steps themselves (ADR-0025).
+    #[doc(hidden)]
+    pub fn ahead_in(&self, node: NodeId) -> Option<u64> {
+        let phase = self.graph.phase(self.phase)?;
+        let step = phase.steps.iter().find(|step| step.node == node)?;
+        Some(step.ahead_in)
+    }
+
+    /// The largest compensation of the graph being played, in samples: the largest `ahead_in` of
+    /// its steady phase. For tests: the transport will pre-roll by it (ADR-0025).
+    #[doc(hidden)]
+    pub fn largest_ahead_in(&self) -> u64 {
+        self.graph.largest_ahead_in
+    }
+
     /// Processes one period: reads the device's capture buffers, fills its playback buffers.
     ///
     /// Real-time: it never allocates, frees, locks or blocks, and its only system call wakes the
@@ -165,7 +183,7 @@ impl Processor {
         self.apply_swap();
         // Every queued event may be taken, even while a swap waits: the controller sends an event
         // for a node a swap brings only once the processor has applied that swap.
-        self.events.pop(self.position);
+        self.events.pop();
         let mut done = 0;
         while done < frames {
             let length = self.sub_block_length(frames.saturating_sub(done));
@@ -322,7 +340,8 @@ impl Processor {
         let Some(phase) = graph.phase(*phase) else {
             return;
         };
-        events.take_due(start.saturating_add(as_samples(length)), phase);
+        let taken = events.take_due(start.saturating_add(as_samples(length)), phase);
+        stats.count_events_taken(taken as u64);
         let mut delivered: usize = 0;
         let mut errors: u64 = 0;
         let mut mismatches: u64 = 0;
@@ -344,7 +363,7 @@ impl Processor {
         for sum in phase.sums(phase.playback_sums) {
             sum_into(pool, phase, sum, fade, *phase_elapsed, length);
         }
-        let dropped = events.due_count().saturating_sub(delivered);
+        let dropped = taken.saturating_sub(delivered);
         stats.count_events_dropped(dropped as u64);
         stats.count_node_errors(errors);
         stats.count_generation_mismatches(mismatches);
@@ -373,7 +392,9 @@ impl Processor {
             };
             for (target, &sample) in target.iter_mut().zip(source) {
                 if sample.is_finite() {
-                    *target = sample;
+                    // Adding +0.0 turns a -0.0 into +0.0 and leaves every other sample as it is,
+                    // so that silence reaches the device with the same bits whatever made it.
+                    *target = sample + 0.0;
                 } else {
                     *target = 0.0;
                     non_finite = non_finite.saturating_add(1);

@@ -1,11 +1,17 @@
 //! Timed events, from the controller's queue to each node's sub-block.
 //!
-//! At each period's start, once it has applied any swap, the processor pops what the controller
-//! queued into a pending buffer, late events moved to the period's first sample. The controller
-//! sends an event only once the processor holds its node, so the processor can always pop. For each sub-block it takes the pending events
-//! due before the sub-block's end, sorts them by node, sample and arrival, and lends each node its
-//! own, with offsets from the sub-block's start. Every buffer is reserved and written beforehand;
-//! sorting happens in place. Later events wait in the buffer, and when it is full, in the queue.
+//! At each period's start, once it has applied any swap, the processor pops everything the
+//! controller queued into a pending buffer. The controller sends an event only once the processor
+//! holds its node, and never more events than the pending buffer can hold (it counts those the
+//! processor has taken out of it, in [`EngineStats`](crate::stats::EngineStats)), so the processor
+//! can always pop the whole queue. For each sub-block it takes the pending events due before the
+//! sub-block's end, sorts them by node, sample, note offs first, and arrival, and lends each node
+//! its own, with offsets from the sub-block's start. Every buffer is reserved and written
+//! beforehand; sorting happens in place. Later events wait in the pending buffer.
+//!
+//! An event keeps its own sample until a node receives it: a late one then gets offset 0, after
+//! the late events of earlier samples. So a note played and released before the period, both late,
+//! still comes on, then off.
 
 // The processor runs this module's code in every period: nothing here may panic (ADR-0022).
 #![warn(
@@ -40,6 +46,7 @@ pub struct TimedEvent {
 #[derive(Clone, Copy, Debug)]
 struct PendingEvent {
     node: NodeId,
+    /// The sample it is due at, even past: a late event keeps it, to keep its order.
     at: i64,
     arrival: u64,
     kind: EventKind,
@@ -50,7 +57,8 @@ pub(crate) struct EventInbox {
     queue: Consumer<TimedEvent>,
     /// Popped events not yet due, sorted by sample, then arrival.
     pending: Vec<PendingEvent>,
-    /// The events due in the current sub-block, sorted by node, sample and arrival.
+    /// The events due in the current sub-block, sorted by node, sample, note offs first, and
+    /// arrival.
     due: Vec<PendingEvent>,
     /// The current node's events, as it receives them.
     node_events: Vec<Event>,
@@ -71,16 +79,16 @@ impl EventInbox {
         }
     }
 
-    /// Pops the queued events, as many as the pending buffer has room for; the rest wait in the
-    /// queue. An event for a sample before `period_start` is moved to it.
-    pub(crate) fn pop(&mut self, period_start: i64) {
+    /// Pops the queued events, as many as the pending buffer has room for, which is all of them
+    /// since the controller sends no more than that.
+    pub(crate) fn pop(&mut self) {
         let room = self.pending.spare_capacity_mut().len();
         let mut popped = false;
         for _ in 0..room {
             let Ok(event) = self.queue.pop() else { break };
             self.pending.push(PendingEvent {
                 node: event.node,
-                at: event.at.0.max(period_start),
+                at: event.at.0,
                 arrival: self.arrivals,
                 kind: event.kind,
             });
@@ -94,8 +102,9 @@ impl EventInbox {
     }
 
     /// Takes out of the pending buffer the events due before `end`, except those for nodes that
-    /// wait for a later phase, and sorts them for [`events_of`](Self::events_of).
-    pub(crate) fn take_due(&mut self, end: i64, phase: &Phase) {
+    /// wait for a later phase, and sorts them for [`events_of`](Self::events_of). Returns how many
+    /// it took.
+    pub(crate) fn take_due(&mut self, end: i64, phase: &Phase) -> usize {
         let Self { pending, due, .. } = self;
         due.clear();
         pending.retain(|event| {
@@ -108,10 +117,19 @@ impl EventInbox {
                 true
             }
         });
-        due.sort_unstable_by_key(|event| (event.node, event.at, event.arrival));
+        due.sort_unstable_by_key(|event| {
+            (
+                event.node,
+                event.at,
+                rank_at_one_sample(event.kind),
+                event.arrival,
+            )
+        });
+        due.len()
     }
 
-    /// The due events of one node, with offsets from `start`, the sub-block's first sample.
+    /// The due events of one node, with offsets from `start`, the sub-block's first sample; a late
+    /// event's offset is 0.
     pub(crate) fn events_of(&mut self, node: NodeId, start: i64) -> &[Event] {
         let Self {
             due, node_events, ..
@@ -132,9 +150,16 @@ impl EventInbox {
         }
         node_events
     }
+}
 
-    /// How many events are due in the current sub-block.
-    pub(crate) fn due_count(&self) -> usize {
-        self.due.len()
+/// Where an event goes among a node's events at one sample, before their order of arrival: a note
+/// off first, so that a note ended and started again at one sample sounds (ADR-0027).
+fn rank_at_one_sample(kind: EventKind) -> u8 {
+    match kind {
+        EventKind::NoteOff(_) => 0,
+        EventKind::Parameter { .. }
+        | EventKind::NoteOn(_)
+        | EventKind::PitchBend { .. }
+        | EventKind::Controller { .. } => 1,
     }
 }

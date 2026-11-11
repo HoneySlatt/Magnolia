@@ -13,7 +13,9 @@
 //!
 //! A swap that changes edges fades them over 5 ms: a crossfade through the union of both graphs,
 //! or, when the union would cycle or cost too much, a dip that fades the old graph out, then the
-//! new one in. `docs/ARCHITECTURE.md` describes the threads and queues.
+//! new one in. Each commit compensates the nodes' latencies: the compiled graph holds delay lines
+//! where paths of different latencies meet. `docs/ARCHITECTURE.md` describes the threads and
+//! queues.
 //!
 //! ```
 //! use magnolia_engine::engine::{self, Destination, EngineConfig, Source};
@@ -35,9 +37,11 @@
 
 mod arena;
 mod collector;
+mod compensation;
 mod compile;
 mod compiled;
 mod controller;
+mod delay_line;
 mod description;
 mod events;
 mod fade;
@@ -62,11 +66,13 @@ pub use events::TimedEvent;
 pub use graph::{Destination, Edge, EdgeEnd, GraphError, NodeId, Source};
 pub use processor::Processor;
 
+pub(crate) use delay_line::DelayLine;
+
 use arena::Arena;
 use collector::{RELEASED_PER_SWAP, start_collector};
+use compensation::Compensated;
 use compile::{CompileContext, compile};
 use controller::{ControllerParts, MESSAGE_CAPACITY};
-use description::Description;
 use events::EventInbox;
 use fade::{FadeTable, fade_frames};
 use pool::BufferPool;
@@ -88,8 +94,9 @@ pub struct EngineConfig {
     pub capture_channels: usize,
     /// The playback channels the graph can write.
     pub playback_channels: usize,
-    /// How many events the controller can queue before the processor takes them; the processor's
-    /// buffer of pending events holds as many.
+    /// How many events the processor holds at once, in its queue and its buffer of pending events
+    /// together, until it takes them out at their sample; the controller refuses more. The
+    /// controller also holds as many at most, waiting for the swap that brings their node.
     pub event_capacity: usize,
     /// How many items the processor can hand the collector before it runs; at least
     /// [`EngineConfig::MIN_GARBAGE_CAPACITY`].
@@ -192,7 +199,7 @@ pub fn new(config: EngineConfig) -> Result<(Controller, Processor), EngineError>
     let garbage =
         start_collector(config.garbage_capacity).map_err(EngineError::CollectorDidNotStart)?;
     // Silence: a graph without nodes, its playback channels summing nothing.
-    let empty = Description::default();
+    let empty = Compensated::default();
     let silence = compile(&empty, &empty, 0, context);
     let pool = BufferPool::new(stride, silence.input_channels, silence.output_channels);
     let controller = Controller::new(ControllerParts {

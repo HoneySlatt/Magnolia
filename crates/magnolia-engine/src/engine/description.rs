@@ -6,11 +6,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::graph::{Destination, Edge, EdgeEnd, GraphError, NodeId, Source};
 
-/// A node's channel counts, fixed for its life.
+/// A node's channel counts and latency, fixed for its life.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct NodeShape {
     pub(crate) inputs: usize,
     pub(crate) outputs: usize,
+    /// How many samples late its output comes, at most `MAX_LATENCY`.
+    pub(crate) latency: u32,
 }
 
 /// Nodes and edges, in any state between two commits: an edge may name a missing node or

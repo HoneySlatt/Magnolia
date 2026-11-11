@@ -1,5 +1,6 @@
 //! Unit tests of the engine's parts that the public interface cannot reach: the fade's table, the
-//! choice between a crossfade and a dip, and the collector's overflow.
+//! choice between a crossfade and a dip, the collector's overflow, and the delay line, cut into
+//! blocks at random.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -10,11 +11,15 @@ use rtrb::RingBuffer;
 
 use super::arena::{Arena, new_chunk};
 use super::collector::{Garbage, GarbageOut, RELEASED_PER_SWAP};
-use super::compile::{CompileContext, compile, crossfade_gain, nodes_fed_by};
+use super::compensation::Compensated;
+use super::compile::{CompileContext, Compiled, compile, crossfade_gain, nodes_fed_by};
 use super::compiled::GainShape;
+use super::delay_line::DelayLine;
 use super::description::{Description, NodeShape};
 use super::fade::{FadeTable, Gain, fade_frames};
 use super::graph::{Destination, Edge, NodeId, Source};
+use crate::node::{Node, ProcessContext, ProcessStatus};
+use crate::nodes::TestLatency;
 use crate::time::SampleRate;
 
 #[test]
@@ -77,6 +82,7 @@ fn description(slots: &[u32], chains: &[&[u32]]) -> Description {
         let shape = NodeShape {
             inputs: 1,
             outputs: 1,
+            latency: 0,
         };
         description.nodes.insert(node(slot), shape);
     }
@@ -95,8 +101,17 @@ fn description(slots: &[u32], chains: &[&[u32]]) -> Description {
     description
 }
 
+/// Compiles the swap between two descriptions without latencies, as their graphs.
+fn compile_swap(old: &Description, new: &Description) -> Compiled {
+    let graph = |description: &Description| Compensated {
+        description: description.clone(),
+        ..Compensated::default()
+    };
+    compile(&graph(old), &graph(new), 1, CONTEXT)
+}
+
 fn phase_lengths(old: &Description, new: &Description) -> Vec<Option<usize>> {
-    let compiled = compile(old, new, 1, CONTEXT);
+    let compiled = compile_swap(old, new);
     compiled
         .graph
         .phases
@@ -133,7 +148,7 @@ fn a_small_acyclic_union_crossfades_and_a_large_one_dips() {
 fn a_reordered_insert_dips_since_its_union_would_cycle() {
     let old = description(&[0, 1, 2], &[&[0, 1, 2]]);
     let reordered = description(&[0, 1, 2], &[&[0, 2, 1]]);
-    let compiled = compile(&old, &reordered, 1, CONTEXT);
+    let compiled = compile_swap(&old, &reordered);
     let phases = &compiled.graph.phases;
     assert_eq!(phases.len(), 3);
     // The old order, every removed edge fading out; then the new order, every added edge fading in.
@@ -170,7 +185,7 @@ fn a_reordered_insert_dips_since_its_union_would_cycle() {
 fn a_dip_holds_the_events_of_its_new_nodes_through_its_first_phase() {
     let old = description(&[0, 1, 2, 3], &[&[0]]);
     let new = description(&[4, 5, 6, 7], &[&[4]]);
-    let compiled = compile(&old, &new, 1, CONTEXT);
+    let compiled = compile_swap(&old, &new);
     let phases = &compiled.graph.phases;
     assert_eq!(phases.len(), 3);
     assert_eq!(
@@ -187,10 +202,54 @@ fn a_dip_holds_the_events_of_its_new_nodes_through_its_first_phase() {
 }
 
 #[test]
+fn each_phase_records_the_compensation_of_the_graph_it_plays() {
+    let graph = |description: Description, ahead_in: &[(u32, u64)]| Compensated {
+        description,
+        ahead_in: ahead_in
+            .iter()
+            .map(|&(slot, ahead)| (node(slot), ahead))
+            .collect(),
+        largest_ahead_in: ahead_in.iter().map(|&(_, ahead)| ahead).max().unwrap_or(0),
+        ..Compensated::default()
+    };
+    let ahead_in_by_slot = |phase: &super::compiled::Phase| -> Vec<(u32, u64)> {
+        phase
+            .steps
+            .iter()
+            .map(|step| (step.node.slot, step.ahead_in))
+            .collect()
+    };
+    // A dip: the old graph's phase records the old compensation, the new graph's the new.
+    let old = graph(
+        description(&[0, 1, 2], &[&[0, 1, 2]]),
+        &[(0, 10), (1, 5), (2, 0)],
+    );
+    let new = graph(
+        description(&[0, 1, 2], &[&[0, 2, 1]]),
+        &[(0, 7), (2, 3), (1, 0)],
+    );
+    let compiled = compile(&old, &new, 1, CONTEXT);
+    let phases = &compiled.graph.phases;
+    assert_eq!(ahead_in_by_slot(&phases[0]), [(0, 10), (1, 5), (2, 0)]);
+    assert_eq!(ahead_in_by_slot(&phases[1]), [(0, 7), (2, 3), (1, 0)]);
+    assert_eq!(ahead_in_by_slot(&phases[2]), [(0, 7), (2, 3), (1, 0)]);
+    assert_eq!(compiled.graph.largest_ahead_in, 7);
+    // A crossfade that drops node 1: the union records it with the old graph's compensation.
+    let old = graph(description(&[0, 1], &[&[0, 1]]), &[(0, 4), (1, 2)]);
+    let new = graph(description(&[0], &[&[0]]), &[(0, 0)]);
+    let compiled = compile(&old, &new, 1, CONTEXT);
+    let phases = &compiled.graph.phases;
+    assert_eq!(phases.len(), 2);
+    assert_eq!(ahead_in_by_slot(&phases[0]), [(0, 0), (1, 2)]);
+    assert_eq!(ahead_in_by_slot(&phases[1]), [(0, 0)]);
+    assert_eq!(compiled.graph.largest_ahead_in, 0);
+}
+
+#[test]
 fn every_node_of_a_swap_has_channels_of_its_own() {
     let old = description(&[0, 1], &[&[0, 1]]);
     let new = description(&[1, 2], &[&[2, 1]]);
-    let compiled = compile(&old, &new, 1, CONTEXT);
+    let compiled = compile_swap(&old, &new);
     // The playback channel, then one input for each of the three nodes; the same for outputs,
     // without capture.
     assert_eq!(compiled.input_channels, 4);
@@ -323,4 +382,145 @@ fn a_new_source_fades_in_and_an_existing_node_put_in_series_fades_twice() {
             ((1, None), FadeIn)
         ]
     );
+}
+
+/// A generator of pseudo-random numbers from a fixed seed (xorshift64*), so that every run cuts
+/// the same blocks.
+struct Random(u64);
+
+impl Random {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    /// A number from 1 to `most`.
+    fn up_to(&mut self, most: usize) -> usize {
+        1 + (self.next() % most as u64) as usize
+    }
+
+    /// A block's length: often short, sometimes up to 4,096.
+    fn block(&mut self) -> usize {
+        let most = [8, 64, 1_024, 4_096][(self.next() % 4) as usize];
+        self.up_to(most)
+    }
+}
+
+/// Two channels of sound broken by silences, some far longer than any delay below.
+fn sound_and_silences(random: &mut Random, frames: usize) -> Vec<Vec<f32>> {
+    let mut channels: Vec<Vec<f32>> = (0..2).map(|_| Vec::with_capacity(frames)).collect();
+    let mut sounding = true;
+    while channels[0].len() < frames {
+        let length = random.up_to(if sounding { 3_000 } else { 12_000 });
+        for _ in 0..length {
+            for channel in &mut channels {
+                let sample = if sounding {
+                    (random.next() % 2_001) as f32 / 1_000.0 - 1.0
+                } else {
+                    0.0
+                };
+                channel.push(sample);
+            }
+        }
+        sounding = !sounding;
+    }
+    for channel in &mut channels {
+        channel.truncate(frames);
+    }
+    channels
+}
+
+/// Plays `node` over `input` in blocks of random lengths, as the processor would: a node that
+/// slept is skipped, its outputs written silent, while its inputs stay silent. An input channel is
+/// flagged silent in a block where it holds only zeros. Returns each output channel, and how many
+/// blocks the node slept through.
+fn play_in_random_blocks(
+    node: &mut dyn Node,
+    input: &[Vec<f32>],
+    random: &mut Random,
+) -> (Vec<Vec<f32>>, usize) {
+    const STRIDE: usize = 4_096;
+    let channels = input.len();
+    let frames = input[0].len();
+    let mut output: Vec<Vec<f32>> = (0..channels).map(|_| Vec::with_capacity(frames)).collect();
+    let mut sleeping = false;
+    let mut slept = 0;
+    let mut done = 0;
+    while done < frames {
+        let length = random.block().min(frames - done);
+        let mut inputs = vec![0.0; channels * STRIDE];
+        let mut input_silence = vec![true; channels];
+        for (channel, samples) in input.iter().enumerate() {
+            let block = &samples[done..done + length];
+            inputs[channel * STRIDE..][..length].copy_from_slice(block);
+            input_silence[channel] = block.iter().all(|&sample| sample == 0.0);
+        }
+        let mut outputs = vec![f32::NAN; channels * STRIDE];
+        let mut output_silence = vec![false; channels];
+        if sleeping && input_silence.iter().all(|&silent| silent) {
+            outputs.fill(0.0);
+            output_silence.fill(true);
+            slept += 1;
+        } else {
+            let mut context = ProcessContext::new(
+                length,
+                STRIDE,
+                &inputs,
+                &input_silence,
+                &mut outputs,
+                &mut output_silence,
+                &[],
+            );
+            sleeping = node.process(&mut context) == ProcessStatus::Sleep;
+        }
+        for (channel, played) in output.iter_mut().enumerate() {
+            let block = &outputs[channel * STRIDE..][..length];
+            if output_silence[channel] {
+                assert!(block.iter().all(|&sample| sample == 0.0), "flagged silent");
+            }
+            played.extend_from_slice(block);
+        }
+        done += length;
+    }
+    (output, slept)
+}
+
+#[test]
+fn a_delay_line_and_a_test_latency_delay_exactly_whatever_the_blocks() {
+    let mut random = Random(0x9E37_79B9_7F4A_7C15);
+    let input = sound_and_silences(&mut random, 80_000);
+    for delay in [0, 1, 7, 64, 100, 1_000, 4_000] {
+        let expected: Vec<Vec<f32>> = input
+            .iter()
+            .map(|channel| {
+                (0..channel.len())
+                    .map(|sample| sample.checked_sub(delay).map_or(0.0, |at| channel[at]))
+                    .collect()
+            })
+            .collect();
+        let latency = u32::try_from(delay).unwrap();
+        for declares_latency in [false, true] {
+            let name = if declares_latency {
+                "test latency"
+            } else {
+                "delay line"
+            };
+            // Three different cuts of the same signal, each through a node of its own.
+            for _ in 0..3 {
+                let mut node: Box<dyn Node> = if declares_latency {
+                    Box::new(TestLatency::new(2, latency))
+                } else {
+                    Box::new(DelayLine::new(2, delay))
+                };
+                assert_eq!((node.input_channels(), node.output_channels()), (2, 2));
+                let declared = if declares_latency { latency } else { 0 };
+                assert_eq!(node.latency(), declared, "{name}");
+                let (output, slept) = play_in_random_blocks(node.as_mut(), &input, &mut random);
+                assert!(output == expected, "{name}, delay {delay}");
+                assert!(slept > 0, "{name}, delay {delay}: it never slept");
+            }
+        }
+    }
 }

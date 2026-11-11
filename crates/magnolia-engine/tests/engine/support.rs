@@ -8,7 +8,7 @@ use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
 
 use magnolia_engine::engine::{self, Controller, EngineConfig, NodeId, SwapStatus, TimedEvent};
-use magnolia_engine::node::{EventKind, Node, ProcessContext, ProcessStatus};
+use magnolia_engine::node::{Event, EventKind, Node, ProcessContext, ProcessStatus};
 use magnolia_engine::offline::OfflineBackend;
 use magnolia_engine::time::{SamplePosition, SampleRate};
 
@@ -163,7 +163,8 @@ pub fn read<T>(shared: &Shared<T>) -> MutexGuard<'_, T> {
     shared.lock().unwrap()
 }
 
-/// One output holding a constant, parameter 0. At zero it writes silence and flags it silent.
+/// One output holding a constant, parameter 0. At zero it writes silence and flags it silent. It
+/// ignores every other kind of event.
 pub struct Constant {
     value: f32,
 }
@@ -190,8 +191,9 @@ impl Node for Constant {
         for event in events {
             let end = event.offset as usize;
             output[start..end].fill(self.value);
-            let EventKind::Parameter { value, .. } = event.kind;
-            self.value = value as f32;
+            if let EventKind::Parameter { value, .. } = event.kind {
+                self.value = value as f32;
+            }
             start = end;
         }
         output[start..].fill(self.value);
@@ -206,7 +208,10 @@ impl Node for Constant {
 pub struct Call {
     pub frames: usize,
     pub input_silent: bool,
+    /// The parameters' changes: each one's offset and value.
     pub events: Vec<(u32, f64)>,
+    /// Every event, of any kind, in the order the node received them.
+    pub all_events: Vec<Event>,
 }
 
 /// One input passed through to one output, recording each call.
@@ -239,15 +244,16 @@ impl Node for Recorder {
         let events = context
             .events()
             .iter()
-            .map(|event| {
-                let EventKind::Parameter { value, .. } = event.kind;
-                (event.offset, value)
+            .filter_map(|event| match event.kind {
+                EventKind::Parameter { value, .. } => Some((event.offset, value)),
+                _ => None,
             })
             .collect();
         read(&self.calls).push(Call {
             frames: context.frames(),
             input_silent: context.input_is_silent(0),
             events,
+            all_events: context.events().to_vec(),
         });
         let input = context.input(0);
         context.output_mut(0).copy_from_slice(input);
@@ -494,8 +500,9 @@ impl Node for Switch {
         for event in events {
             let end = event.offset as usize;
             output[start..end].copy_from_slice(&inputs[self.input][start..end]);
-            let EventKind::Parameter { value, .. } = event.kind;
-            self.input = if value == 0.0 { 0 } else { 1 };
+            if let EventKind::Parameter { value, .. } = event.kind {
+                self.input = if value == 0.0 { 0 } else { 1 };
+            }
             start = end;
         }
         output[start..].copy_from_slice(&inputs[self.input][start..]);

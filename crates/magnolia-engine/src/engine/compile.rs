@@ -1,6 +1,9 @@
 //! Compiling a swap: from the graph the processor plays to the one committed, the phases that
 //! carry the sound across without a click. Off the real-time thread.
 //!
+//! Both graphs are compensated (`compensation.rs`): their delay lines are nodes like any other, so
+//! a change of delays crossfades or dips like any other change.
+//!
 //! With `R` the edges removed and `A` the edges added:
 //!
 //! - a commit that adds and removes no edge is one steady phase. The first commit is no exception:
@@ -18,6 +21,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::compensation::Compensated;
 use super::compiled::{Channels, CompiledGraph, GainShape, Phase, Span, Step, Sum, Term};
 use super::description::{Description, NodeShape, topological_order};
 use super::graph::{Destination, Edge, NodeId, Source};
@@ -43,11 +47,16 @@ pub(crate) struct Compiled {
 
 /// Compiles the swap from `old`, the graph the processor plays, to `new`, both valid.
 pub(crate) fn compile(
-    old: &Description,
-    new: &Description,
+    old_graph: &Compensated,
+    new_graph: &Compensated,
     sequence: u64,
     context: CompileContext,
 ) -> Compiled {
+    let (old, new) = (&old_graph.description, &new_graph.description);
+    // A phase records each node's compensation in the graph it plays, the other for the nodes
+    // only that one holds.
+    let old_then_new = [&old_graph.ahead_in, &new_graph.ahead_in];
+    let new_then_old = [&new_graph.ahead_in, &old_graph.ahead_in];
     let old_edges: BTreeSet<Edge> = old.edges.iter().copied().collect();
     let new_edges: BTreeSet<Edge> = new.edges.iter().copied().collect();
     let edges_change = old_edges != new_edges;
@@ -72,6 +81,7 @@ pub(crate) fn compile(
         edges: shaped(&new_edges, |_| GainShape::Constant),
         length: None,
         waiting_nodes: Vec::new(),
+        ahead_in: new_then_old,
     };
     let (laid_out, phases) = if !edges_change {
         (&new.nodes, vec![steady])
@@ -93,6 +103,7 @@ pub(crate) fn compile(
                 edges: crossfade,
                 length: fade,
                 waiting_nodes: Vec::new(),
+                ahead_in: new_then_old,
             };
             (&union_nodes, vec![crossfade, steady])
         } else {
@@ -116,12 +127,14 @@ pub(crate) fn compile(
                 edges: fading_out,
                 length: fade,
                 waiting_nodes: added.clone(),
+                ahead_in: old_then_new,
             };
             let fading_in = PhasePlan {
                 nodes: &new.nodes,
                 edges: fading_in,
                 length: fade,
                 waiting_nodes: Vec::new(),
+                ahead_in: new_then_old,
             };
             (&union_nodes, vec![fading_out, fading_in, steady])
         }
@@ -138,6 +151,7 @@ pub(crate) fn compile(
             phases,
             dropped_nodes: written_vec(dropped.len()),
             dropped,
+            largest_ahead_in: new_graph.largest_ahead_in,
         },
         input_channels: layout.input_channels,
         output_channels: layout.output_channels,
@@ -207,6 +221,8 @@ struct PhasePlan<'a> {
     length: Option<usize>,
     /// The nodes a later phase runs that this one does not, sorted.
     waiting_nodes: Vec<NodeId>,
+    /// Where to find each node's compensation: the first map that holds the node.
+    ahead_in: [&'a BTreeMap<NodeId, u64>; 2],
 }
 
 /// Each edge of a set with its gain's shape.
@@ -313,6 +329,12 @@ fn build_phase(plan: PhasePlan<'_>, layout: &Layout, context: CompileContext) ->
                 start,
                 end: sums.len(),
             },
+            ahead_in: plan
+                .ahead_in
+                .iter()
+                .find_map(|ahead_in| ahead_in.get(&node))
+                .copied()
+                .unwrap_or(0),
         });
     }
     let start = sums.len();

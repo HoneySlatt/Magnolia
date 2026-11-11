@@ -27,9 +27,16 @@ stage's audit triages the whole list.
   node may cost a hundred gains.
 - **JACK2 keeps `/dev/shm/jack-shm-registry`** after the backend's tests, as it does after any
   server.
-- **An event due now can wait behind events far ahead**: the processor takes events in only while
-  its pending buffer has room (1,024 by default), so a sender that keeps that many events ahead holds
-  back one due now. Decided at M1.4, when the timeline's own events come.
+- **A change of delay leaves the moved path silent for the new delay**: a commit that moves a
+  playing path into a new delay line, such as a latent node added on a bus, crossfades into that
+  line's empty history, so the path is silent for that line's delay
+  ([ARCHITECTURE](ARCHITECTURE.md#delay-compensation)).
+- **A swap that changes a playing source's compensation jumps its read position**
+  ([ADR-0025](adr/0025-delay-compensation-by-reading-ahead.md)); M1.6 designs the resync with
+  latency changes.
+- **The total compensation of a path is not capped**: only each node's latency is, at
+  `MAX_LATENCY`; k latent nodes in series at the cap need delay lines of k × 65,536 samples per
+  channel, allocated on the controller's thread.
 - **Paths without a test**: a generation mismatch (`processor.rs`), and the silence the JACK callback
   writes while the server's rate differs from the engine's, since a JACK2 server cannot change its
   rate while it runs.

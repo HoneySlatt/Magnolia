@@ -3,7 +3,7 @@
 //! beforehand. Without this proof, a check of the real-time path that finds nothing would mean
 //! nothing. It also checks that a block's conversions of time, as the engine makes them, neither
 //! allocate nor make a system call, and that the engine's processor stays silent through swaps,
-//! events, removals, sleeping and failing nodes.
+//! events, removals, sleeping and failing nodes, and swaps that add and remove a delay line.
 //!
 //! The processor's one allowed system call, the collector's wake, is suppressed by name
 //! (`rtsan-suppressions.txt`, ADR-0023). Two cases prove the suppression right: the wake is a
@@ -32,7 +32,7 @@ use magnolia_engine::engine::{
     self, Destination, EngineConfig, NodeId, Source, SwapStatus, TimedEvent, wake_collector,
 };
 use magnolia_engine::node::{EventKind, Node, ProcessContext, ProcessStatus};
-use magnolia_engine::nodes::{Gain, Sine};
+use magnolia_engine::nodes::{Gain, Sine, TestLatency};
 use magnolia_engine::offline::OfflineBackend;
 use magnolia_engine::time::{
     Meter, MusicalPosition, SamplePosition, SampleRate, Tempo, TempoMap, TimePosition, place,
@@ -274,6 +274,58 @@ fn play_the_engine() {
     play_a_busy_collector();
 }
 
+/// Plays the engine through swaps that add a delay line and remove one: a sine's direct path meets
+/// a latent path, which the compiler compensates with a delay line, then the latent node goes;
+/// beside them, a live capture through a latency, which nothing delays. Only the processor runs in
+/// a real-time context.
+fn play_delay_lines() {
+    let rate = SampleRate::new(48_000).unwrap();
+    let (mut controller, processor) = engine::new(EngineConfig::new(rate, 256, 1, 2)).unwrap();
+    let mut backend = OfflineBackend::new(processor);
+    let capture = vec![0.25; 1_024];
+    let mut play = |controller: &mut engine::Controller, periods: usize| {
+        for period in 0..periods {
+            let frames = [64, 1_000, 100, 256][period % 4];
+            backend.play_period(frames, &[&capture[..frames]]);
+            controller.poll();
+        }
+    };
+    let add = |controller: &mut engine::Controller, node: Box<dyn Node>| -> NodeId {
+        controller.add_node(node).unwrap()
+    };
+    let sine = add(&mut controller, Box::new(Sine::new(rate, 440.0, 0.5)));
+    let live = add(&mut controller, Box::new(TestLatency::new(1, 64)));
+    controller.connect(Source::Node(sine, 0), Destination::Playback(0));
+    controller.connect(Source::Capture(0), Destination::Node(live, 0));
+    controller.connect(Source::Node(live, 0), Destination::Playback(1));
+    controller.commit().unwrap();
+    play(&mut controller, 8);
+    assert!(controller.delay_lines().is_empty());
+
+    let latent = add(&mut controller, Box::new(TestLatency::new(1, 1_500)));
+    controller.connect(Source::Node(sine, 0), Destination::Node(latent, 0));
+    controller.connect(Source::Node(latent, 0), Destination::Playback(0));
+    controller.commit().unwrap();
+    play(&mut controller, 16);
+    assert_eq!(
+        controller.delay_lines().len(),
+        1,
+        "a swap added a delay line"
+    );
+
+    controller.remove_node(latent).unwrap();
+    controller.commit().unwrap();
+    play(&mut controller, 16);
+    assert_eq!(controller.poll(), SwapStatus::Steady);
+    assert!(
+        controller.delay_lines().is_empty(),
+        "a swap removed the delay line"
+    );
+    let stats = controller.stats();
+    assert_eq!(stats.last_swap_steady(), 3, "every swap is steady");
+    assert!(!stats.poisoned());
+}
+
 /// A silent node whose drop keeps the collector busy until `open` is set, or ten seconds pass;
 /// `entered` tells the test it has started.
 struct BlockingDrop {
@@ -438,6 +490,7 @@ fn run_case(case: &str) -> ExitCode {
             }
         }),
         "engine" => on_new_thread(play_the_engine),
+        "delay_lines" => on_new_thread(play_delay_lines),
         "wake" => {
             let collector = sleeping_thread();
             on_new_thread(move || wake(&collector));
@@ -551,6 +604,7 @@ fn main() -> ExitCode {
         check("halve", Expected::Silent),
         check("convert", Expected::Silent),
         check("engine", Expected::Silent),
+        check("delay_lines", Expected::Silent),
         // The wake is a system call the sanitizer stops, until the suppressions name it.
         check_under(
             "wake",

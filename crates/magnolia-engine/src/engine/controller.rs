@@ -1,7 +1,7 @@
 //! The controller: the engine's non-real-time half, which edits the graph, compiles each swap and
 //! sends it, and sends events. It may allocate and block; the processor never waits for it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
@@ -11,13 +11,15 @@ use std::time::{Duration, Instant};
 use rtrb::{Producer, PushError};
 
 use super::arena::{ArenaChunk, CHUNK_SLOTS, MAX_CHUNKS, new_chunk};
+use super::compensation::{self, Compensated, DelayKey, Plan};
 use super::compile::{CompileContext, compile};
 use super::compiled::SwapMessage;
+use super::delay_line::DelayLine;
 use super::description::{Description, NodeShape};
 use super::events::TimedEvent;
 use super::graph::{Destination, Edge, GraphError, NodeId, Source};
 use super::pool::BufferPool;
-use crate::node::Node;
+use crate::node::{MAX_LATENCY, Node};
 use crate::stats::EngineStats;
 
 /// The engine's non-real-time half, made with its [`Processor`](super::Processor) by
@@ -25,31 +27,44 @@ use crate::stats::EngineStats;
 ///
 /// It holds a description of the graph, which [`add_node`](Self::add_node),
 /// [`remove_node`](Self::remove_node), [`connect`](Self::connect) and
-/// [`disconnect`](Self::disconnect) edit, and [`commit`](Self::commit) checks and sends to the
-/// processor as a swap. At most one swap is in flight: a commit made while one is becomes deferred,
-/// and [`poll`](Self::poll) sends it once the previous swap has reached its steady phase,
-/// with every edit committed meanwhile. The controller owns the nodes' slots: it reuses one only
-/// once the processor has let its node go. It holds an event for a node that a swap brings until
-/// the processor has applied that swap ([`send_event`](Self::send_event)).
+/// [`disconnect`](Self::disconnect) edit, and [`commit`](Self::commit) checks, compensates and
+/// sends to the processor as a swap. At most one swap is in flight: a commit made while one is
+/// becomes deferred, and [`poll`](Self::poll) sends it once the previous swap has reached its
+/// steady phase, with every edit committed meanwhile. The controller owns the nodes' slots: it
+/// reuses one only once the processor has let its node go. It holds an event for a node that a
+/// swap brings until the processor has applied that swap ([`send_event`](Self::send_event)).
+///
+/// Each commit compensates the nodes' latencies
+/// ([ADR-0025](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0025-delay-compensation-by-reading-ahead.md)):
+/// the graph sent holds a delay line where paths of different latencies meet, a node of the arena
+/// that the controller adds, keeps while its destination and delay stay, and removes. The
+/// description being edited never holds them.
 pub struct Controller {
     stats: Arc<EngineStats>,
     context: CompileContext,
     stride: usize,
     messages: Producer<Box<SwapMessage>>,
     events: Producer<TimedEvent>,
-    /// How many events the queue holds; the controller holds as many at most.
+    /// How many events the processor holds at once, queued or pending; the controller holds as
+    /// many at most, waiting for their swap.
     event_capacity: usize,
+    /// How many events the controller has pushed into the queue. Less the events the processor
+    /// has taken (`EngineStats::events_taken`), it is how many the processor holds.
+    events_pushed: u64,
     /// The description being edited.
     draft: Description,
-    /// The last description committed and not yet sent, if a commit is deferred.
-    committed: Option<Description>,
-    /// The description of the last swap sent: the graph the processor plays, or will.
-    sent: Description,
+    /// The last description committed and not yet sent, compensated, if a commit is deferred.
+    committed: Option<Compensated>,
+    /// The graph of the last swap sent, compensated: the graph the processor plays, or will.
+    sent: Compensated,
     /// The last swap sent, until the processor reports it steady.
     in_flight: Option<InFlight>,
     next_sequence: u64,
     /// Nodes added and not yet sent to the processor.
     unsent: BTreeMap<NodeId, Box<dyn Node>>,
+    /// The delay lines that the deferred commit adds, not yet sent. A later commit compensates
+    /// again and drops those it does not keep.
+    unsent_delay_lines: BTreeMap<NodeId, Box<dyn Node>>,
     /// Events for nodes the processor does not hold yet, in the order they came: sent once the
     /// processor has applied the swap that brings their node.
     held_events: Vec<TimedEvent>,
@@ -107,8 +122,9 @@ pub enum WaitError {
 /// Why [`Controller::send_event`] did not take an event.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SendEventError {
-    /// The event queue is full, or the controller already holds as many events as the queue
-    /// holds; the event is given back.
+    /// The processor holds as many events as its pending buffer can, until it takes some out at
+    /// their sample; or the controller holds as many waiting for their swap. The event is given
+    /// back: send it again after a period.
     QueueFull(TimedEvent),
 }
 
@@ -140,12 +156,14 @@ impl Controller {
             messages: parts.messages,
             events: parts.events,
             event_capacity: parts.event_capacity,
+            events_pushed: 0,
             draft: Description::default(),
             committed: None,
-            sent: Description::default(),
+            sent: Compensated::default(),
             in_flight: None,
             next_sequence: 1,
             unsent: BTreeMap::new(),
+            unsent_delay_lines: BTreeMap::new(),
             held_events: Vec::new(),
             slots: Slots::default(),
             chunks_sent: 0,
@@ -159,13 +177,20 @@ impl Controller {
         &self.stats
     }
 
-    /// Adds a node to the description, in a free slot; it plays once a commit sends it.
+    /// Adds a node to the description, in a free slot; it plays once a commit sends it. Its
+    /// latency is read here, once: one above [`MAX_LATENCY`] is taken as `MAX_LATENCY` and
+    /// counted in [`EngineStats::latencies_capped`].
     pub fn add_node(&mut self, node: Box<dyn Node>) -> Result<NodeId, GraphError> {
         self.reclaim_slots();
         let id = self.slots.allocate()?;
+        let declared = node.latency();
+        if declared > MAX_LATENCY {
+            self.stats.count_latency_capped();
+        }
         let shape = NodeShape {
             inputs: node.input_channels(),
             outputs: node.output_channels(),
+            latency: declared.min(MAX_LATENCY),
         };
         self.draft.nodes.insert(id, shape);
         self.unsent.insert(id, node);
@@ -209,27 +234,18 @@ impl Controller {
         Ok(())
     }
 
-    /// Checks the description and sends it to the processor as a swap, or defers it while another
-    /// swap is in flight. A description that fails its check stays as it is, to be fixed.
+    /// Checks the description, compensates its latencies and sends it to the processor as a swap,
+    /// or defers it while another swap is in flight. A description that fails its check stays as
+    /// it is, to be fixed; so does one whose delay lines find no free slot in the arena.
     pub fn commit(&mut self) -> Result<Commit, GraphError> {
         self.draft.validate(
             self.context.capture_channels,
             self.context.playback_channels,
         )?;
         self.reclaim_slots();
-        // A node added and removed before any swap carried it never reached the processor: it is
-        // dropped here and its slot is free at once.
-        let abandoned: Vec<NodeId> = self
-            .unsent
-            .keys()
-            .filter(|node| !self.draft.nodes.contains_key(node))
-            .copied()
-            .collect();
-        for node in abandoned {
-            self.unsent.remove(&node);
-            self.slots.release(node.slot);
-        }
-        self.committed = Some(self.draft.clone());
+        let plan = compensation::plan(&self.draft, self.context.playback_channels);
+        let delay_lines = self.delay_line_nodes(&plan)?;
+        self.committed = Some(plan.compensate(&self.draft, &delay_lines));
         if self.in_flight.is_some() {
             return Ok(Commit::Deferred);
         }
@@ -284,6 +300,10 @@ impl Controller {
 
     /// Sends an event to a node.
     ///
+    /// The processor holds at most [`EngineConfig::event_capacity`](super::EngineConfig) events,
+    /// queued or pending: past that, the event is refused until the processor has taken some at
+    /// their sample, so that an event due now never waits behind events far ahead.
+    ///
     /// An event for a node that a swap brings waits in the controller until the processor has
     /// applied that swap, so that it never reaches the processor before its node; any later event
     /// for that node waits behind it, so that a node's events keep their order. `poll`,
@@ -300,9 +320,93 @@ impl Controller {
             self.held_events.push(event);
             return Ok(());
         }
-        self.events.push(event).map_err(|error| match error {
-            PushError::Full(event) => SendEventError::QueueFull(event),
-        })
+        self.push_event(event).map_err(SendEventError::QueueFull)
+    }
+
+    /// Pushes an event into the queue, unless the processor already holds as many events as its
+    /// pending buffer can; gives it back then.
+    fn push_event(&mut self, event: TimedEvent) -> Result<(), TimedEvent> {
+        // The processor publishes its count after the events have left its buffer, so a count read
+        // late only makes the controller refuse early, never overfill the buffer.
+        let held = self.events_pushed.saturating_sub(self.stats.events_taken());
+        if held >= self.event_capacity as u64 {
+            return Err(event);
+        }
+        self.events
+            .push(event)
+            .map_err(|PushError::Full(event)| event)?;
+        self.events_pushed += 1;
+        Ok(())
+    }
+
+    /// The delay lines of the graph last sent to the processor, which a commit adds where paths of
+    /// different latencies meet. For tests.
+    #[doc(hidden)]
+    pub fn delay_lines(&self) -> Vec<NodeId> {
+        self.sent.delay_lines.values().copied().collect()
+    }
+
+    /// Gives a node to each delay line that `plan`, the draft's, needs: the one the processor
+    /// plays, or the deferred commit's, for the same destination and delay, or a new one.
+    ///
+    /// New ones take the slots this commit frees first: those of the nodes added and removed
+    /// before any swap carried them, and those of the deferred commit's delay lines it does not
+    /// keep. None of these ever reached the processor, so their slots are free at once. When even
+    /// those are too few, it fails with `TooManyNodes` before changing anything.
+    fn delay_line_nodes(&mut self, plan: &Plan) -> Result<BTreeMap<DelayKey, NodeId>, GraphError> {
+        let deferred = self
+            .committed
+            .as_ref()
+            .map(|committed| &committed.delay_lines);
+        let mut nodes = BTreeMap::new();
+        let mut missing = Vec::new();
+        for (&key, &channels) in plan.delay_lines() {
+            let kept = self
+                .sent
+                .delay_lines
+                .get(&key)
+                .or_else(|| deferred.and_then(|deferred| deferred.get(&key)));
+            match kept {
+                Some(&line) => {
+                    nodes.insert(key, line);
+                }
+                None => missing.push((key, channels)),
+            }
+        }
+        let abandoned: Vec<NodeId> = self
+            .unsent
+            .keys()
+            .filter(|node| !self.draft.nodes.contains_key(node))
+            .copied()
+            .collect();
+        let kept: BTreeSet<NodeId> = nodes.values().copied().collect();
+        let replaced: Vec<NodeId> = self
+            .unsent_delay_lines
+            .keys()
+            .filter(|line| !kept.contains(line))
+            .copied()
+            .collect();
+        let freed = abandoned.len().saturating_add(replaced.len());
+        if missing.len() > self.slots.available().saturating_add(freed) {
+            return Err(GraphError::TooManyNodes);
+        }
+        for node in abandoned {
+            self.unsent.remove(&node);
+            self.slots.release(node.slot);
+        }
+        for line in replaced {
+            self.unsent_delay_lines.remove(&line);
+            self.slots.release(line.slot);
+        }
+        for (key, channels) in missing {
+            // Counted above: the arena has a slot for each.
+            let line = self.slots.allocate()?;
+            let delay = usize::try_from(key.delay).unwrap_or(usize::MAX);
+            self.unsent_delay_lines
+                .insert(line, Box::new(DelayLine::new(channels, delay)));
+            nodes.insert(key, line);
+        }
+        Ok(nodes)
     }
 
     /// Whether `node` comes with a swap the processor has not applied yet: one not sent, or the
@@ -341,7 +445,13 @@ impl Controller {
         let added = compiled.added;
         let nodes: Vec<(NodeId, Option<Box<dyn Node>>)> = added
             .iter()
-            .map(|&node| (node, self.unsent.remove(&node)))
+            .map(|&node| {
+                let held = self
+                    .unsent
+                    .remove(&node)
+                    .or_else(|| self.unsent_delay_lines.remove(&node));
+                (node, held)
+            })
             .collect();
         let chunks_needed = self.slots.chunks_needed();
         let chunks: Vec<(usize, Option<ArenaChunk>)> = (self.chunks_sent..chunks_needed)
@@ -373,7 +483,11 @@ impl Controller {
             // Unreachable while one swap is in flight at most; the commit stays deferred.
             for (node, held) in message.nodes.drain(..) {
                 if let Some(held) = held {
-                    self.unsent.insert(node, held);
+                    if target.is_delay_line(node) {
+                        self.unsent_delay_lines.insert(node, held);
+                    } else {
+                        self.unsent.insert(node, held);
+                    }
                 }
             }
             self.committed = Some(target);
@@ -403,7 +517,7 @@ impl Controller {
                 index += 1;
                 continue;
             }
-            if self.events.push(event).is_err() {
+            if self.push_event(event).is_err() {
                 return;
             }
             self.held_events.remove(index);
@@ -455,6 +569,12 @@ impl Slots {
         let generation = &mut self.generations[slot as usize];
         *generation = generation.wrapping_add(1);
         self.free.push(slot);
+    }
+
+    /// How many slots `allocate` can still hand out: those free, and those never handed out.
+    fn available(&self) -> usize {
+        let never_handed_out = (CHUNK_SLOTS * MAX_CHUNKS).saturating_sub(self.generations.len());
+        self.free.len().saturating_add(never_handed_out)
     }
 
     /// The chunks the arena needs for every slot handed out so far.

@@ -3,7 +3,7 @@
 //!
 //! - [`engine`]: a graph of [`node`]s, edited and compiled by the controller, swapped without a
 //!   click, played by the processor on the real-time thread, freed by the collector;
-//! - [`nodes`]: the engine's own nodes, a sine and a gain;
+//! - [`nodes`]: the engine's own nodes, a sine, a gain and a test latency;
 //! - [`device`] and [`offline`]: what a backend lends the processor each period, and a backend
 //!   without a device, for tests;
 //! - [`stats`] and [`callback_times`]: what the engine reports of itself while it plays;

@@ -1,4 +1,5 @@
-//! The engine's own nodes: a sine to test with, and a gain.
+//! The engine's own nodes: a sine to test with, a gain, and a pure delay that declares a latency,
+//! to test delay compensation with.
 
 // The processor runs this module's code in every period: nothing here may panic (ADR-0022).
 #![warn(
@@ -10,7 +11,9 @@
 )]
 
 use std::f64::consts::TAU;
+use std::fmt;
 
+use crate::engine::DelayLine;
 use crate::node::{EventKind, Node, ProcessContext, ProcessStatus};
 use crate::time::SampleRate;
 
@@ -60,8 +63,11 @@ impl Sine {
         self.step = (cycles_per_sample * TWO_TO_THE_64) as u64;
     }
 
+    /// Applies a parameter's change; a sine ignores every other kind of event.
     fn apply(&mut self, kind: EventKind) {
-        let EventKind::Parameter { index, value } = kind;
+        let EventKind::Parameter { index, value } = kind else {
+            return;
+        };
         match index {
             Self::FREQUENCY => self.set_frequency(value),
             Self::GAIN if value.is_finite() => self.gain = value as f32,
@@ -122,13 +128,13 @@ impl Gain {
         }
     }
 
-    /// The gain after `kind`, from `gain`.
+    /// The gain after `kind`, from `gain`. A gain ignores every event but its parameter's change.
     fn after(gain: f32, kind: EventKind) -> f32 {
-        let EventKind::Parameter { index, value } = kind;
-        if index == Self::GAIN && value.is_finite() {
-            value as f32
-        } else {
-            gain
+        match kind {
+            EventKind::Parameter { index, value } if index == Self::GAIN && value.is_finite() => {
+                value as f32
+            }
+            _ => gain,
         }
     }
 }
@@ -186,5 +192,59 @@ fn scale(input: &[f32], output: &mut [f32], start: usize, end: usize, gain: f32)
     };
     for (output, input) in output.iter_mut().zip(input) {
         *output = input * gain;
+    }
+}
+
+/// A pure delay of `latency` samples on any number of channels, each input to the output of the
+/// same number, which declares that latency: it stands for a latent plugin, such as a lookahead
+/// limiter, until plugins come (M1.6). The engine compensates it
+/// ([ADR-0025](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0025-delay-compensation-by-reading-ahead.md)).
+///
+/// Its output does not depend on how blocks are cut. It sleeps once its inputs have been silent for
+/// its latency and the whole sub-block.
+pub struct TestLatency {
+    line: DelayLine,
+    channels: usize,
+    latency: u32,
+}
+
+impl TestLatency {
+    /// A delay of `latency` samples on `channels` channels, its history silent. It allocates
+    /// `channels` times `latency` samples: make it off the real-time thread.
+    pub fn new(channels: usize, latency: u32) -> Self {
+        Self {
+            line: DelayLine::new(channels, latency as usize),
+            channels,
+            latency,
+        }
+    }
+}
+
+impl fmt::Debug for TestLatency {
+    /// Its channels and latency, without its history.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TestLatency")
+            .field("channels", &self.channels)
+            .field("latency", &self.latency)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Node for TestLatency {
+    fn input_channels(&self) -> usize {
+        self.channels
+    }
+
+    fn output_channels(&self) -> usize {
+        self.channels
+    }
+
+    fn latency(&self) -> u32 {
+        self.latency
+    }
+
+    fn process(&mut self, context: &mut ProcessContext<'_>) -> ProcessStatus {
+        self.line.process(context)
     }
 }

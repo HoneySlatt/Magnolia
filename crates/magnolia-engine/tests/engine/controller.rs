@@ -1,15 +1,17 @@
-//! The controller refuses a description it cannot compile, each fault with its own error, and
-//! merges the commits made while a swap is in flight into the one it sends next.
+//! The controller refuses a description it cannot compile, each fault with its own error, merges
+//! the commits made while a swap is in flight into the one it sends next, and finds slots for a
+//! commit's delay lines among those the commit itself frees.
 
 use std::time::Duration;
 
 use magnolia_engine::engine::{
     Commit, Destination, Edge, EdgeEnd, GraphError, NodeId, Source, SwapStatus, WaitError,
 };
-use magnolia_engine::nodes::Gain;
+use magnolia_engine::node::{Node, ProcessContext, ProcessStatus};
+use magnolia_engine::nodes::{Gain, Sine, TestLatency};
 use magnolia_engine::offline::OfflineBackend;
 
-use crate::support::{Constant, Rig, assert_matches};
+use crate::support::{Constant, Rig, assert_matches, rate};
 
 #[test]
 fn a_cycle_is_refused_and_names_a_node_on_it() {
@@ -199,4 +201,84 @@ fn wait_until_steady_blocks_until_a_backend_on_its_own_thread_has_played_the_swa
 )]
 fn join(thread: std::thread::JoinHandle<()>) {
     thread.join().unwrap();
+}
+
+/// A node without a channel, to fill the arena with at little cost.
+struct Filler;
+
+impl Node for Filler {
+    fn input_channels(&self) -> usize {
+        0
+    }
+
+    fn output_channels(&self) -> usize {
+        0
+    }
+
+    fn process(&mut self, _context: &mut ProcessContext<'_>) -> ProcessStatus {
+        ProcessStatus::Sleep
+    }
+}
+
+/// Fills every slot the arena has left with fillers, and returns them.
+fn fill_the_arena(rig: &mut Rig) -> Vec<NodeId> {
+    let mut fillers = Vec::new();
+    loop {
+        match rig.controller.add_node(Box::new(Filler)) {
+            Ok(filler) => fillers.push(filler),
+            Err(GraphError::TooManyNodes) => return fillers,
+            Err(error) => panic!("adding a filler: {error}"),
+        }
+    }
+}
+
+#[test]
+fn a_commit_takes_for_its_delay_line_the_slot_of_a_node_it_abandons() {
+    let mut rig = Rig::new(0, 1);
+    let sine = rig.add(Sine::new(rate(), 440.0, 0.5));
+    let latent = rig.add(TestLatency::new(1, 100));
+    rig.controller
+        .connect(Source::Node(sine, 0), Destination::Playback(0));
+    rig.controller
+        .connect(Source::Node(sine, 0), Destination::Node(latent, 0));
+    rig.controller
+        .connect(Source::Node(latent, 0), Destination::Playback(0));
+    let fillers = fill_the_arena(&mut rig);
+    // A filler removed before any commit sent it: this commit frees its slot, which the sine's
+    // direct path needs for its delay line.
+    rig.controller.remove_node(fillers[0]).unwrap();
+    assert_eq!(rig.controller.commit(), Ok(Commit::Sent { sequence: 1 }));
+    assert_eq!(rig.controller.delay_lines().len(), 1);
+}
+
+#[test]
+fn a_commit_takes_for_its_delay_line_the_slot_of_a_deferred_delay_line_it_replaces() {
+    let mut rig = Rig::new(0, 1);
+    let sine = rig.add(Sine::new(rate(), 440.0, 0.5));
+    let short = rig.add(TestLatency::new(1, 100));
+    let long = rig.add(TestLatency::new(1, 200));
+    rig.controller
+        .connect(Source::Node(sine, 0), Destination::Playback(0));
+    assert_eq!(rig.controller.commit(), Ok(Commit::Sent { sequence: 1 }));
+    // The arena full but for one slot, which the deferred commit's delay line takes.
+    let fillers = fill_the_arena(&mut rig);
+    rig.controller.remove_node(fillers[0]).unwrap();
+    rig.controller.commit().unwrap();
+    rig.controller
+        .connect(Source::Node(sine, 0), Destination::Node(short, 0));
+    rig.controller
+        .connect(Source::Node(short, 0), Destination::Playback(0));
+    assert_eq!(rig.controller.commit(), Ok(Commit::Deferred));
+    // Moving the bus to the longer latency replaces that delay line, never sent, by another.
+    rig.controller
+        .disconnect(Source::Node(sine, 0), Destination::Node(short, 0))
+        .unwrap();
+    rig.controller
+        .disconnect(Source::Node(short, 0), Destination::Playback(0))
+        .unwrap();
+    rig.controller
+        .connect(Source::Node(sine, 0), Destination::Node(long, 0));
+    rig.controller
+        .connect(Source::Node(long, 0), Destination::Playback(0));
+    assert_eq!(rig.controller.commit(), Ok(Commit::Deferred));
 }

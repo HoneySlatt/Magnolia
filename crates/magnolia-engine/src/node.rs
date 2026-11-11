@@ -1,5 +1,5 @@
-//! The node contract: what every node of the engine's graph implements, today a sine and a gain,
-//! from M1.6 the proxy of every plugin host
+//! The node contract: what every node of the engine's graph implements, today the engine's own
+//! nodes and its delay lines, from M1.6 the proxy of every plugin host
 //! ([ADR-0021](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0021-the-node-contract.md)).
 //!
 //! The processor calls [`Node::process`] once per sub-block on the real-time thread, with a
@@ -15,19 +15,31 @@
     clippy::arithmetic_side_effects
 )]
 
+/// The largest latency a node may declare, in samples: 65,536, 1.37 s at 48 kHz. The engine takes
+/// a larger one as this, and counts it
+/// ([ADR-0025](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0025-delay-compensation-by-reading-ahead.md)).
+pub const MAX_LATENCY: u32 = 65_536;
+
 /// A node of the engine's graph.
 ///
-/// Its channel counts are fixed for its life: a different layout is a new node, swapped in. Its
-/// output must not depend on how the engine cuts blocks, since the engine splits a period into
-/// sub-blocks at a swap's fade or past its largest block, and a render must equal playback to the
-/// bit. It keeps denormals out of its own state: the threads that run nodes keep the default
-/// floating-point mode.
+/// Its channel counts and its latency are fixed for its life: a different layout is a new node,
+/// swapped in. Its output must not depend on how the engine cuts blocks, since the engine splits a
+/// period into sub-blocks at a swap's fade or past its largest block, and a render must equal
+/// playback to the bit. It keeps denormals out of its own state: the threads that run nodes keep
+/// the default floating-point mode.
 pub trait Node: Send {
     /// How many input channels the node reads.
     fn input_channels(&self) -> usize;
 
     /// How many output channels the node writes.
     fn output_channels(&self) -> usize;
+
+    /// How many samples late the node's output comes, such as a lookahead limiter's lookahead: the
+    /// engine compensates it by running the paths that meet it earlier. Read once, when the node is
+    /// added; at most [`MAX_LATENCY`]. No latency by default.
+    fn latency(&self) -> u32 {
+        0
+    }
 
     /// Processes one sub-block: reads the inputs and the events, writes every output channel.
     /// Runs on the real-time thread: it must not allocate, lock, block or panic.
@@ -57,7 +69,9 @@ pub struct Event {
     pub kind: EventKind,
 }
 
-/// What an event does.
+/// What an event does
+/// ([ADR-0027](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0027-timeline-events-from-sources-on-nodes.md)).
+/// A node ignores the kinds it has no use for.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum EventKind {
     /// Sets one of the node's parameters, which each node numbers and documents.
@@ -67,6 +81,41 @@ pub enum EventKind {
         /// Its new value.
         value: f64,
     },
+    /// A note starts.
+    NoteOn(Note),
+    /// A note ends. At one sample, every note off comes before any other event, so that a note
+    /// ended and started again on the same sample sounds.
+    NoteOff(Note),
+    /// The pitch wheel of a MIDI channel moves.
+    PitchBend {
+        /// The MIDI channel, from 0 to 15.
+        channel: u8,
+        /// The wheel's position, from -1 (down) to 1 (up); 0 at rest.
+        value: f32,
+    },
+    /// A MIDI controller of a channel moves, such as the sustain pedal (64).
+    Controller {
+        /// The MIDI channel, from 0 to 15.
+        channel: u8,
+        /// The controller's number, from 0 to 127.
+        number: u8,
+        /// Its position, from 0 to 1.
+        value: f32,
+    },
+}
+
+/// A note, as a note on or a note off carries it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Note {
+    /// The note's own id, which its note off and its expressions repeat (M1.6); `None` when its
+    /// source gives none, as a MIDI file does.
+    pub id: Option<u32>,
+    /// The MIDI channel, from 0 to 15.
+    pub channel: u8,
+    /// The key, from 0 to 127; 60 is middle C.
+    pub key: u8,
+    /// How hard the note is struck or released, from 0 to 1.
+    pub velocity: f32,
 }
 
 /// What a node receives for one sub-block: its channels and its events.
@@ -172,7 +221,10 @@ impl<'a> ProcessContext<'a> {
         }
     }
 
-    /// This node's events in this sub-block, sorted by offset, then by arrival.
+    /// This node's events in this sub-block, sorted by the sample each is due at: at one sample the
+    /// note offs first, then the rest, each group in the order the events arrived. An event due
+    /// before the sub-block, late, has offset 0, and keeps its place among the others by its
+    /// sample, so a note played and released late still comes on, then off.
     pub fn events(&self) -> &'a [Event] {
         self.events
     }

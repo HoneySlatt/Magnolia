@@ -1,8 +1,11 @@
-//! The engine's own nodes: their output does not depend on how blocks are cut, and a sine never
-//! sleeps. A node is never given more than the engine's largest block.
+//! The engine's own nodes: their output does not depend on how blocks are cut, a sine never
+//! sleeps, and a sine and a gain ignore the events that are not their parameters'. A node is never
+//! given more than the engine's largest block.
 
-use magnolia_engine::engine::{Destination, EngineConfig, Source};
+use magnolia_engine::engine::{Destination, EngineConfig, Source, TimedEvent};
+use magnolia_engine::node::{EventKind, Note};
 use magnolia_engine::nodes::{Gain, Sine};
+use magnolia_engine::time::SamplePosition;
 
 use std::sync::atomic::Ordering;
 
@@ -81,4 +84,58 @@ fn a_node_is_never_given_more_than_the_largest_block() {
     rig.play(&[300, 250, 37]);
     let frames: Vec<usize> = read(&recorded).iter().map(|call| call.frames).collect();
     assert_eq!(frames, [100, 100, 100, 100, 100, 50, 37]);
+}
+
+/// A sine through a gain, as `sine_through_a_gain` plays it, with notes, bends and controllers
+/// sent to both at a few samples when `with_other_events`.
+fn sine_through_a_gain_with_other_events(with_other_events: bool) -> Vec<f32> {
+    let mut rig = Rig::new(0, 1);
+    let sine = rig.add(Sine::new(rate(), 440.0, 0.8));
+    let gain = rig.add(Gain::new(1, 0.5));
+    rig.controller
+        .connect(Source::Node(sine, 0), Destination::Node(gain, 0));
+    rig.controller
+        .connect(Source::Node(gain, 0), Destination::Playback(0));
+    rig.controller.commit().unwrap();
+    let mut played = rig.play(&[64]);
+    rig.send(gain, 1_500, Gain::GAIN, 0.25);
+    if with_other_events {
+        let note = Note {
+            id: Some(7),
+            channel: 1,
+            key: 60,
+            velocity: 1.0,
+        };
+        let kinds = [
+            EventKind::NoteOn(note),
+            EventKind::NoteOff(note),
+            EventKind::PitchBend {
+                channel: 1,
+                value: 1.0,
+            },
+            EventKind::Controller {
+                channel: 1,
+                number: 7,
+                value: 0.0,
+            },
+        ];
+        for (index, kind) in kinds.into_iter().enumerate() {
+            for node in [sine, gain] {
+                let at = SamplePosition(100 + 700 * index as i64);
+                rig.controller
+                    .send_event(TimedEvent { node, at, kind })
+                    .unwrap();
+            }
+        }
+    }
+    played.extend(rig.play(&[1_000, 2_048, 37]));
+    played
+}
+
+#[test]
+fn a_sine_and_a_gain_ignore_notes_bends_and_controllers() {
+    assert_eq!(
+        sine_through_a_gain_with_other_events(true),
+        sine_through_a_gain_with_other_events(false)
+    );
 }

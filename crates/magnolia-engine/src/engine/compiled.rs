@@ -32,6 +32,9 @@ pub(crate) struct CompiledGraph {
     /// Where the processor moves the dropped nodes, written and reserved for all of them, so that
     /// moving them neither allocates nor faults. It goes to the collector, full.
     pub(crate) dropped_nodes: Vec<Box<dyn Node>>,
+    /// The largest `ahead_in` of the steady phase's steps, in samples: the session's largest
+    /// compensation, by which the transport will pre-roll (ADR-0025).
+    pub(crate) largest_ahead_in: u64,
 }
 
 impl CompiledGraph {
@@ -95,6 +98,9 @@ pub(crate) struct Step {
     pub(crate) outputs: Channels,
     /// The sums into the node's input channels, one per channel, in order.
     pub(crate) sums: Span,
+    /// How far ahead of the output the node's input runs, in samples: its compensation, the
+    /// distance at which it will see the transport (ADR-0025).
+    pub(crate) ahead_in: u64,
 }
 
 /// Consecutive channels of one region of the buffer pool.
