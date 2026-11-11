@@ -15,7 +15,7 @@ New ADRs copy [`0000-template.md`](0000-template.md) and take the next free numb
 | [0004](0004-magnolias-own-wine-bridge-on-the-systems-wine.md) | Magnolia's own Wine bridge, on the system's Wine | Accepted |
 | [0005](0005-plugin-guis-floating-first-then-inside-the-window.md) | Plugin GUIs floating first, then inside the window | Accepted; amended by 0015 |
 | [0006](0006-the-interface-on-uwui-after-the-engine-and-the-project.md) | The interface on uwui, after the engine and the project | Accepted; amended by 0011 |
-| [0007](0007-the-audio-engine.md) | The audio engine | Accepted; amended by 0018, 0023 and 0024 |
+| [0007](0007-the-audio-engine.md) | The audio engine | Accepted; amended by 0018, 0023, 0024, 0025 and 0026 |
 | [0008](0008-the-project-model.md) | The project model: tracks with channels, linked patterns | Accepted |
 | [0009](0009-the-project-in-sqlite-nothing-lost.md) | The project in SQLite; nothing lost | Accepted |
 | [0010](0010-the-quality-bar.md) | The quality bar | Accepted; amended by 0011 and 0014 |
@@ -29,7 +29,12 @@ New ADRs copy [`0000-template.md`](0000-template.md) and take the next free numb
 | [0018](0018-the-time-model.md) | The time model | Accepted; amends 0007 |
 | [0019](0019-the-sanitizers-nightly-code-behind-a-cfg.md) | The sanitizer's nightly code behind a cfg | Accepted; amends 0013 |
 | [0020](0020-clippy-forbids-the-locks-the-sanitizer-cannot-see.md) | Clippy forbids the locks the sanitizer cannot see | Accepted |
-| [0021](0021-the-node-contract.md) | The node contract | Accepted |
+| [0021](0021-the-node-contract.md) | The node contract | Accepted; amended by 0025 and 0027 |
 | [0022](0022-a-panic-on-the-real-time-path-gives-silence.md) | A panic on the real-time path gives silence, and is reported | Accepted |
-| [0023](0023-the-real-time-allowlist.md) | The real-time allowlist | Accepted; amends 0007 |
+| [0023](0023-the-real-time-allowlist.md) | The real-time allowlist | Accepted; amends 0007; amended by 0026 |
 | [0024](0024-how-a-swap-avoids-a-click.md) | How a swap avoids a click | Accepted; amends 0007 |
+| [0025](0025-delay-compensation-by-reading-ahead.md) | Delay compensation by reading ahead | Accepted; amends 0007 and 0021 |
+| [0026](0026-one-stream-per-audio-track.md) | One stream per audio track, from the disk reader | Accepted; amends 0007 and 0023 |
+| [0027](0027-timeline-events-from-sources-on-nodes.md) | Timeline events from sources attached to nodes | Accepted; amends 0021 |
+| [0028](0028-the-test-session-in-json.md) | The test session in JSON | Accepted |
+| [0029](0029-magnolias-own-wav-and-midi-file-readers.md) | Magnolia's own WAV and MIDI file readers | Accepted |

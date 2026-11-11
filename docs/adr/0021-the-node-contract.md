@@ -1,6 +1,6 @@
 # 0021. The node contract
 
-- Status: Accepted
+- Status: Accepted; amended by 0025 and 0027
 - Date: 2026-11-11
 
 ## Context

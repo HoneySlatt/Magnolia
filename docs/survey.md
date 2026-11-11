@@ -236,3 +236,39 @@ found.
   The standards' own texts were not read: *unverified* beyond these sources.
 - A flick is 1/705,600,000 s, a whole fraction of common frame and sample rates
   ([flicks](https://github.com/facebookarchive/flicks)).
+
+## Delay compensation and disk streaming, 2026-11-11
+
+Read for M1.4 in the projects' code (Ardour's master branch, Tracktion Engine's) and manuals (REAPER
+User Guide 7.85, Pro Tools Reference Guide 2025.12); Bitwig documents none of it.
+
+- Ardour reads each track's disk ahead by the latency from it to the output, so that its clock shows
+  what is heard ([route.cc](https://raw.githubusercontent.com/Ardour/ardour/master/libs/ardour/route.cc),
+  `Route::process_output_buffers`); it puts a delay line at the head of each track and on each send,
+  and none at sums. At every start and locate it pre-rolls by the worst latency, rounded up to whole
+  blocks, the timeline standing still meanwhile
+  ([session_transport.cc](https://raw.githubusercontent.com/Ardour/ardour/master/libs/ardour/session_transport.cc),
+  [session_process.cc](https://raw.githubusercontent.com/Ardour/ardour/master/libs/ardour/session_process.cc)).
+  A delay line changes length over 128 samples, fading
+  ([delayline.cc](https://raw.githubusercontent.com/Ardour/ardour/master/libs/ardour/delayline.cc)).
+- REAPER: "The track media is read in advance, so as to be heard at the correct time, but input
+  monitoring is delayed"; compensation is off on feedback routings (User Guide 7.85).
+- Pro Tools delays each track to the longest path, at most 16,383 samples at 44.1 or 48 kHz per
+  mixer channel, and suspends compensation on a track armed for recording (Reference Guide 2025.12,
+  "Delay Compensation").
+- Tracktion delays each shorter input of a sum, does not read ahead, and starts at once, losing the
+  first samples of latent paths
+  ([tracktion_SummingNode.h](https://raw.githubusercontent.com/Tracktion/tracktion_engine/master/modules/tracktion_graph/tracktion_graph/nodes/tracktion_SummingNode.h)).
+- Ardour streams one ring per track: its butler reads the playlist, regions mixed, into it; the
+  process thread wakes the butler when a ring has room for a chunk; its default buffer holds 10 s,
+  in reads of 256 kB to 4 MB; an edit rewrites the ring in place
+  ([disk_reader.cc](https://raw.githubusercontent.com/Ardour/ardour/master/libs/ardour/disk_reader.cc),
+  [disk_io.cc](https://raw.githubusercontent.com/Ardour/ardour/master/libs/ardour/disk_io.cc),
+  [butler.cc](https://raw.githubusercontent.com/Ardour/ardour/master/libs/ardour/butler.cc)).
+- Tracktion reads per clip, on the audio thread, from memory-mapped sections of each file cached by
+  helper threads
+  ([tracktion_AudioFileCache.cpp](https://raw.githubusercontent.com/Tracktion/tracktion_engine/master/modules/tracktion_engine/audio_files/tracktion_AudioFileCache.cpp)).
+- No DAW found claims that its offline render equals playback to the bit; Ardour and REAPER warn
+  that plugins may sound different offline.
+- Of Rust's WAV readers, neither `hound` 3.5.1 (2023) nor `symphonia` 0.6.1 (2026) reads RF64; the
+  MIDI file reader `midly` 0.5.3 dates from 2023-01-01 (crates.io, 2026-11-11).

@@ -11,34 +11,23 @@ tier, into [`measurements.md`](measurements.md).
 
 ## Current
 
-- **Design session, 2026-11-06 to 07: done.** The owner's interview, the survey of the field
-  ([`survey.md`](survey.md)), the recommendations challenged, ten decisions
-  ([ADR-0001](adr/0001-what-magnolia-is.md) to [ADR-0010](adr/0010-the-quality-bar.md)), and the
-  list of what Magnolia asks of uwui ([`uwui-needs.md`](uwui-needs.md)), handed to the owner for
-  SlimeEngine's M6d.1b3b.
-- **2026-11-07: Magnolia is no longer a program of uwui's first stage**; Slatty took its place
-  ([ADR-0011](adr/0011-magnolia-no-longer-a-program-of-uwuis-first-stage.md)). Stages 1 and 2 are
-  unchanged; Stage 3 waits for a stable release of uwui that holds what it needs first.
-- **M1.1, the workspace and its checks: done, 2026-11-10.** CI is green; the check's times are in
-  [`measurements.md`](measurements.md#m11--the-workspace-and-its-checks).
-- **The quality bar measured against the market, 2026-11-10: done.** The owner's interview, its
-  facts in the [survey](survey.md#the-market-measured-2026-11-10), its figures challenged; four
-  decisions ([ADR-0014](adr/0014-the-quality-bar-measured-against-the-market.md) to
-  [ADR-0017](adr/0017-macos-a-candidate-stage-after-stage-4.md)): floors and leads over measured
-  rivals, the interface in a process of its own, agents on the shape of uwui's agent core, macOS a
-  candidate stage. What follows for uwui is in
-  [`uwui-needs.md`](uwui-needs.md#since-uwuis-decisions-of-2026-11-07), for the owner to carry.
-- **M1.2, the time model: done, 2026-11-11.** The owner's decisions of 2026-11-11 are
-  [ADR-0018](adr/0018-the-time-model.md), which amends ADR-0007: absolute positions are counted in
-  time units, not samples. The figures are in
-  [`measurements.md`](measurements.md#m12--the-time-model).
+- **The design session, 2026-11-06 to 07, and the quality bar measured against the market,
+  2026-11-10: done** ([ADR-0001](adr/0001-what-magnolia-is.md) to
+  [ADR-0017](adr/0017-macos-a-candidate-stage-after-stage-4.md); the [survey](survey.md); what
+  Magnolia asks of uwui in [`uwui-needs.md`](uwui-needs.md), for the owner to carry). Stage 3 waits
+  for a stable uwui release that holds what it needs
+  ([ADR-0011](adr/0011-magnolia-no-longer-a-program-of-uwuis-first-stage.md)).
+- **M1.1, the workspace and its checks: done, 2026-11-10.**
+- **M1.2, the time model: done, 2026-11-11** ([ADR-0018](adr/0018-the-time-model.md)).
 - **M1.3, the JACK backend and the graph: built, 2026-11-11; waiting for the owner's measures by
   hand**, on the owner's decisions of that day
   ([ADR-0019](adr/0019-the-sanitizers-nightly-code-behind-a-cfg.md) to
   [ADR-0024](adr/0024-how-a-swap-avoids-a-click.md); `jack`, `rtrb` and `libc` taken; the
   [reference projects](reference-projects.md) adopted). Its checks pass; what only the owner's
   hardware can measure is [listed below](#m13--the-jack-backend-and-the-graph).
-- **Next: M1.4**, a session plays, on the owner's go.
+- **M1.4, a session plays: in progress since 2026-11-11.** Designed, challenged and decided that day
+  ([ADR-0025](adr/0025-delay-compensation-by-reading-ahead.md) to
+  [ADR-0029](adr/0029-magnolias-own-wav-and-midi-file-readers.md); `serde` and `serde_json` taken).
 
 ## Status
 
@@ -47,7 +36,7 @@ tier, into [`measurements.md`](measurements.md).
 | [M1.1](#m11--the-workspace-and-its-checks) | The Rust workspace builds and is checked in CI | Done |
 | [M1.2](#m12--the-time-model) | Positions, tempo, meter and timecode are exact | Done |
 | [M1.3](#m13--the-jack-backend-and-the-graph) | A graph of nodes plays through the JACK API, swapped without a click | Built; waiting for the owner's measures by hand |
-| [M1.4](#m14--a-session-plays) | A test session of clips and MIDI plays from disk, delays compensated | Planned |
+| [M1.4](#m14--a-session-plays) | A test session of clips and MIDI plays from disk, delays compensated | In progress |
 | [M1.5](#m15--recording-and-monitoring) | A voice is recorded and monitored at low latency | Planned |
 | [M1.6](#m16--plugin-hosts) | Native CLAP and VST3 plugins play out of the engine's process and survive a crash | Planned |
 | [M1.7](#m17--the-wine-bridge) | The owner's Windows plugins play under the system's Wine | Planned |
@@ -84,11 +73,8 @@ milestone first needs it.
   and fuzzed.
 - **How to test.** `cargo test`; `cargo fuzz` briefly in CI.
 - **Measured.** The time of a conversion, as the engine calls it per block.
-- **Delivered**, on the owner's decisions of 2026-11-11 ([ADR-0018](adr/0018-the-time-model.md);
-  libfuzzer-sys taken for `cargo fuzz`): `magnolia_engine::time`; the rule checked on every grid
-  over ten hours, a tick's sample against an independent oracle (`tests/time_over_ten_hours.rs`); two fuzz targets,
-  run 20 s each by `scripts/check.sh`; a RealtimeSanitizer case on a block's conversions; a
-  benchmark. No program runs yet: the tests, the fuzz targets and the benchmark ran.
+- **Delivered**: `magnolia_engine::time`, tested over ten hours against an independent oracle,
+  fuzzed, benchmarked ([measurements](measurements.md#m12--the-time-model)).
 
 ### M1.3 — The JACK backend and the graph
 
@@ -134,6 +120,14 @@ milestone first needs it.
 - **How to test.** `cargo test`; the command line plays the session by hand.
 - **Measured.** The callback's histogram on the reference project without plugins; the disk
   thread's read-ahead.
+- **Decided**, 2026-11-11: sources read ahead, delay lines only where latencies meet, nothing live
+  delayed, play pre-rolled (ADR-0025); one stream per audio track in a ring of slots, the reader
+  woken by the processor (ADR-0026); timeline events from sources on nodes, structured, the event
+  queue bounded by count (ADR-0027); the session in JSON (ADR-0028); WAV and MIDI files read by
+  Magnolia's own code (ADR-0029). New crates `magnolia-session` and `magnolia-cli`.
+- **Build order**: the `time` module's no-panic lints; events (ADR-0027); compensation; the
+  transport; WAV; the disk reader and the players; the test nodes; the session, its loader, render
+  and generator; the command line; the null, then the measures.
 
 ### M1.5 — Recording and monitoring
 
@@ -220,5 +214,4 @@ milestone first needs it.
 
 The known debt is in [`debt.md`](debt.md).
 
-Finished stages move to [`history.md`](history.md), in a few lines each, so that this file holds the
-current stage only, under about 2,000 words.
+Finished stages move to [`history.md`](history.md).
