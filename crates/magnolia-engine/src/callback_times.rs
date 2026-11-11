@@ -7,6 +7,15 @@
 //! times under 16 ns each have a bucket, and each power of two above is cut into 16 buckets, so a
 //! bucket's upper bound is within 6.25 % of any time it holds. The exact maximum is kept apart.
 
+// The processor records into the histogram in every period: nothing here may panic (ADR-0022).
+#![warn(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -43,6 +52,16 @@ impl CallbackTimes {
         }
     }
 
+    /// Writes zero into every bucket through `black_box`, so that every page of the histogram is
+    /// written before the real-time thread first records into it.
+    pub(crate) fn write_every_page(&self) {
+        let zero = std::hint::black_box(0);
+        for bucket in &self.buckets {
+            bucket.store(zero, Ordering::Relaxed);
+        }
+        self.maximum_nanoseconds.store(zero, Ordering::Relaxed);
+    }
+
     /// Records one callback's time. Real-time safe: two relaxed atomic operations.
     pub fn record(&self, time: Duration) {
         let nanoseconds = u64::try_from(time.as_nanos()).unwrap_or(u64::MAX);
@@ -58,7 +77,10 @@ impl CallbackTimes {
     /// real-time thread records may miss the callback being recorded, never more.
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
-            buckets: std::array::from_fn(|index| self.buckets[index].load(Ordering::Relaxed)),
+            buckets: self
+                .buckets
+                .each_ref()
+                .map(|bucket| bucket.load(Ordering::Relaxed)),
             maximum_nanoseconds: self.maximum_nanoseconds.load(Ordering::Relaxed),
         }
     }
@@ -93,19 +115,21 @@ impl Snapshot {
         }
         // The rank of the callback at that fraction, counted from 1, by integers so that 99.9 %
         // of 1,000 is exactly the 999th.
-        let rank = (u128::from(numerator) * u128::from(count)).div_ceil(u128::from(denominator));
-        let rank = u64::try_from(rank)
-            .expect("the rank is at most the count")
-            .max(1);
-        let mut seen = 0;
+        // Two numbers below 2^64 multiply below 2^128: the product never saturates.
+        let rank = (u128::from(numerator).saturating_mul(u128::from(count)))
+            .div_ceil(u128::from(denominator));
+        // The rank is at most the count, so it fits.
+        let rank = u64::try_from(rank).unwrap_or(count).max(1);
+        let mut seen: u64 = 0;
         for (index, &bucket_count) in self.buckets.iter().enumerate() {
-            seen += bucket_count;
+            seen = seen.saturating_add(bucket_count);
             if seen >= rank {
                 let bound = upper_bound_of(index).min(self.maximum_nanoseconds);
                 return Some(Duration::from_nanos(bound));
             }
         }
-        unreachable!("the rank is at most the count, which the buckets sum to")
+        // The buckets sum to the count, which the rank does not exceed: the loop has returned.
+        Some(self.maximum())
     }
 
     /// The share of callbacks that took longer than `limit`, between 0 and 1, counting a bucket
@@ -132,12 +156,18 @@ fn bucket_of(nanoseconds: u64) -> usize {
     if nanoseconds < SUB_BUCKETS {
         return nanoseconds as usize;
     }
-    let power = (u64::BITS - 1 - nanoseconds.leading_zeros()).min(LAST_POWER);
+    // From here on, 16 nanoseconds or more: the power is at least `SUB_BUCKET_BITS`, so the
+    // subtractions below never saturate, and the sum stays below `BUCKETS`.
+    let power = nanoseconds.checked_ilog2().unwrap_or(0).min(LAST_POWER);
     if power == LAST_POWER && nanoseconds >> LAST_POWER > 1 {
         return BUCKETS - 1;
     }
-    let sub_bucket = (nanoseconds >> (power - SUB_BUCKET_BITS)) & (SUB_BUCKETS - 1);
-    (SUB_BUCKETS + u64::from(power - SUB_BUCKET_BITS) * SUB_BUCKETS + sub_bucket) as usize
+    let shift = power.saturating_sub(SUB_BUCKET_BITS);
+    let sub_bucket = (nanoseconds >> shift) & (SUB_BUCKETS - 1);
+    let power_buckets = u64::from(shift).saturating_mul(SUB_BUCKETS);
+    SUB_BUCKETS
+        .saturating_add(power_buckets)
+        .saturating_add(sub_bucket) as usize
 }
 
 /// The largest time in nanoseconds a bucket holds.
@@ -149,10 +179,15 @@ fn upper_bound_of(index: usize) -> u64 {
     if index as usize == BUCKETS - 1 {
         return u64::MAX;
     }
-    let power = (index - SUB_BUCKETS) / SUB_BUCKETS + u64::from(SUB_BUCKET_BITS);
-    let sub_bucket = (index - SUB_BUCKETS) % SUB_BUCKETS;
-    let width = 1u64 << (power - u64::from(SUB_BUCKET_BITS));
-    (1u64 << power) + (sub_bucket + 1) * width - 1
+    // From here on, 16 to `BUCKETS - 2`: no step below saturates.
+    let above_linear = index.saturating_sub(SUB_BUCKETS);
+    let shift = above_linear / SUB_BUCKETS;
+    let sub_bucket = above_linear % SUB_BUCKETS;
+    let power = shift.saturating_add(u64::from(SUB_BUCKET_BITS));
+    let width = 1u64 << shift;
+    (1u64 << power)
+        .saturating_add(sub_bucket.saturating_add(1).saturating_mul(width))
+        .saturating_sub(1)
 }
 
 #[cfg(test)]
@@ -221,10 +256,11 @@ mod tests {
         let snapshot = times.snapshot();
         assert_eq!(snapshot.count(), 1_000);
         assert_eq!(snapshot.maximum(), Duration::from_micros(900));
-        let median = snapshot.quantile(1, 2).unwrap();
+        // A missing quantile reads as zero, which the assertions below refuse.
+        let median = snapshot.quantile(1, 2).unwrap_or_default();
         assert!(median >= Duration::from_micros(100));
         assert!(median <= Duration::from_micros(100) + Duration::from_micros(100) / 16);
-        let p999 = snapshot.quantile(999, 1000).unwrap();
+        let p999 = snapshot.quantile(999, 1000).unwrap_or_default();
         assert!(p999 >= Duration::from_micros(100) && p999 < Duration::from_micros(107));
         assert_eq!(snapshot.quantile(1, 1), Some(Duration::from_micros(900)));
         assert_eq!(snapshot.share_over(Duration::from_micros(500)), 0.001);

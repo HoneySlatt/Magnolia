@@ -16,35 +16,55 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
 - **Blank window**: a window that only clears and presents. What a program adds above it is its
   *own cost* ([ADR-0014](adr/0014-the-quality-bar-measured-against-the-market.md)).
 - **Block**: the frames the engine processes in one callback, a period's worth.
+- **Buffer pool**: the one set of channel buffers the engine's processor works in, an input region and
+  an output region, each channel a stride long; compiled graphs name its channels by index
+  ([`ARCHITECTURE.md`](ARCHITECTURE.md#memory-the-real-time-thread-touches)).
 - **Channel**: a strip of the mixer. Each track owns one; a multi-output instrument has child
   channels under its track ([ADR-0008](adr/0008-the-project-model.md)).
 - **Collector**: the thread that frees what the real-time thread let go, so that it never frees
   memory itself.
 - **Comping**: building one take from the best parts of several.
-- **Compiled graph**: the order of the engine's nodes, their buffers and their compensating delays,
-  built off the real-time thread and swapped in at a block's boundary
+- **Compiled graph**: the phases of a swap, each the order of the engine's nodes and what each of
+  their channels sums, built off the real-time thread and swapped in at a period's start; from
+  M1.4 it holds the delays that compensate plugins' latencies too
   ([ADR-0007](adr/0007-the-audio-engine.md)).
+- **Controller**: the engine's non-real-time half: it edits the graph's description, compiles each
+  swap and sends it, and sends events ([`ARCHITECTURE.md`](ARCHITECTURE.md#the-engine)).
 - **Creation bench**: five musical tasks, from a beat to stems for a game, timed in Magnolia and in
   its rivals: the waiting on the machine and the human time
   ([ADR-0014](adr/0014-the-quality-bar-measured-against-the-market.md)).
+- **Crossfade**: a swap whose one fading phase runs the union of the old and new graphs, the paths
+  removed fading out while the paths added fade in, one fade on each path that changes
+  ([`ARCHITECTURE.md`](ARCHITECTURE.md#a-swap)).
 - **DAWbench's method**: instances of one plugin, or an instrument's voices, added until the first
   xrun or missed deadline; the count measures a DAW's processing power.
 - **Deadline**: the share of a period past which a plugin's answer is not awaited and its block is
   silent ([ADR-0003](adr/0003-every-plugin-out-of-the-engines-process.md)).
+- **Dip**: a swap that fades the old graph's removed edges out, then the new graph's added edges in,
+  one phase each, when the union of both graphs would hold a cycle or too many nodes.
 - **Drop-frame**: a timecode at 29.97 or 59.94 frames a second that skips frame labels, two or
   four at the start of each minute but every tenth, to stay in step with the clock.
 - **Duplex**: input and output of a period handled in one callback.
+- **Fade**: a raised cosine over 5 ms, by which a swap's edges come in or go out; on one edge, a
+  fade-in and its fade-out sum to one at every sample.
 - **Floor**: an absolute figure of the quality bar, which gates the milestone that measures it
   ([ADR-0014](adr/0014-the-quality-bar-measured-against-the-market.md)).
 - **Foreign surface**: a surface drawn by another process, shown in an element of Magnolia's window,
   as a plugin's GUI will be.
 - **Futex ping-pong**: two processes that wake each other in turn through a futex; the least that
   any bridge between processes pays for a round trip.
+- **Generation**: how many nodes have occupied an arena slot before; a node's id holds it, so that
+  an old id never reaches the node that reuses its slot.
 - **Gesture**: one action of the user that changes the project, such as a note drawn or a clip
   moved; one transaction in the project's file.
 - **Grid**: a way of measuring time, whose positions each lie at an exact moment: samples, time
   units, ticks or timecode frames ([ADR-0018](adr/0018-the-time-model.md)).
 - **Group commit**: gestures that arrive during a sync to disk, written together at the next one.
+- **Held event**: an event the controller keeps until the processor has applied the swap that
+  brings its node, so that it never reaches the processor before its node
+  ([`ARCHITECTURE.md`](ARCHITECTURE.md#events)).
+- **Heartbeat**: the count of periods the processor has run, which stops when the backend stops
+  calling it.
 - **Label**: a timecode as a clock shows it, hours, minutes, seconds and frames, such as
   01:00:00:00; drop-frame skips some labels.
 - **Lead**: a margin of the quality bar over the best rival, measured; missed, it is debt, never a
@@ -64,6 +84,8 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
 - **Pattern**: a reusable block of notes and automation, over one or several instrument tracks.
 - **Pattern lane**: the lane above the arrangement where patterns are painted.
 - **Period**: the number of frames the audio device asks for at each callback, from 32 to 128 here.
+- **Phase**: one stage of a swap: which nodes run, in which order, and the gain of each edge; every
+  phase but the last lasts one fade, the last is steady.
 - **Place, read**: the two ways to convert a position to another grid: placing gives the first point
   at or after its moment, reading the last point at or before it
   ([ADR-0018](adr/0018-the-time-model.md)).
@@ -73,8 +95,12 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
   playlist is Magnolia's arrangement.
 - **Plugin host**: a process apart from the engine that runs third-party plugins, native or under
   Wine.
+- **Poisoned**: the processor's state after a panic on the real-time path: it writes silence to every
+  output from then on, and says so ([ADR-0022](adr/0022-a-panic-on-the-real-time-path-gives-silence.md)).
 - **Prefix**: a folder holding one Windows installation for Wine, its programs and its registry.
 - **Primary modifier**: the key that shortcuts use, Ctrl on Linux and Windows, Cmd on macOS.
+- **Processor**: the engine's real-time half, which a backend calls once a period; it applies swaps,
+  runs the nodes and fills the device's buffers ([`ARCHITECTURE.md`](ARCHITECTURE.md#a-period)).
 - **Reference project**: a session fixed in M1.3 for each tier, on which the sound's budgets are
   measured, never tuned for afterwards ([`reference-projects.md`](reference-projects.md)).
 - **Render-ahead**: rendering tracks without live input before the playhead reaches them, on worker
@@ -87,10 +113,21 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
 - **Scan-out**: the time a display takes to send an image's lines to the panel, from top to bottom.
 - **Screen of reference**: a screen fixed before the work, on which uwui and its rivals are
   measured.
+- **Sleep**: what a node returns when it needs no call while its inputs stay silent and no event
+  comes; the processor then skips it and writes silence in its place
+  ([ADR-0021](adr/0021-the-node-contract.md)).
 - **Snapshot of a plugin's state**: its state saved when it reports a change, or read at an
   interval when it never does.
 - **Song start**: the time position of tick 0 in a tempo map.
+- **Steady phase**: a swap's last phase, which lasts until the next swap; when it begins, the nodes
+  the swap dropped leave the arena.
 - **Stems**: a mix exported as several files, one per group of tracks, that sum to the mix.
+- **Stride**: the length of every channel buffer in the buffer pool: the engine's largest block,
+  rounded up to 16 floats.
+- **Sub-block**: a stretch of a period that the processor runs at once, never longer than the
+  engine's largest block; it cuts a period there and at the end of each phase.
+- **Swap**: the change from one compiled graph to the next, applied whole at a period's start and
+  played through its phases without a click.
 - **Take lane**: one recorded take of a track, kept beside the others for comping.
 - **Tempo map**: where musical time lies on the absolute timeline: tempo changes at ticks, meter
   changes at bars, from the song start.

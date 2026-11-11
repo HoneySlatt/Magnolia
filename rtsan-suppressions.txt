@@ -1,0 +1,10 @@
+# RealtimeSanitizer's suppressions: one line per call on the real-time allowlist (ADR-0023), each
+# naming the function of Magnolia's that makes the call, never an intercepted function such as
+# `syscall`: a lock's wait goes through the same `syscall`, and would be hidden with it. The runs
+# are symbolized (`allow_addr2line=true`) so that these names can match;
+# crates/magnolia-engine/tests/realtime_sanitizer.rs proves that a wait beside an allowed call is
+# still reported.
+
+# The processor wakes the collector thread after handing it what it let go: a futex wake through
+# `Thread::unpark`, made only when the collector sleeps.
+call-stack-contains:magnolia_engine::engine::collector::wake_collector

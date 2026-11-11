@@ -47,6 +47,12 @@ cargo clippy "${fuzz[@]}" --locked --target-dir "$fuzz_target_dir" -- -D warning
 step "tests"
 cargo test --workspace --locked
 
+# An optimised build may turn a fresh allocation's zero fill into calloc, which leaves its pages
+# for the real-time thread to fault on; the engine writes them first (engine/memory.rs). The test
+# that counts those faults runs in that build too.
+step "a swap takes no page fault on the processing thread, in a release build"
+cargo test --release --locked -p magnolia-engine --test engine page_faults
+
 step "documentation"
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 
@@ -57,8 +63,14 @@ cargo deny "${fuzz[@]}" --locked check
 # RealtimeSanitizer ships with the nightly's standard library (ADR-0013). `--cfg magnolia_rtsan`
 # turns on the code that only the nightly builds (ADR-0019). `--target` keeps both flags off build
 # scripts and procedural macros, as the Unstable Book asks; a target directory of its own keeps
-# these builds from evicting the stable ones.
-step "RealtimeSanitizer stops an allocation in a function marked real-time, passes a block's conversions"
+# these builds from evicting the stable ones. The test gives each case the sanitizer's options:
+# reports symbolized by binutils' addr2line, so that the suppressions of rtsan-suppressions.txt
+# match the allowed calls by name (ADR-0023).
+step "RealtimeSanitizer stops an allocation and a lock's wait, passes the allowed wake, a block's conversions and the engine's processor"
+command -v addr2line >/dev/null || {
+    echo "addr2line is missing: the sanitizer's suppressions need symbolized reports (ADR-0023)" >&2
+    exit 1
+}
 sanitizer_flags="-Zsanitizer=realtime --cfg magnolia_rtsan"
 sanitized=(--locked -p magnolia-engine --test realtime_sanitizer
     --target x86_64-unknown-linux-gnu --target-dir "${CARGO_TARGET_DIR:-target}/realtime-sanitizer")

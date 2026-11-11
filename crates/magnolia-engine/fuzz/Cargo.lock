@@ -72,6 +72,9 @@ dependencies = [
 [[package]]
 name = "magnolia-engine"
 version = "0.0.0"
+dependencies = [
+ "rtrb",
+]
 
 [[package]]
 name = "magnolia-engine-fuzz"
@@ -86,6 +89,12 @@ name = "r-efi"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
+
+[[package]]
+name = "rtrb"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5974e397833d890f2f74963408e0d4a6cd8eda2f6a445ae06750291b5d7a997e"
 
 [[package]]
 name = "shlex"
