@@ -48,6 +48,15 @@
 //! assert_eq!(clock.label(frame), Timecode { frames: 12, ..start });
 //! ```
 
+// The period will convert time with this module's code: nothing here may panic (ADR-0022).
+#![warn(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
+
 mod samples;
 mod tempo_map;
 mod timecode;
@@ -119,13 +128,14 @@ impl Grid for TimeUnits {
     type Position = TimePosition;
 
     fn moment_of(&self, position: TimePosition) -> Option<Moment> {
-        Some(Moment(
-            i128::from(position.0) * i128::from(TICKS_PER_QUARTER),
-        ))
+        // At most 2^63 · 2^22.2: never overflows.
+        i128::from(position.0)
+            .checked_mul(i128::from(TICKS_PER_QUARTER))
+            .map(Moment)
     }
 
     fn first_at_or_after(&self, moment: Moment) -> Option<TimePosition> {
-        to_i64(div_ceil(moment.0, i128::from(TICKS_PER_QUARTER))).map(TimePosition)
+        to_i64(div_ceil(moment.0, i128::from(TICKS_PER_QUARTER))?).map(TimePosition)
     }
 
     fn last_at_or_before(&self, moment: Moment) -> Option<TimePosition> {
@@ -133,13 +143,15 @@ impl Grid for TimeUnits {
     }
 }
 
-/// The smallest integer at or above `numerator / denominator`, for a positive denominator.
-fn div_ceil(numerator: i128, denominator: i128) -> i128 {
-    let quotient = numerator.div_euclid(denominator);
-    if numerator.rem_euclid(denominator) == 0 {
-        quotient
+/// The smallest integer at or above `numerator / denominator`, for a positive denominator; `None`
+/// for a denominator of 0. With a denominator of 1 nothing is rounded up, and with a larger one the
+/// quotient is at most half of `i128::MAX`, so a positive denominator never gives `None`.
+fn div_ceil(numerator: i128, denominator: i128) -> Option<i128> {
+    let quotient = numerator.checked_div_euclid(denominator)?;
+    if numerator.checked_rem_euclid(denominator)? == 0 {
+        Some(quotient)
     } else {
-        quotient + 1
+        quotient.checked_add(1)
     }
 }
 
@@ -163,9 +175,12 @@ mod tests {
 
     #[test]
     fn rounding_follows_the_floor_and_the_ceiling_on_both_sides_of_zero() {
-        assert_eq!(div_ceil(7, 2), 4);
-        assert_eq!(div_ceil(-7, 2), -3);
-        assert_eq!(div_ceil(-8, 2), -4);
+        assert_eq!(div_ceil(7, 2), Some(4));
+        assert_eq!(div_ceil(-7, 2), Some(-3));
+        assert_eq!(div_ceil(-8, 2), Some(-4));
+        assert_eq!(div_ceil(i128::MAX, 1), Some(i128::MAX));
+        assert_eq!(div_ceil(i128::MIN, 2), Some(i128::MIN / 2));
+        assert_eq!(div_ceil(1, 0), None);
         assert_eq!((-7_i128).div_euclid(2), -4);
         let between = Moment(i128::from(TICKS_PER_QUARTER) * 5 - 1);
         assert_eq!(TimeUnits.first_at_or_after(between), Some(TimePosition(5)));

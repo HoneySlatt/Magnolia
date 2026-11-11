@@ -1,6 +1,15 @@
 //! Timecode: frames at a film or video rate, their labels, and the clock that lays them on the
 //! absolute timeline.
 
+// The period will convert time with this module's code: nothing here may panic (ADR-0022).
+#![warn(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
+
 use super::{
     Grid, Moment, TICKS_PER_QUARTER, TIME_UNITS_PER_SECOND, TimePosition, div_ceil, to_i64,
 };
@@ -83,25 +92,41 @@ impl FrameRate {
     /// The length of a frame, in time units: a whole number at every rate.
     pub fn frame_duration(self) -> i64 {
         let (frames, seconds) = self.frames_per_second();
-        TIME_UNITS_PER_SECOND * i64::from(seconds) / i64::from(frames)
+        // At most 2^39.7 · 1,001, over a rate's frames, never zero: no step fails, and the
+        // fallback, a second, is never taken.
+        TIME_UNITS_PER_SECOND
+            .saturating_mul(i64::from(seconds))
+            .checked_div(i64::from(frames))
+            .unwrap_or(TIME_UNITS_PER_SECOND)
     }
 
     /// The frames in one labelled day, from 00:00:00:00 to 23:59:59 and its last frame.
     pub fn frames_per_day(self) -> i64 {
-        24 * 6 * self.frames_per_ten_minutes()
+        // 144 spans of ten minutes, each of at most 36,000 frames: never saturates.
+        self.frames_per_ten_minutes().saturating_mul(24 * 6)
     }
 
     /// The labels skipped at the start of each minute but every tenth.
     fn dropped_per_minute(self) -> i64 {
-        if self.is_drop_frame() {
-            i64::from(self.labels_per_second()) / 30 * 2
-        } else {
-            0
+        match self {
+            FrameRate::Fps29_97Drop => 2,
+            FrameRate::Fps59_94Drop => 4,
+            FrameRate::Fps23_976
+            | FrameRate::Fps24
+            | FrameRate::Fps25
+            | FrameRate::Fps29_97
+            | FrameRate::Fps30
+            | FrameRate::Fps50
+            | FrameRate::Fps59_94
+            | FrameRate::Fps60 => 0,
         }
     }
 
     fn frames_per_ten_minutes(self) -> i64 {
-        600 * i64::from(self.labels_per_second()) - 9 * self.dropped_per_minute()
+        // At most 600 · 60: never saturates.
+        i64::from(self.labels_per_second())
+            .saturating_mul(600)
+            .saturating_sub(self.dropped_per_minute().saturating_mul(9))
     }
 }
 
@@ -125,42 +150,69 @@ impl Timecode {
         let labels = rate.labels_per_second();
         let in_range =
             self.hours < 24 && self.minutes < 60 && self.seconds < 60 && self.frames < labels;
-        let total_minutes = 60 * i64::from(self.hours) + i64::from(self.minutes);
+        // Every field is a byte: no step below overflows.
+        let total_minutes = i64::from(self.hours)
+            .checked_mul(60)?
+            .checked_add(i64::from(self.minutes))?;
         let dropped = rate.dropped_per_minute();
         let skipped =
             self.seconds == 0 && total_minutes % 10 != 0 && i64::from(self.frames) < dropped;
         if !in_range || skipped {
             return None;
         }
-        let labelled_seconds = 60 * total_minutes + i64::from(self.seconds);
-        let skipped_so_far = dropped * (total_minutes - total_minutes / 10);
-        Some(labelled_seconds * i64::from(labels) + i64::from(self.frames) - skipped_so_far)
+        let labelled_seconds = total_minutes
+            .checked_mul(60)?
+            .checked_add(i64::from(self.seconds))?;
+        let skipped_so_far = dropped.checked_mul(total_minutes.checked_sub(total_minutes / 10)?)?;
+        labelled_seconds
+            .checked_mul(i64::from(labels))?
+            .checked_add(i64::from(self.frames))?
+            .checked_sub(skipped_so_far)
     }
 
     /// The label of the frame `number` frames after 00:00:00:00, counted around a day: the frame
     /// after 23:59:59 and its last frame is 00:00:00:00 again.
     pub fn from_frame_number(number: i64, rate: FrameRate) -> Timecode {
-        let number = number.rem_euclid(rate.frames_per_day());
-        let dropped = rate.dropped_per_minute();
-        let labels = i64::from(rate.labels_per_second());
-        let frames_per_dropped_minute = 60 * labels - dropped;
-        let ten_minutes = number / rate.frames_per_ten_minutes();
-        let in_ten_minutes = number % rate.frames_per_ten_minutes();
-        // Add back the labels skipped before this frame: 9 minutes' worth in each whole ten, and
-        // one minute's worth for each dropped minute begun in this ten.
-        let mut label_number = number + 9 * dropped * ten_minutes;
-        if in_ten_minutes > dropped {
-            label_number += dropped * ((in_ten_minutes - dropped) / frames_per_dropped_minute);
-        }
-        let labelled_seconds = label_number / labels;
-        // Each field is below 60, or below the labels per second, so the casts are exact.
-        Timecode {
-            hours: (labelled_seconds / 3_600) as u8,
-            minutes: (labelled_seconds / 60 % 60) as u8,
-            seconds: (labelled_seconds % 60) as u8,
-            frames: (label_number % labels) as u8,
-        }
+        // Its divisors are the rate's constants, never zero, and its values stay within a day's
+        // labels: the fallback is never taken.
+        label_of_frame(number, rate).unwrap_or(MIDNIGHT)
     }
+}
+
+/// 00:00:00:00.
+const MIDNIGHT: Timecode = Timecode {
+    hours: 0,
+    minutes: 0,
+    seconds: 0,
+    frames: 0,
+};
+
+/// The label of the frame `number` frames after 00:00:00:00, counted around a day; `None` only if
+/// a step overflows, which no rate allows.
+fn label_of_frame(number: i64, rate: FrameRate) -> Option<Timecode> {
+    let number = number.checked_rem_euclid(rate.frames_per_day())?;
+    let dropped = rate.dropped_per_minute();
+    let labels = i64::from(rate.labels_per_second());
+    let frames_per_dropped_minute = labels.checked_mul(60)?.checked_sub(dropped)?;
+    let ten_minutes = number.checked_div(rate.frames_per_ten_minutes())?;
+    let in_ten_minutes = number.checked_rem(rate.frames_per_ten_minutes())?;
+    // Add back the labels skipped before this frame: 9 minutes' worth in each whole ten, and one
+    // minute's worth for each dropped minute begun in this ten.
+    let mut label_number = number.checked_add(dropped.checked_mul(9)?.checked_mul(ten_minutes)?)?;
+    if in_ten_minutes > dropped {
+        let dropped_minutes = in_ten_minutes
+            .checked_sub(dropped)?
+            .checked_div(frames_per_dropped_minute)?;
+        label_number = label_number.checked_add(dropped.checked_mul(dropped_minutes)?)?;
+    }
+    let labelled_seconds = label_number.checked_div(labels)?;
+    // Each field is below 60, or below the labels per second, so the casts are exact.
+    Some(Timecode {
+        hours: (labelled_seconds / 3_600) as u8,
+        minutes: (labelled_seconds / 60 % 60) as u8,
+        seconds: (labelled_seconds % 60) as u8,
+        frames: label_number.checked_rem(labels)? as u8,
+    })
 }
 
 /// A position in timecode frames, counted from a [`TimecodeClock`]'s start frame.
@@ -199,7 +251,8 @@ impl TimecodeClock {
 
     /// The label of a frame.
     pub fn label(&self, frame: FramePosition) -> Timecode {
-        let number = i128::from(self.start_number) + i128::from(frame.0);
+        // The sum of two `i64` never saturates an `i128`.
+        let number = i128::from(self.start_number).saturating_add(i128::from(frame.0));
         let day = i128::from(self.rate.frames_per_day());
         // Below a day, so the cast is exact.
         Timecode::from_frame_number(number.rem_euclid(day) as i64, self.rate)
@@ -210,21 +263,27 @@ impl TimecodeClock {
     /// before it to just under half a day after.
     pub fn frame_of(&self, label: Timecode) -> Option<FramePosition> {
         let day = self.rate.frames_per_day();
-        let after_start = (label.frame_number(self.rate)? - self.start_number).rem_euclid(day);
+        // Both frame numbers lie within a day: no step fails.
+        let after_start = label
+            .frame_number(self.rate)?
+            .checked_sub(self.start_number)?
+            .checked_rem_euclid(day)?;
         let nearest = if after_start < day / 2 {
             after_start
         } else {
-            after_start - day
+            after_start.checked_sub(day)?
         };
         Some(FramePosition(nearest))
     }
 
     fn start_moment_units(&self) -> i128 {
-        i128::from(self.start.0) * i128::from(TICKS_PER_QUARTER)
+        // At most 2^63 · 2^22.2: never saturates.
+        i128::from(self.start.0).saturating_mul(i128::from(TICKS_PER_QUARTER))
     }
 
     fn moment_units_per_frame(&self) -> i128 {
-        i128::from(self.rate.frame_duration()) * i128::from(TICKS_PER_QUARTER)
+        // At most 2^35.1 · 2^22.2: never saturates.
+        i128::from(self.rate.frame_duration()).saturating_mul(i128::from(TICKS_PER_QUARTER))
     }
 }
 
@@ -232,14 +291,16 @@ impl Grid for TimecodeClock {
     type Position = FramePosition;
 
     fn moment_of(&self, frame: FramePosition) -> Option<Moment> {
-        // At most 2^63 · 2^35.1 · 2^22.2 = 2^120.3: never overflows.
-        let since_start = i128::from(frame.0) * self.moment_units_per_frame();
-        Some(Moment(self.start_moment_units() + since_start))
+        // At most 2^63 · 2^35.1 · 2^22.2 = 2^120.3, plus 2^85.2: never overflows.
+        let since_start = i128::from(frame.0).checked_mul(self.moment_units_per_frame())?;
+        self.start_moment_units()
+            .checked_add(since_start)
+            .map(Moment)
     }
 
     fn first_at_or_after(&self, moment: Moment) -> Option<FramePosition> {
         let since_start = moment.0.checked_sub(self.start_moment_units())?;
-        to_i64(div_ceil(since_start, self.moment_units_per_frame())).map(FramePosition)
+        to_i64(div_ceil(since_start, self.moment_units_per_frame())?).map(FramePosition)
     }
 
     fn last_at_or_before(&self, moment: Moment) -> Option<FramePosition> {
@@ -250,6 +311,8 @@ impl Grid for TimecodeClock {
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error;
+
     use super::*;
     use crate::time::{SamplePosition, SampleRate, TimeUnits, place, read};
 
@@ -329,22 +392,25 @@ mod tests {
     }
 
     #[test]
-    fn a_session_starting_before_the_hour_reads_its_labels() {
+    fn a_session_starting_before_the_hour_reads_its_labels() -> Result<(), Box<dyn Error>> {
         let start = tc(0, 59, 50, 0);
-        let clock = TimecodeClock::new(FrameRate::Fps25, start, TimePosition(0)).unwrap();
+        let clock = TimecodeClock::new(FrameRate::Fps25, start, TimePosition(0))
+            .ok_or("the start label is a label")?;
         assert_eq!(clock.label(FramePosition(0)), start);
         assert_eq!(clock.frame_of(tc(1, 0, 0, 0)), Some(FramePosition(250)));
         assert_eq!(clock.frame_of(tc(0, 59, 49, 24)), Some(FramePosition(-1)));
-        let rate = SampleRate::new(48_000).unwrap();
+        let rate = SampleRate::new(48_000).ok_or("48 kHz is a rate")?;
         assert_eq!(
             place(FramePosition(250), &clock, &rate),
             Some(SamplePosition(480_000))
         );
+        Ok(())
     }
 
     #[test]
-    fn a_label_after_midnight_is_the_next_day_near_a_late_start() {
-        let clock = TimecodeClock::new(FrameRate::Fps24, tc(23, 0, 0, 0), TimePosition(0)).unwrap();
+    fn a_label_after_midnight_is_the_next_day_near_a_late_start() -> Result<(), Box<dyn Error>> {
+        let clock = TimecodeClock::new(FrameRate::Fps24, tc(23, 0, 0, 0), TimePosition(0))
+            .ok_or("the start label is a label")?;
         assert_eq!(
             clock.frame_of(tc(1, 0, 0, 0)),
             Some(FramePosition(2 * 3_600 * 24))
@@ -354,13 +420,15 @@ mod tests {
             clock.frame_of(tc(22, 0, 0, 0)),
             Some(FramePosition(-3_600 * 24))
         );
+        Ok(())
     }
 
     #[test]
-    fn a_frame_starts_on_the_first_sample_at_or_after_it_and_holds_the_samples_until_the_next() {
-        let clock =
-            TimecodeClock::new(FrameRate::Fps29_97, tc(0, 0, 0, 0), TimePosition(0)).unwrap();
-        let rate = SampleRate::new(48_000).unwrap();
+    fn a_frame_starts_on_the_first_sample_at_or_after_it_and_holds_the_samples_until_the_next()
+    -> Result<(), Box<dyn Error>> {
+        let clock = TimecodeClock::new(FrameRate::Fps29_97, tc(0, 0, 0, 0), TimePosition(0))
+            .ok_or("the start label is a label")?;
+        let rate = SampleRate::new(48_000).ok_or("48 kHz is a rate")?;
         // A frame at 29.97 lasts 1,601.6 samples at 48 kHz: frame 2 starts at 3,203.2.
         assert_eq!(
             place(FramePosition(2), &clock, &rate),
@@ -374,27 +442,34 @@ mod tests {
             read(SamplePosition(3_204), &rate, &clock),
             Some(FramePosition(2))
         );
-        let time = place(FramePosition(2), &clock, &TimeUnits).unwrap();
+        let time = place(FramePosition(2), &clock, &TimeUnits).ok_or("frame 2 has a time")?;
         assert_eq!(read(time, &TimeUnits, &clock), Some(FramePosition(2)));
+        Ok(())
     }
 
     #[test]
-    fn ten_hours_of_drop_frame_labels_run_ahead_of_the_clock_by_a_frame() {
+    fn ten_hours_of_drop_frame_labels_run_ahead_of_the_clock_by_a_frame()
+    -> Result<(), Box<dyn Error>> {
         let rate = FrameRate::Fps29_97Drop;
-        let clock = TimecodeClock::new(rate, tc(0, 0, 0, 0), TimePosition(0)).unwrap();
-        let ten_hours = clock.frame_of(tc(10, 0, 0, 0)).unwrap();
-        let time = place(ten_hours, &clock, &TimeUnits).unwrap();
+        let clock = TimecodeClock::new(rate, tc(0, 0, 0, 0), TimePosition(0))
+            .ok_or("the start label is a label")?;
+        let ten_hours = clock
+            .frame_of(tc(10, 0, 0, 0))
+            .ok_or("10:00:00;00 is a label")?;
+        let time = place(ten_hours, &clock, &TimeUnits).ok_or("the frame has a time")?;
         let ten_hours_of_clock = 36_000 * TIME_UNITS_PER_SECOND;
         // 10:00:00;00 is 1,078,920 frames of 1001/30000 s: 35,999.964 s, so the label comes
         // 1.08 frames before ten hours of clock time.
         assert_eq!(time.0, 1_078_920 * rate.frame_duration());
         assert!(ten_hours_of_clock - time.0 > rate.frame_duration());
         assert!(ten_hours_of_clock - time.0 < 2 * rate.frame_duration());
+        Ok(())
     }
 
     #[test]
-    fn a_label_half_a_day_away_is_the_one_before_the_start() {
-        let clock = TimecodeClock::new(FrameRate::Fps24, tc(0, 0, 0, 0), TimePosition(0)).unwrap();
+    fn a_label_half_a_day_away_is_the_one_before_the_start() -> Result<(), Box<dyn Error>> {
+        let clock = TimecodeClock::new(FrameRate::Fps24, tc(0, 0, 0, 0), TimePosition(0))
+            .ok_or("the start label is a label")?;
         let half_a_day = FrameRate::Fps24.frames_per_day() / 2;
         assert_eq!(
             clock.frame_of(tc(12, 0, 0, 0)),
@@ -404,6 +479,7 @@ mod tests {
             clock.frame_of(tc(11, 59, 59, 23)),
             Some(FramePosition(half_a_day - 1))
         );
+        Ok(())
     }
 
     #[test]

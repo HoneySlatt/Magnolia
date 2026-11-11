@@ -1,5 +1,14 @@
 //! Musical time: ticks, tempos, meters, and the map that lays them on the absolute timeline.
 
+// The period will convert time with this module's code: nothing here may panic (ADR-0022).
+#![warn(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
+
 use std::error::Error;
 use std::fmt;
 use std::ops::Range;
@@ -35,14 +44,18 @@ impl Tempo {
     pub const MAX_BPM: u32 = 1_000;
 
     const TIME_UNITS_PER_MINUTE: i64 = 60 * TIME_UNITS_PER_SECOND;
+    /// The quarter note of the fastest tempo, in time units.
+    const SHORTEST_QUARTER: i64 = Self::TIME_UNITS_PER_MINUTE / Self::MAX_BPM as i64;
+    /// The quarter note of the slowest tempo, in time units.
+    const LONGEST_QUARTER: i64 = Self::TIME_UNITS_PER_MINUTE / Self::MIN_BPM as i64;
 
     /// The tempo whose quarter note lasts `time_units`, or `None` outside the tempos accepted.
     pub fn from_quarter_duration(time_units: i64) -> Option<Tempo> {
-        let shortest = Self::TIME_UNITS_PER_MINUTE / i64::from(Self::MAX_BPM);
-        let longest = Self::TIME_UNITS_PER_MINUTE / i64::from(Self::MIN_BPM);
-        (shortest..=longest).contains(&time_units).then_some(Tempo {
-            quarter: time_units,
-        })
+        (Self::SHORTEST_QUARTER..=Self::LONGEST_QUARTER)
+            .contains(&time_units)
+            .then_some(Tempo {
+                quarter: time_units,
+            })
     }
 
     /// The tempo of `numerator / denominator` quarter notes a minute, as typed: 174 BPM is
@@ -52,9 +65,14 @@ impl Tempo {
         if numerator == 0 || denominator == 0 {
             return None;
         }
-        let length = i128::from(Self::TIME_UNITS_PER_MINUTE) * i128::from(denominator);
+        // At most 2^45.6 · 2^32 · 2 + 2^32: nothing overflows, so `None` means a tempo out of range.
+        let length =
+            i128::from(Self::TIME_UNITS_PER_MINUTE).checked_mul(i128::from(denominator))?;
         let numerator = i128::from(numerator);
-        let nearest = (2 * length + numerator).div_euclid(2 * numerator);
+        let nearest = length
+            .checked_mul(2)?
+            .checked_add(numerator)?
+            .checked_div_euclid(numerator.checked_mul(2)?)?;
         Self::from_quarter_duration(to_i64(nearest)?)
     }
 
@@ -74,6 +92,8 @@ pub struct Meter {
 impl Meter {
     /// The shortest beat accepted: a sixty-fourth note.
     pub const MAX_BEAT_UNIT: u16 = 64;
+    /// The ticks in a whole note.
+    const TICKS_PER_WHOLE_NOTE: i64 = 4 * TICKS_PER_QUARTER;
 
     /// `beats` beats of `beat_unit` notes, such as 7/8 as `(7, 8)`; `None` unless there is at
     /// least one beat and the unit is a power of two from 1 to 64.
@@ -94,12 +114,17 @@ impl Meter {
 
     /// The ticks in one beat.
     pub fn ticks_per_beat(self) -> i64 {
-        4 * TICKS_PER_QUARTER / i64::from(self.beat_unit)
+        // The beat unit is a power of two from 1 to 64, so the division never fails and the
+        // fallback, a whole note, is never taken.
+        Self::TICKS_PER_WHOLE_NOTE
+            .checked_div(i64::from(self.beat_unit))
+            .unwrap_or(Self::TICKS_PER_WHOLE_NOTE)
     }
 
     /// The ticks in one bar.
     pub fn ticks_per_bar(self) -> i64 {
-        i64::from(self.beats) * self.ticks_per_beat()
+        // At most 2^16 · 2^24.3: never saturates.
+        i64::from(self.beats).saturating_mul(self.ticks_per_beat())
     }
 }
 
@@ -154,8 +179,34 @@ impl Error for TempoMapError {}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TempoMap {
     origin: TimePosition,
-    tempo_segments: Vec<TempoSegment>,
-    meter_segments: Vec<MeterSegment>,
+    tempo_segments: Segments<TempoSegment>,
+    meter_segments: Segments<MeterSegment>,
+}
+
+/// A map's segments of one kind: never empty, so that every position lies in one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Segments<S> {
+    /// The segment from the start, which also holds before it.
+    first: S,
+    /// The others, in increasing order of their starts.
+    later: Vec<S>,
+}
+
+impl<S> Segments<S> {
+    /// The last segment that `has_started`, or the first when no later one has. Since the later
+    /// segments are in order, `has_started` holds for the first few of them and no other.
+    fn last_started(&self, has_started: impl FnMut(&S) -> bool) -> &S {
+        let started = self.later.partition_point(has_started);
+        started
+            .checked_sub(1)
+            .and_then(|index| self.later.get(index))
+            .unwrap_or(&self.first)
+    }
+
+    /// The last segment.
+    fn last(&self) -> &S {
+        self.later.last().unwrap_or(&self.first)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -214,33 +265,38 @@ impl TempoMap {
     /// The bar, beat and tick a musical position lies in.
     pub fn bbt_at(&self, position: MusicalPosition) -> Option<Bbt> {
         let segment = self.meter_segment_at(position);
-        let offset = i128::from(position.0) - i128::from(segment.start.0);
+        // The difference of two `i64` and a meter's positive lengths: no step fails.
+        let offset = i128::from(position.0).checked_sub(i128::from(segment.start.0))?;
         let ticks_per_bar = i128::from(segment.meter.ticks_per_bar());
         let ticks_per_beat = i128::from(segment.meter.ticks_per_beat());
-        let in_bar = offset.rem_euclid(ticks_per_bar);
+        let bars = offset.checked_div_euclid(ticks_per_bar)?;
+        let in_bar = offset.checked_rem_euclid(ticks_per_bar)?;
         Some(Bbt {
-            bar: to_i64(i128::from(segment.first_bar) + offset.div_euclid(ticks_per_bar))?,
-            beat: u16::try_from(in_bar / ticks_per_beat).ok()?,
-            tick: to_i64(in_bar % ticks_per_beat)?,
+            bar: to_i64(i128::from(segment.first_bar).checked_add(bars)?)?,
+            beat: u16::try_from(in_bar.checked_div(ticks_per_beat)?).ok()?,
+            tick: to_i64(in_bar.checked_rem(ticks_per_beat)?)?,
         })
     }
 
     /// The musical position of a bar, beat and tick, or `None` if its beat or tick lies beyond its
     /// bar's meter, or the position beyond the ticks' range.
     pub fn position_of(&self, bbt: Bbt) -> Option<MusicalPosition> {
-        let after = self
+        let segment = self
             .meter_segments
-            .partition_point(|segment| segment.first_bar <= bbt.bar);
-        let segment = self.meter_segments[after.saturating_sub(1)];
+            .last_started(|segment| segment.first_bar <= bbt.bar);
         let meter = segment.meter;
         if bbt.beat >= meter.beats() || !(0..meter.ticks_per_beat()).contains(&bbt.tick) {
             return None;
         }
-        let bars = i128::from(bbt.bar) - i128::from(segment.first_bar);
-        let ticks = i128::from(segment.start.0)
-            + bars * i128::from(meter.ticks_per_bar())
-            + i128::from(bbt.beat) * i128::from(meter.ticks_per_beat())
-            + i128::from(bbt.tick);
+        // At most 2^64 · 2^40.3 plus less than a bar: no step overflows an `i128`.
+        let bars = i128::from(bbt.bar).checked_sub(i128::from(segment.first_bar))?;
+        let in_bar = i128::from(bbt.beat)
+            .checked_mul(i128::from(meter.ticks_per_beat()))?
+            .checked_add(i128::from(bbt.tick))?;
+        let ticks = bars
+            .checked_mul(i128::from(meter.ticks_per_bar()))?
+            .checked_add(i128::from(segment.start.0))?
+            .checked_add(in_bar)?;
         to_i64(ticks).map(MusicalPosition)
     }
 
@@ -263,24 +319,18 @@ impl TempoMap {
     }
 
     fn tempo_segment_at(&self, position: MusicalPosition) -> &TempoSegment {
-        let after = self
-            .tempo_segments
-            .partition_point(|segment| segment.start <= position);
-        &self.tempo_segments[after.saturating_sub(1)]
+        self.tempo_segments
+            .last_started(|segment| segment.start <= position)
     }
 
     fn tempo_segment_at_moment(&self, moment: Moment) -> &TempoSegment {
-        let after = self
-            .tempo_segments
-            .partition_point(|segment| segment.start_moment <= moment);
-        &self.tempo_segments[after.saturating_sub(1)]
+        self.tempo_segments
+            .last_started(|segment| segment.start_moment <= moment)
     }
 
     fn meter_segment_at(&self, position: MusicalPosition) -> &MeterSegment {
-        let after = self
-            .meter_segments
-            .partition_point(|segment| segment.start <= position);
-        &self.meter_segments[after.saturating_sub(1)]
+        self.meter_segments
+            .last_started(|segment| segment.start <= position)
     }
 }
 
@@ -290,50 +340,57 @@ impl Grid for TempoMap {
 
     fn moment_of(&self, position: MusicalPosition) -> Option<Moment> {
         let segment = self.tempo_segment_at(position);
-        let ticks = i128::from(position.0) - i128::from(segment.start.0);
+        // The difference of two `i64` never overflows an `i128`.
+        let ticks = i128::from(position.0).checked_sub(i128::from(segment.start.0))?;
         let offset = ticks.checked_mul(i128::from(segment.tempo.quarter))?;
         segment.start_moment.0.checked_add(offset).map(Moment)
     }
 
+    // A quarter note lasts at least 2^35.6 time units, so the ticks since a segment's start are
+    // fewer than 2^92, and adding an `i64` to them never overflows an `i128`.
+
     fn first_at_or_after(&self, moment: Moment) -> Option<MusicalPosition> {
         let segment = self.tempo_segment_at_moment(moment);
         let since = moment.0.checked_sub(segment.start_moment.0)?;
-        let ticks = div_ceil(since, i128::from(segment.tempo.quarter));
-        to_i64(i128::from(segment.start.0) + ticks).map(MusicalPosition)
+        let ticks = div_ceil(since, i128::from(segment.tempo.quarter))?;
+        to_i64(i128::from(segment.start.0).checked_add(ticks)?).map(MusicalPosition)
     }
 
     fn last_at_or_before(&self, moment: Moment) -> Option<MusicalPosition> {
         let segment = self.tempo_segment_at_moment(moment);
         let since = moment.0.checked_sub(segment.start_moment.0)?;
         let ticks = since.div_euclid(i128::from(segment.tempo.quarter));
-        to_i64(i128::from(segment.start.0) + ticks).map(MusicalPosition)
+        to_i64(i128::from(segment.start.0).checked_add(ticks)?).map(MusicalPosition)
     }
 }
 
 fn tempo_segments(
     origin: TimePosition,
     changes: &[(MusicalPosition, Tempo)],
-) -> Result<Vec<TempoSegment>, TempoMapError> {
-    let Some(&(MusicalPosition(0), first_tempo)) = changes.first() else {
+) -> Result<Segments<TempoSegment>, TempoMapError> {
+    let Some((&(MusicalPosition(0), first_tempo), later_changes)) = changes.split_first() else {
         return Err(TempoMapError::TempoNotFromStart);
     };
     let origin_moment = TimeUnits
         .moment_of(origin)
         .ok_or(TempoMapError::OutOfRange)?;
-    let mut segments = Vec::with_capacity(changes.len());
-    segments.push(TempoSegment {
-        start: MusicalPosition(0),
-        start_moment: origin_moment,
-        tempo: first_tempo,
-    });
-    for &(start, tempo) in &changes[1..] {
-        let previous = segments[segments.len() - 1];
+    let mut segments = Segments {
+        first: TempoSegment {
+            start: MusicalPosition(0),
+            start_moment: origin_moment,
+            tempo: first_tempo,
+        },
+        later: Vec::with_capacity(later_changes.len()),
+    };
+    for &(start, tempo) in later_changes {
+        let previous = *segments.last();
         if start <= previous.start {
             return Err(TempoMapError::TempoChangesOutOfOrder);
         }
-        let ticks = i128::from(start.0) - i128::from(previous.start.0);
-        let start_moment = ticks
-            .checked_mul(i128::from(previous.tempo.quarter))
+        // The difference of two `i64` never overflows an `i128`: only the moment can.
+        let start_moment = i128::from(start.0)
+            .checked_sub(i128::from(previous.start.0))
+            .and_then(|ticks| ticks.checked_mul(i128::from(previous.tempo.quarter)))
             .and_then(|length| previous.start_moment.0.checked_add(length))
             .map(Moment)
             .ok_or(TempoMapError::OutOfRange)?;
@@ -341,7 +398,7 @@ fn tempo_segments(
         if TimeUnits.last_at_or_before(start_moment).is_none() {
             return Err(TempoMapError::OutOfRange);
         }
-        segments.push(TempoSegment {
+        segments.later.push(TempoSegment {
             start,
             start_moment,
             tempo,
@@ -350,26 +407,30 @@ fn tempo_segments(
     Ok(segments)
 }
 
-fn meter_segments(changes: &[(i64, Meter)]) -> Result<Vec<MeterSegment>, TempoMapError> {
-    let Some(&(0, first_meter)) = changes.first() else {
+fn meter_segments(changes: &[(i64, Meter)]) -> Result<Segments<MeterSegment>, TempoMapError> {
+    let Some((&(0, first_meter), later_changes)) = changes.split_first() else {
         return Err(TempoMapError::MeterNotFromStart);
     };
-    let mut segments = Vec::with_capacity(changes.len());
-    segments.push(MeterSegment {
-        first_bar: 0,
-        start: MusicalPosition(0),
-        meter: first_meter,
-    });
-    for &(first_bar, meter) in &changes[1..] {
-        let previous = segments[segments.len() - 1];
+    let mut segments = Segments {
+        first: MeterSegment {
+            first_bar: 0,
+            start: MusicalPosition(0),
+            meter: first_meter,
+        },
+        later: Vec::with_capacity(later_changes.len()),
+    };
+    for &(first_bar, meter) in later_changes {
+        let previous = *segments.last();
         if first_bar <= previous.first_bar {
             return Err(TempoMapError::MeterChangesOutOfOrder);
         }
-        let start = (first_bar - previous.first_bar)
-            .checked_mul(previous.meter.ticks_per_bar())
+        // Bars from 0 on, in increasing order: their difference never overflows.
+        let start = first_bar
+            .checked_sub(previous.first_bar)
+            .and_then(|bars| bars.checked_mul(previous.meter.ticks_per_bar()))
             .and_then(|length| previous.start.0.checked_add(length))
             .ok_or(TempoMapError::OutOfRange)?;
-        segments.push(MeterSegment {
+        segments.later.push(MeterSegment {
             first_bar,
             start: MusicalPosition(start),
             meter,
@@ -380,15 +441,17 @@ fn meter_segments(changes: &[(i64, Meter)]) -> Result<Vec<MeterSegment>, TempoMa
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error;
+
     use super::*;
     use crate::time::place;
 
-    fn four_four() -> Meter {
-        Meter::new(4, 4).unwrap()
+    fn four_four() -> Result<Meter, &'static str> {
+        Meter::new(4, 4).ok_or("4/4 is a meter")
     }
 
-    fn bpm(beats_per_minute: u32) -> Tempo {
-        Tempo::from_bpm(beats_per_minute, 1).unwrap()
+    fn bpm(beats_per_minute: u32) -> Result<Tempo, &'static str> {
+        Tempo::from_bpm(beats_per_minute, 1).ok_or("the tempo is in range")
     }
 
     #[test]
@@ -419,10 +482,10 @@ mod tests {
     }
 
     #[test]
-    fn a_typed_tempo_reads_back_as_typed() {
+    fn a_typed_tempo_reads_back_as_typed() -> Result<(), Box<dyn Error>> {
         for (numerator, denominator) in [(174, 1), (187, 2), (120, 1), (7_001, 1_000)] {
             let quarter = Tempo::from_bpm(numerator, denominator)
-                .unwrap()
+                .ok_or("the tempo is in range")?
                 .quarter_duration();
             let thousandths = (60_000 * i128::from(TIME_UNITS_PER_SECOND)
                 + i128::from(quarter) / 2)
@@ -430,43 +493,49 @@ mod tests {
             let typed = 1_000 * i128::from(numerator) / i128::from(denominator);
             assert_eq!(thousandths, typed, "{numerator}/{denominator}");
         }
+        Ok(())
     }
 
     #[test]
-    fn a_tempo_rounds_to_the_nearest_time_unit() {
+    fn a_tempo_rounds_to_the_nearest_time_unit() -> Result<(), Box<dyn Error>> {
         // 174 BPM: 60/174 s = 311,437,241,379.31 time units.
-        assert_eq!(bpm(174).quarter_duration(), 311_437_241_379);
+        assert_eq!(bpm(174)?.quarter_duration(), 311_437_241_379);
         // 120 BPM: exactly half a second.
-        assert_eq!(bpm(120).quarter_duration(), TIME_UNITS_PER_SECOND / 2);
+        assert_eq!(bpm(120)?.quarter_duration(), TIME_UNITS_PER_SECOND / 2);
         // 1,048,576/1,125 BPM: a quarter of 58,139,648,437.5 time units, a half rounded up.
-        let on_a_half = Tempo::from_bpm(1_048_576, 1_125).unwrap();
+        let on_a_half = Tempo::from_bpm(1_048_576, 1_125).ok_or("the tempo is in range")?;
         assert_eq!(on_a_half.quarter_duration(), 58_139_648_438);
+        Ok(())
     }
 
     #[test]
-    fn meters_need_a_beat_and_a_power_of_two() {
+    fn meters_need_a_beat_and_a_power_of_two() -> Result<(), Box<dyn Error>> {
         assert_eq!(Meter::new(0, 4), None);
         assert_eq!(Meter::new(4, 0), None);
         assert_eq!(Meter::new(4, 3), None);
         assert_eq!(Meter::new(4, 128), None);
         assert_eq!(
-            Meter::new(7, 8).unwrap().ticks_per_bar(),
+            Meter::new(7, 8).ok_or("7/8 is a meter")?.ticks_per_bar(),
             7 * TICKS_PER_QUARTER / 2
         );
-        assert_eq!(Meter::new(1, 64).unwrap().ticks_per_beat(), 302_400);
+        assert_eq!(
+            Meter::new(1, 64).ok_or("1/64 is a meter")?.ticks_per_beat(),
+            302_400
+        );
+        Ok(())
     }
 
     #[test]
-    fn a_map_needs_ordered_changes_from_the_start() {
+    fn a_map_needs_ordered_changes_from_the_start() -> Result<(), Box<dyn Error>> {
         let origin = TimePosition(0);
-        let tempo = [(MusicalPosition(0), bpm(120))];
-        let meter = [(0, four_four())];
+        let tempo = [(MusicalPosition(0), bpm(120)?)];
+        let meter = [(0, four_four()?)];
         assert_eq!(
             TempoMap::new(origin, &[], &meter),
             Err(TempoMapError::TempoNotFromStart)
         );
         assert_eq!(
-            TempoMap::new(origin, &[(MusicalPosition(1), bpm(120))], &meter),
+            TempoMap::new(origin, &[(MusicalPosition(1), bpm(120)?)], &meter),
             Err(TempoMapError::TempoNotFromStart)
         );
         assert_eq!(
@@ -474,66 +543,69 @@ mod tests {
             Err(TempoMapError::MeterNotFromStart)
         );
         assert_eq!(
-            TempoMap::new(origin, &tempo, &[(1, four_four())]),
+            TempoMap::new(origin, &tempo, &[(1, four_four()?)]),
             Err(TempoMapError::MeterNotFromStart)
         );
         let repeated = [
-            (MusicalPosition(0), bpm(120)),
-            (MusicalPosition(0), bpm(90)),
+            (MusicalPosition(0), bpm(120)?),
+            (MusicalPosition(0), bpm(90)?),
         ];
         assert_eq!(
             TempoMap::new(origin, &repeated, &meter),
             Err(TempoMapError::TempoChangesOutOfOrder)
         );
-        let backwards = [(0, four_four()), (4, four_four()), (2, four_four())];
+        let backwards = [(0, four_four()?), (4, four_four()?), (2, four_four()?)];
         assert_eq!(
             TempoMap::new(origin, &tempo, &backwards),
             Err(TempoMapError::MeterChangesOutOfOrder)
         );
+        Ok(())
     }
 
     #[test]
-    fn a_change_beyond_the_timeline_is_refused() {
-        let slowest = Tempo::from_bpm(1, 1).unwrap();
+    fn a_change_beyond_the_timeline_is_refused() -> Result<(), Box<dyn Error>> {
+        let slowest = Tempo::from_bpm(1, 1).ok_or("1 BPM is a tempo")?;
         let far = [
             (MusicalPosition(0), slowest),
-            (MusicalPosition(i64::MAX), bpm(120)),
+            (MusicalPosition(i64::MAX), bpm(120)?),
         ];
         assert_eq!(
-            TempoMap::new(TimePosition(0), &far, &[(0, four_four())]),
+            TempoMap::new(TimePosition(0), &far, &[(0, four_four()?)]),
             Err(TempoMapError::OutOfRange)
         );
         let meters = [
-            (0, Meter::new(u16::MAX, 1).unwrap()),
-            (i64::MAX, four_four()),
+            (0, Meter::new(u16::MAX, 1).ok_or("65535/1 is a meter")?),
+            (i64::MAX, four_four()?),
         ];
-        let tempo = [(MusicalPosition(0), bpm(120))];
+        let tempo = [(MusicalPosition(0), bpm(120)?)];
         assert_eq!(
             TempoMap::new(TimePosition(0), &tempo, &meters),
             Err(TempoMapError::OutOfRange)
         );
+        Ok(())
     }
 
     #[test]
-    fn bar_one_thousand_at_120_bpm_falls_on_its_exact_sample() {
-        let map = TempoMap::constant(TimePosition(0), bpm(120), four_four()).unwrap();
-        let rate = SampleRate::new(48_000).unwrap();
+    fn bar_one_thousand_at_120_bpm_falls_on_its_exact_sample() -> Result<(), Box<dyn Error>> {
+        let map = TempoMap::constant(TimePosition(0), bpm(120)?, four_four()?)?;
+        let rate = SampleRate::new(48_000).ok_or("48 kHz is a rate")?;
         let bar = map
             .position_of(Bbt {
                 bar: 1_000,
                 beat: 0,
                 tick: 0,
             })
-            .unwrap();
+            .ok_or("bar 1,000 has a position")?;
         assert_eq!(bar, MusicalPosition(1_000 * 4 * TICKS_PER_QUARTER));
         assert_eq!(place(bar, &map, &rate), Some(SamplePosition(96_000_000)));
+        Ok(())
     }
 
     #[test]
-    fn the_origin_moves_the_song_start() {
-        let rate = SampleRate::new(48_000).unwrap();
+    fn the_origin_moves_the_song_start() -> Result<(), Box<dyn Error>> {
+        let rate = SampleRate::new(48_000).ok_or("48 kHz is a rate")?;
         let one_second = TimePosition(TIME_UNITS_PER_SECOND);
-        let map = TempoMap::constant(one_second, bpm(120), four_four()).unwrap();
+        let map = TempoMap::constant(one_second, bpm(120)?, four_four()?)?;
         assert_eq!(
             place(MusicalPosition(0), &map, &rate),
             Some(SamplePosition(48_000))
@@ -542,16 +614,17 @@ mod tests {
             read(SamplePosition(0), &rate, &map),
             Some(MusicalPosition(-2 * TICKS_PER_QUARTER))
         );
+        Ok(())
     }
 
     #[test]
-    fn a_tempo_change_starts_where_the_previous_tempo_ends() {
+    fn a_tempo_change_starts_where_the_previous_tempo_ends() -> Result<(), Box<dyn Error>> {
         let changes = [
-            (MusicalPosition(0), bpm(120)),
-            (MusicalPosition(4 * TICKS_PER_QUARTER), bpm(60)),
+            (MusicalPosition(0), bpm(120)?),
+            (MusicalPosition(4 * TICKS_PER_QUARTER), bpm(60)?),
         ];
-        let map = TempoMap::new(TimePosition(0), &changes, &[(0, four_four())]).unwrap();
-        let rate = SampleRate::new(44_100).unwrap();
+        let map = TempoMap::new(TimePosition(0), &changes, &[(0, four_four()?)])?;
+        let rate = SampleRate::new(44_100).ok_or("44.1 kHz is a rate")?;
         // Four quarters at 120 BPM last two seconds; the fifth, at 60 BPM, one more.
         let fifth = MusicalPosition(5 * TICKS_PER_QUARTER);
         assert_eq!(
@@ -559,15 +632,18 @@ mod tests {
             Some(SamplePosition(88_200))
         );
         assert_eq!(place(fifth, &map, &rate), Some(SamplePosition(132_300)));
-        assert_eq!(map.tempo_at(fifth), bpm(60));
-        assert_eq!(map.tempo_at(MusicalPosition(-1)), bpm(120));
+        assert_eq!(map.tempo_at(fifth), bpm(60)?);
+        assert_eq!(map.tempo_at(MusicalPosition(-1)), bpm(120)?);
+        Ok(())
     }
 
     #[test]
-    fn bars_beats_and_ticks_follow_meter_changes() {
-        let meters = [(0, four_four()), (2, Meter::new(7, 8).unwrap())];
-        let map =
-            TempoMap::new(TimePosition(0), &[(MusicalPosition(0), bpm(120))], &meters).unwrap();
+    fn bars_beats_and_ticks_follow_meter_changes() -> Result<(), Box<dyn Error>> {
+        let meters = [
+            (0, four_four()?),
+            (2, Meter::new(7, 8).ok_or("7/8 is a meter")?),
+        ];
+        let map = TempoMap::new(TimePosition(0), &[(MusicalPosition(0), bpm(120)?)], &meters)?;
         let eighth = TICKS_PER_QUARTER / 2;
         let bar_two = 8 * TICKS_PER_QUARTER;
         let cases = [
@@ -622,7 +698,7 @@ mod tests {
         }
         assert_eq!(
             map.meter_at(MusicalPosition(bar_two)),
-            Meter::new(7, 8).unwrap()
+            Meter::new(7, 8).ok_or("7/8 is a meter")?
         );
         // Beat 6 exists in bar 2's 7/8, not in the 4/4 of bar 1.
         let late_beat = Bbt {
@@ -639,11 +715,16 @@ mod tests {
             }),
             None
         );
+        Ok(())
     }
 
     #[test]
-    fn a_beat_or_tick_beyond_its_bar_has_no_position() {
-        let map = TempoMap::constant(TimePosition(0), bpm(120), Meter::new(3, 4).unwrap()).unwrap();
+    fn a_beat_or_tick_beyond_its_bar_has_no_position() -> Result<(), Box<dyn Error>> {
+        let map = TempoMap::constant(
+            TimePosition(0),
+            bpm(120)?,
+            Meter::new(3, 4).ok_or("3/4 is a meter")?,
+        )?;
         assert_eq!(
             map.position_of(Bbt {
                 bar: 0,
@@ -676,42 +757,50 @@ mod tests {
             }),
             None
         );
+        Ok(())
     }
 
     #[test]
-    fn every_tick_plays_in_exactly_one_block_on_its_placed_sample() {
+    fn every_tick_plays_in_exactly_one_block_on_its_placed_sample() -> Result<(), Box<dyn Error>> {
         let changes = [
-            (MusicalPosition(0), bpm(174)),
-            (MusicalPosition(1_000_003), bpm(61)),
+            (MusicalPosition(0), bpm(174)?),
+            (MusicalPosition(1_000_003), bpm(61)?),
         ];
-        let map = TempoMap::new(TimePosition(-12_345), &changes, &[(0, four_four())]).unwrap();
-        let rate = SampleRate::new(44_100).unwrap();
+        let map = TempoMap::new(TimePosition(-12_345), &changes, &[(0, four_four()?)])?;
+        let rate = SampleRate::new(44_100).ok_or("44.1 kHz is a rate")?;
         let frames = 64;
         let mut expected_first = None;
         for block in -50..200 {
             let start = SamplePosition(block * i64::from(frames));
-            let ticks = map.ticks_in_block(rate, start, frames).unwrap();
+            let ticks = map
+                .ticks_in_block(rate, start, frames)
+                .ok_or("the block has ticks")?;
             if let Some(first) = expected_first {
                 assert_eq!(ticks.start, first, "blocks must tile the ticks");
             }
             expected_first = Some(ticks.end);
             for tick in [ticks.start.0, ticks.end.0 - 1] {
-                let sample = place(MusicalPosition(tick), &map, &rate).unwrap();
+                let sample =
+                    place(MusicalPosition(tick), &map, &rate).ok_or("the tick has a sample")?;
                 assert!((start.0..start.0 + i64::from(frames)).contains(&sample.0));
             }
         }
-        let empty = map.ticks_in_block(rate, SamplePosition(0), 0).unwrap();
+        let empty = map
+            .ticks_in_block(rate, SamplePosition(0), 0)
+            .ok_or("an empty block has ticks")?;
         assert!(empty.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn a_block_has_ticks_unless_it_reaches_an_end_of_the_ranges() {
-        let map = TempoMap::constant(TimePosition(0), bpm(120), four_four()).unwrap();
-        let rate = SampleRate::new(48_000).unwrap();
+    fn a_block_has_ticks_unless_it_reaches_an_end_of_the_ranges() -> Result<(), Box<dyn Error>> {
+        let map = TempoMap::constant(TimePosition(0), bpm(120)?, four_four()?)?;
+        let rate = SampleRate::new(48_000).ok_or("48 kHz is a rate")?;
         let longest = map
             .ticks_in_block(rate, SamplePosition(0), u32::MAX)
-            .unwrap();
-        let last = place(MusicalPosition(longest.end.0 - 1), &map, &rate).unwrap();
+            .ok_or("the longest block has ticks")?;
+        let last = place(MusicalPosition(longest.end.0 - 1), &map, &rate)
+            .ok_or("the last tick has a sample")?;
         assert_eq!(last, SamplePosition(i64::from(u32::MAX) - 1));
         assert_eq!(map.ticks_in_block(rate, SamplePosition(i64::MIN), 64), None);
         // At 120 BPM and 48 kHz, a sample holds 201.6 ticks: the last ticks lie near this sample.
@@ -719,5 +808,6 @@ mod tests {
         assert!(map.ticks_in_block(rate, last_ticks, u32::MAX).is_some());
         let beyond_the_ticks = SamplePosition(i64::MAX / 201);
         assert_eq!(map.ticks_in_block(rate, beyond_the_ticks, 64), None);
+        Ok(())
     }
 }

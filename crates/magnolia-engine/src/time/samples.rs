@@ -1,5 +1,14 @@
 //! Samples: the grid the audio device plays.
 
+// The period will convert time with this module's code: nothing here may panic (ADR-0022).
+#![warn(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
+
 use super::{Grid, Moment, TICKS_PER_QUARTER, TIME_UNITS_PER_SECOND, div_ceil, to_i64};
 
 /// A position in samples, counted from the absolute timeline's zero, at some [`SampleRate`].
@@ -27,7 +36,8 @@ impl SampleRate {
     /// whole number of time units.
     pub fn new(hertz: u32) -> Option<SampleRate> {
         let in_range = (Self::MIN_HERTZ..=Self::MAX_HERTZ).contains(&hertz);
-        (in_range && TIME_UNITS_PER_SECOND % i64::from(hertz) == 0).then_some(SampleRate(hertz))
+        let whole = TIME_UNITS_PER_SECOND.checked_rem(i64::from(hertz)) == Some(0);
+        (in_range && whole).then_some(SampleRate(hertz))
     }
 
     /// The rate in hertz.
@@ -37,12 +47,17 @@ impl SampleRate {
 
     /// The length of one sample, in time units.
     pub fn time_units_per_sample(self) -> i64 {
-        TIME_UNITS_PER_SECOND / i64::from(self.0)
+        // A rate is at least 8 kHz, so the division never fails and the fallback, a sample of a
+        // whole second, is never taken.
+        TIME_UNITS_PER_SECOND
+            .checked_div(i64::from(self.0))
+            .unwrap_or(TIME_UNITS_PER_SECOND)
     }
 
     /// The length of one sample, in the unit of moments.
     fn moment_units_per_sample(self) -> i128 {
-        i128::from(self.time_units_per_sample()) * i128::from(TICKS_PER_QUARTER)
+        // A sample lasts at most a second, 2^39.7 time units: the product never saturates.
+        i128::from(self.time_units_per_sample()).saturating_mul(i128::from(TICKS_PER_QUARTER))
     }
 }
 
@@ -51,13 +66,13 @@ impl Grid for SampleRate {
 
     fn moment_of(&self, position: SamplePosition) -> Option<Moment> {
         // At most 2^63 · 2^26.7 · 2^22.2 = 2^112: never overflows.
-        Some(Moment(
-            i128::from(position.0) * self.moment_units_per_sample(),
-        ))
+        i128::from(position.0)
+            .checked_mul(self.moment_units_per_sample())
+            .map(Moment)
     }
 
     fn first_at_or_after(&self, moment: Moment) -> Option<SamplePosition> {
-        to_i64(div_ceil(moment.0, self.moment_units_per_sample())).map(SamplePosition)
+        to_i64(div_ceil(moment.0, self.moment_units_per_sample())?).map(SamplePosition)
     }
 
     fn last_at_or_before(&self, moment: Moment) -> Option<SamplePosition> {
@@ -67,6 +82,8 @@ impl Grid for SampleRate {
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error;
+
     use super::*;
     use crate::time::{TimePosition, TimeUnits, place, read};
 
@@ -85,21 +102,23 @@ mod tests {
     }
 
     #[test]
-    fn a_sample_is_a_whole_number_of_time_units_both_ways() {
-        let rate = SampleRate::new(44_100).unwrap();
+    fn a_sample_is_a_whole_number_of_time_units_both_ways() -> Result<(), Box<dyn Error>> {
+        let rate = SampleRate::new(44_100).ok_or("44.1 kHz is a rate")?;
         assert_eq!(rate.time_units_per_sample(), 20_480_000);
         let sample = SamplePosition(-123_456_789);
-        let time = place(sample, &rate, &TimeUnits).unwrap();
+        let time = place(sample, &rate, &TimeUnits).ok_or("the sample has a time")?;
         assert_eq!(time, TimePosition(-123_456_789 * 20_480_000));
         assert_eq!(place(time, &TimeUnits, &rate), Some(sample));
         assert_eq!(read(time, &TimeUnits, &rate), Some(sample));
+        Ok(())
     }
 
     #[test]
-    fn a_time_between_samples_is_placed_after_and_read_before() {
-        let rate = SampleRate::new(48_000).unwrap();
+    fn a_time_between_samples_is_placed_after_and_read_before() -> Result<(), Box<dyn Error>> {
+        let rate = SampleRate::new(48_000).ok_or("48 kHz is a rate")?;
         let time = TimePosition(rate.time_units_per_sample() * 10 + 1);
         assert_eq!(place(time, &TimeUnits, &rate), Some(SamplePosition(11)));
         assert_eq!(read(time, &TimeUnits, &rate), Some(SamplePosition(10)));
+        Ok(())
     }
 }
