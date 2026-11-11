@@ -53,7 +53,9 @@ ten hours; `tests/common/mod.rs` holds the checks it shares with the fuzz target
 
 `magnolia_engine::engine` plays a graph of nodes ([ADR-0007](adr/0007-the-audio-engine.md)). A
 node implements the contract of [ADR-0021](adr/0021-the-node-contract.md): fixed channel counts, a
-latency fixed for its life, and a `process` that returns *continue*, *sleep* or *error*.
+latency fixed for its life, and a `process` that returns *continue*, *sleep* or *error*. A
+transport plays the timeline, pre-rolled by the graph's largest compensation, and nodes may have
+timeline sources, MIDI sequences, whose events they receive as the transport rolls.
 `engine::new` makes the engine's two halves and starts its collector.
 
 ### Threads and what each owns
@@ -61,28 +63,31 @@ latency fixed for its life, and a `process` that returns *continue*, *sleep* or 
 | Part | Runs on | Owns |
 |---|---|---|
 | `Controller` | any thread but the audio one | the graph's description being edited, the nodes not yet sent, the slots and their generations |
-| `Processor` | the audio thread: a backend calls `process` once a period | the compiled graph being played, the arena of nodes, the buffer pool, the pending events |
+| `Processor` | the audio thread: a backend calls `process` once a period | the compiled graph being played, the arena of nodes and the notes their sources hold, the buffer pool, the pending events, the transport |
 | collector | a thread of its own, `magnolia-collector` | nothing for long: it drops what the processor lets go |
 
-The halves share no memory but three queues and the statistics. The queues are rtrb's
-single-producer, single-consumer rings, allocated once, which never lock or block:
+The halves share no mutable memory but four queues and the statistics; the timeline's snapshots,
+which never change, cross inside compiled graphs ([below](#timeline-sources)). The queues are
+rtrb's single-producer, single-consumer rings, allocated once, which never lock or block:
 
 | Queue | From, to | Carries | Capacity |
 |---|---|---|---|
 | swaps | controller, processor | one message per swap: the compiled graph, its new nodes, new chunks of the arena, a larger buffer pool when needed | 2: one swap is in flight at most |
 | events | controller, processor | timed events: a node, a sample position, and a note on or off, a pitch bend, a controller's or a parameter's new value | `EngineConfig::event_capacity`, which also bounds the events queued and pending together ([below](#events)) |
+| transport | controller, processor | play from a timeline sample, numbered, and stop ([below](#the-transport)) | 4 |
 | garbage | processor, collector | old graphs, old pools, used messages, the nodes a swap dropped, a panic's payload | `EngineConfig::garbage_capacity` |
 
 `EngineStats` goes the other way, atomics only: the heartbeat (periods run), the start of the last
-period, the last swap applied and the last one steady, counts of node errors, events taken and
-events dropped, non-finite samples, generation mismatches, latencies capped and missed plugin
+period, the last swap applied and the last one steady, where the last play started, counts of node
+errors, events taken and events dropped, non-finite samples, generation mismatches, latencies capped and missed plugin
 deadlines, the poisoned flag, the histogram of callback times, and the counters a backend fills
 (its own overruns, gaps in the device's frame time, the server's xruns, the audio thread's id).
 
 ### A swap
 
 1. The controller's edits (`add_node`, `remove_node`, `connect`, `disconnect`) change a
-   description. `commit` checks it whole: a node unknown, a channel out of range, an edge held
+   description; `set_sequences` and `set_tempo_map` change the timeline sources it holds beside.
+   `commit` checks the description whole: a node unknown, a channel out of range, an edge held
    twice and a cycle are each an error of their own, and the description stays as it was. Then it
    compensates the nodes' latencies ([below](#delay-compensation)): the graph it sends holds a
    delay line wherever paths of different latencies meet; the description never does.
@@ -158,7 +163,94 @@ which starts empty, is silent for that line's delay ([debt](debt.md)). A delay l
 allocated and written by the controller (`engine/memory.rs`); it sleeps once its inputs have been
 silent for its delay and a whole sub-block. Each compiled step records its node's `ahead_in`, and
 the compiled graph the largest of the audible nodes, the session's largest compensation, by which
-the transport will pre-roll.
+the transport pre-rolls ([below](#the-transport)).
+
+### The transport
+
+The processor keeps two clocks ([ADR-0025](adr/0025-delay-compensation-by-reading-ahead.md),
+`engine/transport.rs`). The engine's clock counts every sample of every period, rolling or not; the
+controller stamps events with it. The transport's clock is the timeline sample the output plays,
+and moves only while the transport rolls. A node sees the transport at its own input, the clock
+plus its `ahead_in`: `ProcessContext::transport` gives it whether the transport rolls, the timeline
+sample of the sub-block's first frame at its input, and the **audible region**, the timeline
+samples that play.
+
+`Controller::play(from)` and `Controller::stop()` push commands into a queue of their own; a full
+queue is an error, `TransportError::QueueFull`. The processor applies them at a period's start,
+after any swap. With `P` the largest compensation of the graph about to play:
+
+- **Play**, stopped: the clock starts at `from - P`, the **pre-roll**. The most latent source reads
+  `from` at once, and every path reaches the output on `from` together, `P` samples after the
+  period's start. `EngineStats::play_start` publishes that engine sample with the play's sequence
+  number, which `play` returned. The audible region is `[from, stop)`, its stop unknown.
+- **Stop** at clock `c`: if `c + P <= from`, no node has read anything audible, so the region is
+  empty, its stop at `from`, and the transport stops at once, silent; that happens when a play and
+  its stop reach one period. Otherwise `stop = c + P + F`: what the most latent node has read, plus
+  `F`, the 5 ms of a fade ([ADR-0024](adr/0024-how-a-swap-avoids-a-click.md)). So a stop that
+  comes in a later period of the pre-roll still plays what was read, at least one period, plus the
+  fade, as ADR-0025 means: every path ends on the same sample, whatever has been read. Each node's
+  sources end its notes as its position reaches `stop`, the most latent node first, so every path
+  ends on the same timeline sample. The transport rolls until its clock has played `stop` itself,
+  where the nodes nearest the output reach it; the processor cuts a sub-block there, so the
+  transport never stops inside one. Its clock then holds `stop + 1`, the next sample it would play.
+- **Play while rolling**: a stop as above, then the play at the first period after the stop ends;
+  at once when the stop is.
+- A stop while stopped does nothing; a stop cancels a play that waits for its stop.
+
+A swap that changes `P` while the transport rolls keeps the running clock: a node whose
+compensation changes jumps by the difference ([debt](debt.md)).
+
+### Timeline sources
+
+A node may have **timeline sources**: MIDI sequences from M1.4, automation lanes from M1.6
+([ADR-0027](adr/0027-timeline-events-from-sources-on-nodes.md)). A `MidiSequence` is built off the
+real-time thread from one track's clips (`engine/sequence.rs`) and never changes. Each note becomes
+a note on at its start and a note off at its end or its clip's end, whichever comes first; the
+events are sorted by tick, and at one tick the note offs come first, then bends and controllers,
+then note ons. It also keeps each channel's pitch bends and each controller's values, sorted by
+tick, for the chase.
+
+`Controller::set_sequences(node, sequences)` and `Controller::set_tempo_map(map)` change what the
+controller holds; the next commit sends them inside the compiled graph, each step naming its node's
+sequences. A replaced sequence or map reaches the collector inside the old graph, so the processor
+never frees one. Without a tempo map, sequences play nothing.
+
+For each sub-block, for each step with sequences, while the transport rolls, the processor's source
+reader (`engine/sources.rs`):
+
+1. finds the ticks placed in the samples that the node's position covers and the audible region
+   holds (`TempoMap::ticks_in_block`), each sequence's events at those ticks by a binary search,
+   and each event's sample by `place` ([ADR-0018](adr/0018-the-time-model.md));
+2. at the region's start, sends first, for each sequence, the last pitch bend per channel and the
+   last value per channel and controller before it: the **chase**, a binary search per lane;
+3. leaves out a note that began before the region's start, with its note off, and a note shorter
+   than a sample, whose note off would come first;
+4. sorts what it found by offset, note offs first, then in the order found, and walks it in that
+   order, the order the node receives it: a note on holds its note, a note off ends a held note and
+   is left out for a note not held, one that never sounded. So a note ended and struck again on one
+   sample stays held, whichever sequences, or ticks within a sample, the two came from;
+5. once the node's position reaches the region's stop, or has passed it in one jump, as when a
+   swap raises the node's compensation, sends a note off for every note the node holds, then, on
+   each channel its sequences use, the sustain pedal (controller 64) at 0 and the pitch bend at 0:
+   at the stop's offset, or at the sub-block's start after a jump. A node gets these once per play,
+   and nothing more from its sources until the next play, even if a swap moves it back before the
+   stop;
+6. merges what it kept with the controller's events for the node ([below](#events)).
+
+What a node's sources hold, the notes one bit per channel and key and the last play they stopped,
+lives in its slot of the arena beside its sleep flag, so it survives swaps: a stop ends the node's
+notes even when its sequences changed meanwhile, or its compensation moved its position past the
+stop. A sleeping node with a timeline event runs, like one with a controller's event.
+
+A node's sources give it at most `EngineConfig::event_capacity` events in one sub-block; past that,
+events are dropped and counted in `events_dropped`. A note on dropped is never held, so its note off
+is never sent; a note off dropped leaves its note held until the stop. Which events a sub-block
+holds depends on how the period was cut, so once some are dropped, a render no longer nulls with
+playback.
+
+`nodes::TestSynth` plays notes until plugins come (M1.6): 16 voices, each a sine and a sawtooth at
+half its level, with a linear attack and release of 5 ms whose step is fixed per sample, every
+change at its event's sample, so that its output does not depend on how blocks are cut.
 
 ### A period
 
@@ -169,20 +261,23 @@ its one system call wakes the collector ([ADR-0023](adr/0023-the-real-time-allow
 2. Otherwise it runs the period inside `catch_unwind`. A panic poisons it: silence from then on,
    the flag set, every later period returning normally
    ([ADR-0022](adr/0022-a-panic-on-the-real-time-path-gives-silence.md)).
-3. It applies at most one swap, then pops every queued event into its pending buffer, which has
-   room for them all, whether a swap waits or not: the controller never sends an event before its
-   node, nor more events than the buffer holds.
+3. It applies at most one swap, then the transport's commands, then pops every queued event into
+   its pending buffer, which has room for them all, whether a swap waits or not: the controller
+   never sends an event before its node, nor more events than the buffer holds.
 4. For each sub-block it copies the capture in, a buffer shorter than the period taken as
    silence. For each step it sums the edges into the node's inputs with their gains; an input
-   with nothing sounding holds zeros and is flagged silent. It skips a node that slept, whose
-   inputs are still silent and which has no event, writing silence in its place; otherwise it
-   calls the node, and silences and counts its outputs if it returns an error. Last it sums the
-   playback channels and copies them out, a non-finite sample replaced by zero and counted, a -0.0
-   written as +0.0, a buffer shorter than the period left as it is.
+   with nothing sounding holds zeros and is flagged silent. It reads the node's timeline sources
+   at the node's position. It skips a node that slept, whose inputs are still silent and which has
+   no event, from the controller or its sources, writing silence in its place; otherwise it calls
+   the node with the transport at its input, and silences and counts its outputs if it returns an
+   error. Last it sums the playback channels and copies them out, a non-finite sample replaced by
+   zero and counted, a -0.0 written as +0.0, a buffer shorter than the period left as it is. The
+   transport's clock, rolling, moves on by the sub-block. Sub-blocks are cut also where the
+   transport stops.
 5. It hands what it replaced to the collector and wakes it if it handed anything. Every period,
-   poisoned or not, then advances the position, counts in the heartbeat and records its time.
+   poisoned or not, then advances the engine's clock, counts in the heartbeat and records its time.
 
-Every module the period runs, and the time model, which it will run, denies itself panicking code:
+Every module the period runs, the time model included, denies itself panicking code:
 Clippy's `indexing_slicing`, `unwrap_used`, `expect_used`, `panic` and `arithmetic_side_effects`
 are warnings there, which `scripts/check.sh` turns into errors.
 
@@ -196,7 +291,9 @@ use for. The controller stamps an event from the start of the last period, which
 publishes. The processor keeps popped events in a pending buffer, each with its own sample; each
 sub-block takes those due before its end, sorts them in place by node, sample, note offs first,
 and arrival, and gives each node its own with offsets from the sub-block's start: at one sample, a
-node gets its note offs first, then the rest in the order they were sent. A late event plays at the
+node gets its note offs first, then the rest in the order they were sent. Its timeline sources'
+events join them ([above](#timeline-sources)): at one sample, the note offs first, then the
+timeline's events before the controller's, each list in its own order. A late event plays at the
 first sample of the next period, offset 0, still after the late events of earlier samples: a note
 played and released before the period comes on, then off.
 
@@ -238,9 +335,10 @@ gets it:
   `stride` samples long: the largest block, rounded up to 16 floats. Compiled graphs hold indices
   into it; a larger pool comes in a swap's message only when a graph needs more channels;
 - **the arena**: a table of chunks of 64 slots, allocated whole for 4,096 chunks, so adding a
-  chunk never reallocates and a node never moves;
-- **the event buffers**, **the vectors reserved for dropped nodes** and **each delay line's
-  history**.
+  chunk never reallocates and a node never moves; each slot holds its node, its sleep flag and the
+  notes its sources hold;
+- **the event buffers**, **the source reader's buffers**, **the vectors reserved for dropped
+  nodes** and **each delay line's history**.
 
 The controller writes every page of each before sending it, through `black_box`, since the
 compiler may turn a fresh allocation's zero fill into `calloc`, which leaves pages unwritten
@@ -395,7 +493,8 @@ run itself: `halt_on_error=true`, `allow_addr2line=true`, and the suppressions. 
 - an allocation in a marked function is stopped at `malloc`;
 - work on memory allocated beforehand, a block's conversions of time, and the engine's processor
   through a crossfade, a dip, a larger pool, events, removed nodes handed to the collector, a
-  sleeping node, a failing node, and swaps that add and remove a delay line, all stay silent;
+  sleeping node, a failing node, swaps that add and remove a delay line, and MIDI sequences played
+  through a `TestSynth` with a play, a stop and a play while rolling, all stay silent;
 - the collector's wake, without the suppressions, is stopped at `syscall`; with them, it passes;
 - a lock's wait right after the wake is still stopped, at the `syscall` of the futex wait.
 

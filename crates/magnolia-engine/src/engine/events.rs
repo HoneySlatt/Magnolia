@@ -154,7 +154,7 @@ impl EventInbox {
 
 /// Where an event goes among a node's events at one sample, before their order of arrival: a note
 /// off first, so that a note ended and started again at one sample sounds (ADR-0027).
-fn rank_at_one_sample(kind: EventKind) -> u8 {
+pub(crate) fn rank_at_one_sample(kind: EventKind) -> u8 {
     match kind {
         EventKind::NoteOff(_) => 0,
         EventKind::Parameter { .. }

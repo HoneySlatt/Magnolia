@@ -14,7 +14,9 @@
 //! A swap that changes edges fades them over 5 ms: a crossfade through the union of both graphs,
 //! or, when the union would cycle or cost too much, a dip that fades the old graph out, then the
 //! new one in. Each commit compensates the nodes' latencies: the compiled graph holds delay lines
-//! where paths of different latencies meet. `docs/ARCHITECTURE.md` describes the threads and
+//! where paths of different latencies meet, and the transport pre-rolls by the largest
+//! compensation. A node may have timeline sources, [`MidiSequence`]s, whose events the processor
+//! reads at the node's own transport position. `docs/ARCHITECTURE.md` describes the threads and
 //! queues.
 //!
 //! ```
@@ -49,6 +51,9 @@ mod graph;
 mod memory;
 mod pool;
 mod processor;
+mod sequence;
+mod sources;
+mod transport;
 
 #[cfg(test)]
 mod tests;
@@ -61,12 +66,16 @@ use std::sync::Arc;
 use rtrb::RingBuffer;
 
 pub use collector::wake_collector;
-pub use controller::{Commit, Controller, SendEventError, SwapStatus, WaitError};
+pub use controller::{Commit, Controller, SendEventError, SwapStatus, TransportError, WaitError};
 pub use events::TimedEvent;
 pub use graph::{Destination, Edge, EdgeEnd, GraphError, NodeId, Source};
 pub use processor::Processor;
+pub use sequence::{
+    ControllerPoint, MidiClip, MidiNote, MidiSequence, PitchBendPoint, SequenceError,
+};
 
 pub(crate) use delay_line::DelayLine;
+pub(crate) use fade::fade_frames;
 
 use arena::Arena;
 use collector::{RELEASED_PER_SWAP, start_collector};
@@ -74,9 +83,11 @@ use compensation::Compensated;
 use compile::{CompileContext, compile};
 use controller::{ControllerParts, MESSAGE_CAPACITY};
 use events::EventInbox;
-use fade::{FadeTable, fade_frames};
+use fade::FadeTable;
 use pool::BufferPool;
 use processor::ProcessorParts;
+use sources::SourceReader;
+use transport::{COMMAND_CAPACITY, TransportClock};
 
 use crate::stats::EngineStats;
 use crate::time::SampleRate;
@@ -96,7 +107,10 @@ pub struct EngineConfig {
     pub playback_channels: usize,
     /// How many events the processor holds at once, in its queue and its buffer of pending events
     /// together, until it takes them out at their sample; the controller refuses more. The
-    /// controller also holds as many at most, waiting for the swap that brings their node.
+    /// controller also holds as many at most, waiting for the swap that brings their node. It also
+    /// bounds the events a node's timeline sources give it in one sub-block: past that, they are
+    /// dropped and counted. Which ones a sub-block holds depends on how the period was cut, so once
+    /// some are dropped, a render no longer nulls with playback.
     pub event_capacity: usize,
     /// How many items the processor can hand the collector before it runs; at least
     /// [`EngineConfig::MIN_GARBAGE_CAPACITY`].
@@ -196,6 +210,7 @@ pub fn new(config: EngineConfig) -> Result<(Controller, Processor), EngineError>
     };
     let (message_producer, message_consumer) = RingBuffer::new(MESSAGE_CAPACITY);
     let (event_producer, event_consumer) = RingBuffer::new(config.event_capacity);
+    let (transport_producer, transport_consumer) = RingBuffer::new(COMMAND_CAPACITY);
     let garbage =
         start_collector(config.garbage_capacity).map_err(EngineError::CollectorDidNotStart)?;
     // Silence: a graph without nodes, its playback channels summing nothing.
@@ -208,6 +223,7 @@ pub fn new(config: EngineConfig) -> Result<(Controller, Processor), EngineError>
         stride,
         messages: message_producer,
         events: event_producer,
+        transport: transport_producer,
         event_capacity: config.event_capacity,
         pool_inputs: pool.input_channels(),
         pool_outputs: pool.output_channels(),
@@ -223,6 +239,8 @@ pub fn new(config: EngineConfig) -> Result<(Controller, Processor), EngineError>
         arena: Arena::new(),
         fade: FadeTable::new(context.fade_frames),
         events: EventInbox::new(event_consumer, config.event_capacity),
+        sources: SourceReader::new(config.event_capacity),
+        transport: TransportClock::new(transport_consumer, context.fade_frames),
         messages: message_consumer,
         garbage,
     });

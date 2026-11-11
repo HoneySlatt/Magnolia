@@ -3,7 +3,8 @@
 //! beforehand. Without this proof, a check of the real-time path that finds nothing would mean
 //! nothing. It also checks that a block's conversions of time, as the engine makes them, neither
 //! allocate nor make a system call, and that the engine's processor stays silent through swaps,
-//! events, removals, sleeping and failing nodes, and swaps that add and remove a delay line.
+//! events, removals, sleeping and failing nodes, swaps that add and remove a delay line, and MIDI
+//! sequences played through the test synth, with play, stop and play while rolling.
 //!
 //! The processor's one allowed system call, the collector's wake, is suppressed by name
 //! (`rtsan-suppressions.txt`, ADR-0023). Two cases prove the suppression right: the wake is a
@@ -29,13 +30,15 @@ use std::thread::{self, Thread};
 use std::time::Duration;
 
 use magnolia_engine::engine::{
-    self, Destination, EngineConfig, NodeId, Source, SwapStatus, TimedEvent, wake_collector,
+    self, ControllerPoint, Destination, EngineConfig, MidiClip, MidiNote, MidiSequence, NodeId,
+    PitchBendPoint, Source, SwapStatus, TimedEvent, wake_collector,
 };
-use magnolia_engine::node::{EventKind, Node, ProcessContext, ProcessStatus};
-use magnolia_engine::nodes::{Gain, Sine, TestLatency};
+use magnolia_engine::node::{EventKind, Node, Note, ProcessContext, ProcessStatus};
+use magnolia_engine::nodes::{Gain, Sine, TestLatency, TestSynth};
 use magnolia_engine::offline::OfflineBackend;
 use magnolia_engine::time::{
-    Meter, MusicalPosition, SamplePosition, SampleRate, Tempo, TempoMap, TimePosition, place,
+    Meter, MusicalPosition, SamplePosition, SampleRate, TICKS_PER_QUARTER, Tempo, TempoMap,
+    TimePosition, place,
 };
 
 /// Names the case a child process runs; the parent leaves it unset.
@@ -326,6 +329,131 @@ fn play_delay_lines() {
     assert!(!stats.poisoned());
 }
 
+/// A clip of `quarters` quarters from `start`: a note every eighth, some long enough to cross the
+/// clip's end, a chord of twenty notes that steals voices, bends and controllers.
+fn busy_clip(start: i64, quarters: i64) -> MidiClip {
+    let eighth = TICKS_PER_QUARTER / 8;
+    let mut notes: Vec<MidiNote> = (0..quarters * 8)
+        .map(|step| MidiNote {
+            tick: step * eighth,
+            length: (1 + step % 7) * eighth,
+            channel: (step % 2) as u8,
+            key: 40 + (step * 7 % 48) as u8,
+            velocity: 0.75,
+        })
+        .collect();
+    notes.extend((0..20).map(|key| MidiNote {
+        tick: quarters / 2 * TICKS_PER_QUARTER,
+        length: TICKS_PER_QUARTER,
+        channel: 0,
+        key: 30 + key,
+        velocity: 0.5,
+    }));
+    MidiClip {
+        start: MusicalPosition(start),
+        length: quarters * TICKS_PER_QUARTER,
+        notes,
+        pitch_bends: (0..quarters * 4)
+            .map(|step| PitchBendPoint {
+                tick: step * 2 * eighth + 1,
+                channel: (step % 2) as u8,
+                value: if step % 2 == 0 { 0.5 } else { -0.25 },
+            })
+            .collect(),
+        controllers: (0..quarters * 2)
+            .map(|step| ControllerPoint {
+                tick: step * 4 * eighth,
+                channel: 0,
+                number: if step % 2 == 0 { 64 } else { 1 },
+                value: if step % 4 < 2 { 1.0 } else { 0.0 },
+            })
+            .collect(),
+    }
+}
+
+/// Plays MIDI sequences through two test synths, one through a latency, under a tempo map with
+/// changes: a play, a stop, plays while rolling, the controller's notes beside the timeline's, and
+/// a commit that replaces a sequence while notes are held. Only the processor runs in a real-time
+/// context.
+fn play_sequences() {
+    let rate = SampleRate::new(48_000).unwrap();
+    let (mut controller, processor) = engine::new(EngineConfig::new(rate, 256, 0, 1)).unwrap();
+    let mut backend = OfflineBackend::new(processor);
+    let mut sounding = 0;
+    let mut play = |controller: &mut engine::Controller, periods: usize| {
+        for period in 0..periods {
+            let frames = [64, 1_000, 100, 256][period % 4];
+            let played = backend.play_period(frames, &[]);
+            sounding += played[0].iter().filter(|&&sample| sample != 0.0).count();
+            controller.poll();
+        }
+    };
+    let quarter = TICKS_PER_QUARTER;
+    let sequence = |clips: &[MidiClip]| Arc::new(MidiSequence::new(clips).unwrap());
+    let first = sequence(&[busy_clip(0, 6), busy_clip(5 * quarter, 4)]);
+    let second = sequence(&[busy_clip(quarter, 3)]);
+    let latent_synth = controller.add_node(Box::new(TestSynth::new(rate))).unwrap();
+    let latency = controller
+        .add_node(Box::new(TestLatency::new(1, 300)))
+        .unwrap();
+    let direct_synth = controller.add_node(Box::new(TestSynth::new(rate))).unwrap();
+    controller.connect(Source::Node(latent_synth, 0), Destination::Node(latency, 0));
+    controller.connect(Source::Node(latency, 0), Destination::Playback(0));
+    controller.connect(Source::Node(direct_synth, 1), Destination::Playback(0));
+    controller
+        .set_sequences(latent_synth, vec![Arc::clone(&first), Arc::clone(&second)])
+        .unwrap();
+    controller
+        .set_sequences(direct_synth, vec![Arc::clone(&second)])
+        .unwrap();
+    controller.set_tempo_map(Arc::new(tempo_map()));
+    controller.commit().unwrap();
+    play(&mut controller, 4);
+
+    // From a sample between ticks, after bends and controllers to chase.
+    controller.play(SamplePosition(30_001)).unwrap();
+    play(&mut controller, 40);
+    let note = Note {
+        id: Some(1),
+        channel: 2,
+        key: 72,
+        velocity: 1.0,
+    };
+    let at = controller.stats().block_start().0 + 2_000;
+    for (offset, kind) in [
+        (0, EventKind::NoteOn(note)),
+        (900, EventKind::NoteOff(note)),
+    ] {
+        let event = TimedEvent {
+            node: direct_synth,
+            at: SamplePosition(at + offset),
+            kind,
+        };
+        controller.send_event(event).unwrap();
+    }
+    play(&mut controller, 20);
+    controller.stop().unwrap();
+    play(&mut controller, 20);
+    controller.play(SamplePosition(0)).unwrap();
+    play(&mut controller, 40);
+    // A play while rolling, and a sequence replaced while its notes are held.
+    controller.play(SamplePosition(100_000)).unwrap();
+    play(&mut controller, 20);
+    controller
+        .set_sequences(latent_synth, vec![Arc::clone(&second)])
+        .unwrap();
+    controller.commit().unwrap();
+    play(&mut controller, 40);
+    controller.stop().unwrap();
+    play(&mut controller, 20);
+    assert!(sounding > 10_000, "the sequences played");
+    assert_eq!(controller.poll(), SwapStatus::Steady);
+    let stats = controller.stats();
+    assert_eq!(stats.play_start().map(|start| start.sequence), Some(3));
+    assert_eq!(stats.events_dropped(), 0);
+    assert!(!stats.poisoned());
+}
+
 /// A silent node whose drop keeps the collector busy until `open` is set, or ten seconds pass;
 /// `entered` tells the test it has started.
 struct BlockingDrop {
@@ -491,6 +619,7 @@ fn run_case(case: &str) -> ExitCode {
         }),
         "engine" => on_new_thread(play_the_engine),
         "delay_lines" => on_new_thread(play_delay_lines),
+        "sequences" => on_new_thread(play_sequences),
         "wake" => {
             let collector = sleeping_thread();
             on_new_thread(move || wake(&collector));
@@ -605,6 +734,7 @@ fn main() -> ExitCode {
         check("convert", Expected::Silent),
         check("engine", Expected::Silent),
         check("delay_lines", Expected::Silent),
+        check("sequences", Expected::Silent),
         // The wake is a system call the sanitizer stops, until the suppressions name it.
         check_under(
             "wake",

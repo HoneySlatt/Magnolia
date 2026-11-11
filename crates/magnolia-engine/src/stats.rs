@@ -10,9 +10,9 @@
     clippy::arithmetic_side_effects
 )]
 
-use std::hint::black_box;
+use std::hint::{self, black_box};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{self, AtomicBool, AtomicI32, AtomicI64, AtomicU64, Ordering};
 
 use crate::callback_times::CallbackTimes;
 use crate::time::SamplePosition;
@@ -40,6 +40,30 @@ pub struct EngineStats {
     frame_time_gaps: AtomicU64,
     server_xruns: AtomicU64,
     audio_thread_id: AtomicI32,
+    play_start: PlayStartCell,
+}
+
+/// Where the last play started: the play's sequence number, as
+/// [`Controller::play`](crate::engine::Controller::play) returned it, and the engine sample at
+/// which the output reaches the timeline sample the play asked for: the period that applied the
+/// command starts there, plus the graph's largest compensation, by which the transport pre-rolls
+/// ([ADR-0025](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0025-delay-compensation-by-reading-ahead.md)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlayStart {
+    /// The play's sequence number.
+    pub sequence: u64,
+    /// The engine sample at which the output plays the play's first timeline sample.
+    pub audible_at: SamplePosition,
+}
+
+/// The last play's start, written by the processor and read whole by any thread: a sequence lock
+/// over two atomics. The processor never waits; a reader that meets a write tries again.
+#[derive(Debug, Default)]
+struct PlayStartCell {
+    /// Odd while the processor writes.
+    version: AtomicU64,
+    sequence: AtomicU64,
+    audible_at: AtomicI64,
 }
 
 impl EngineStats {
@@ -78,7 +102,9 @@ impl EngineStats {
         self.events_taken.load(Ordering::Relaxed)
     }
 
-    /// How many events were dropped because no node of the current graph took them.
+    /// How many events were dropped: the controller's that no node of the current graph took, and
+    /// those past the room a node's timeline sources have in one sub-block
+    /// ([`EngineConfig::event_capacity`](crate::engine::EngineConfig::event_capacity)).
     pub fn events_dropped(&self) -> u64 {
         self.events_dropped.load(Ordering::Relaxed)
     }
@@ -134,6 +160,26 @@ impl EngineStats {
         self.audio_thread_id.load(Ordering::Relaxed)
     }
 
+    /// Where the last play started, once a play has; the controller numbers plays from 1.
+    pub fn play_start(&self) -> Option<PlayStart> {
+        let cell = &self.play_start;
+        loop {
+            let before = cell.version.load(Ordering::Acquire);
+            let sequence = cell.sequence.load(Ordering::Relaxed);
+            let audible_at = cell.audible_at.load(Ordering::Relaxed);
+            // Orders the reads of the values before the second read of the version.
+            atomic::fence(Ordering::Acquire);
+            let after = cell.version.load(Ordering::Relaxed);
+            if before == after && before.is_multiple_of(2) {
+                return (sequence > 0).then_some(PlayStart {
+                    sequence,
+                    audible_at: SamplePosition(audible_at),
+                });
+            }
+            hint::spin_loop();
+        }
+    }
+
     /// Counts one period the processor finished after the device's deadline. Real-time safe.
     pub fn record_own_overrun(&self) {
         self.own_overruns.fetch_add(1, Ordering::Relaxed);
@@ -179,6 +225,12 @@ impl EngineStats {
             counter.store(zero, Ordering::Relaxed);
         }
         stats.block_start.store(black_box(0), Ordering::Relaxed);
+        stats.play_start.version.store(zero, Ordering::Relaxed);
+        stats.play_start.sequence.store(zero, Ordering::Relaxed);
+        stats
+            .play_start
+            .audible_at
+            .store(black_box(0), Ordering::Relaxed);
         stats.poisoned.store(black_box(false), Ordering::Relaxed);
         stats.audio_thread_id.store(black_box(0), Ordering::Relaxed);
         stats
@@ -190,6 +242,20 @@ impl EngineStats {
 
     pub(crate) fn publish_block_start(&self, position: SamplePosition) {
         self.block_start.store(position.0, Ordering::Relaxed);
+    }
+
+    /// Publishes a play's start. Never waits: the readers are the ones that try again.
+    pub(crate) fn publish_play_start(&self, sequence: u64, audible_at: SamplePosition) {
+        let cell = &self.play_start;
+        let version = cell.version.load(Ordering::Relaxed);
+        cell.version
+            .store(version.wrapping_add(1), Ordering::Relaxed);
+        // Orders the odd version before the values' writes, for a reader that sees a value.
+        atomic::fence(Ordering::Release);
+        cell.sequence.store(sequence, Ordering::Relaxed);
+        cell.audible_at.store(audible_at.0, Ordering::Relaxed);
+        cell.version
+            .store(version.wrapping_add(2), Ordering::Release);
     }
 
     pub(crate) fn publish_swap_applied(&self, sequence: u64) {

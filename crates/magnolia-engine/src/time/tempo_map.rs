@@ -1,6 +1,6 @@
 //! Musical time: ticks, tempos, meters, and the map that lays them on the absolute timeline.
 
-// The period will convert time with this module's code: nothing here may panic (ADR-0022).
+// The period converts time with this module's code: nothing here may panic (ADR-0022).
 #![warn(
     clippy::indexing_slicing,
     clippy::unwrap_used,

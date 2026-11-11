@@ -3,8 +3,9 @@
 //! ([ADR-0021](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0021-the-node-contract.md)).
 //!
 //! The processor calls [`Node::process`] once per sub-block on the real-time thread, with a
-//! [`ProcessContext`] that lends the node its input and output channels and its events. A node is
-//! created and dropped off the real-time thread: the controller sends it in, the collector drops it.
+//! [`ProcessContext`] that lends the node its input and output channels, its events and the
+//! [`Transport`] as the node sees it. A node is created and dropped off the real-time thread: the
+//! controller sends it in, the collector drops it.
 
 // The processor runs this module's code in every period: nothing here may panic (ADR-0022).
 #![warn(
@@ -14,6 +15,8 @@
     clippy::panic,
     clippy::arithmetic_side_effects
 )]
+
+use crate::time::SamplePosition;
 
 /// The largest latency a node may declare, in samples: 65,536, 1.37 s at 48 kHz. The engine takes
 /// a larger one as this, and counts it
@@ -118,7 +121,53 @@ pub struct Note {
     pub velocity: f32,
 }
 
-/// What a node receives for one sub-block: its channels and its events.
+/// The transport as one node sees it in one sub-block
+/// ([ADR-0025](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0025-delay-compensation-by-reading-ahead.md)).
+///
+/// The transport's clock is the timeline sample that the output plays. A node runs ahead of the
+/// output by its compensation, so it sees the clock plus that distance: a source on a latent path
+/// reads the timeline early, and its sound reaches the output in line with the others.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Transport {
+    /// Whether the transport rolls through the whole sub-block. The processor cuts a sub-block where
+    /// the transport stops, so it never stops inside one. After a stop, it rolls until its clock
+    /// has played the stop's sample, where the nodes nearest the output end their notes.
+    pub rolling: bool,
+    /// The timeline sample of the sub-block's first frame at the node's input: the transport's
+    /// clock plus how far ahead of the output the node's input runs. Stopped, the clock holds the
+    /// next sample it would play.
+    pub position: SamplePosition,
+    /// The timeline samples that play since the last play: none before its start, none from its
+    /// stop.
+    pub audible: AudibleRegion,
+}
+
+impl Transport {
+    /// The transport before any play: stopped at sample 0, its audible region empty.
+    pub const STOPPED: Transport = Transport {
+        rolling: false,
+        position: SamplePosition(0),
+        audible: AudibleRegion {
+            start: SamplePosition(0),
+            stop: Some(SamplePosition(0)),
+        },
+    };
+}
+
+/// The timeline samples that play: from the position a play asked for, up to the stop, which
+/// stays unknown until the transport is asked to stop. A source plays only the events whose sample
+/// lies in it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AudibleRegion {
+    /// The first sample that plays: the position the play asked for.
+    pub start: SamplePosition,
+    /// The first sample that no longer plays; `None` while the transport has not been asked to
+    /// stop. A stop asked before anything audible was read leaves the region empty: its stop is its
+    /// start.
+    pub stop: Option<SamplePosition>,
+}
+
+/// What a node receives for one sub-block: its channels, its events and the transport.
 ///
 /// Each channel holds exactly [`frames`](Self::frames) samples. A channel number out of range
 /// gives an empty slice and reads as silent, so that a node's mistake never panics on the
@@ -132,11 +181,13 @@ pub struct ProcessContext<'a> {
     outputs: &'a mut [f32],
     output_silence: &'a mut [bool],
     events: &'a [Event],
+    transport: Transport,
 }
 
 impl<'a> ProcessContext<'a> {
     /// A context over a node's channels, laid out every `stride` samples in `inputs` and
-    /// `outputs`, one silence flag per channel.
+    /// `outputs`, one silence flag per channel, the transport [stopped](Transport::STOPPED) until
+    /// [`with_transport`](Self::with_transport) says otherwise.
     pub(crate) fn new(
         frames: usize,
         stride: usize,
@@ -154,7 +205,13 @@ impl<'a> ProcessContext<'a> {
             outputs,
             output_silence,
             events,
+            transport: Transport::STOPPED,
         }
+    }
+
+    /// The same context, with the transport as the node sees it.
+    pub(crate) fn with_transport(self, transport: Transport) -> Self {
+        Self { transport, ..self }
     }
 
     /// The number of samples in each channel of this sub-block.
@@ -222,11 +279,19 @@ impl<'a> ProcessContext<'a> {
     }
 
     /// This node's events in this sub-block, sorted by the sample each is due at: at one sample the
-    /// note offs first, then the rest, each group in the order the events arrived. An event due
-    /// before the sub-block, late, has offset 0, and keeps its place among the others by its
-    /// sample, so a note played and released late still comes on, then off.
+    /// note offs first, then the rest; within each group, the events of the node's timeline
+    /// sources before the controller's, each in the order it came
+    /// ([ADR-0027](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0027-timeline-events-from-sources-on-nodes.md)).
+    /// A controller's event due before the sub-block, late, has offset 0, and keeps its place among
+    /// the controller's others by its sample, so a note played and released late still comes on,
+    /// then off.
     pub fn events(&self) -> &'a [Event] {
         self.events
+    }
+
+    /// The transport at this node's input, for this sub-block.
+    pub fn transport(&self) -> Transport {
+        self.transport
     }
 }
 

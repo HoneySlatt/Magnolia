@@ -12,15 +12,19 @@ use rtrb::{Producer, PushError};
 
 use super::arena::{ArenaChunk, CHUNK_SLOTS, MAX_CHUNKS, new_chunk};
 use super::compensation::{self, Compensated, DelayKey, Plan};
-use super::compile::{CompileContext, compile};
+use super::compile::{CompileContext, attach_sources, compile};
 use super::compiled::SwapMessage;
 use super::delay_line::DelayLine;
 use super::description::{Description, NodeShape};
 use super::events::TimedEvent;
 use super::graph::{Destination, Edge, GraphError, NodeId, Source};
 use super::pool::BufferPool;
+use super::sequence::MidiSequence;
+use super::sources::TimelineSources;
+use super::transport::{Play, TransportCommand};
 use crate::node::{MAX_LATENCY, Node};
 use crate::stats::EngineStats;
+use crate::time::{SamplePosition, TempoMap};
 
 /// The engine's non-real-time half, made with its [`Processor`](super::Processor) by
 /// [`engine::new`](super::new).
@@ -39,12 +43,22 @@ use crate::stats::EngineStats;
 /// the graph sent holds a delay line where paths of different latencies meet, a node of the arena
 /// that the controller adds, keeps while its destination and delay stay, and removes. The
 /// description being edited never holds them.
+///
+/// A node may have timeline sources, MIDI sequences ([`set_sequences`](Self::set_sequences)), laid
+/// on the timeline by a tempo map ([`set_tempo_map`](Self::set_tempo_map)); both take effect at the
+/// next commit, which sends them with its graph
+/// ([ADR-0027](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0027-timeline-events-from-sources-on-nodes.md)).
+/// [`play`](Self::play) and [`stop`](Self::stop) drive the transport, which pre-rolls by the
+/// graph's largest compensation.
 pub struct Controller {
     stats: Arc<EngineStats>,
     context: CompileContext,
     stride: usize,
     messages: Producer<Box<SwapMessage>>,
     events: Producer<TimedEvent>,
+    transport: Producer<TransportCommand>,
+    /// How many plays have been sent, to number the next.
+    plays_sent: u64,
     /// How many events the processor holds at once, queued or pending; the controller holds as
     /// many at most, waiting for their swap.
     event_capacity: usize,
@@ -53,8 +67,10 @@ pub struct Controller {
     events_pushed: u64,
     /// The description being edited.
     draft: Description,
-    /// The last description committed and not yet sent, compensated, if a commit is deferred.
-    committed: Option<Compensated>,
+    /// The timeline sources being edited, which the next commit sends with its graph.
+    sources: TimelineSources,
+    /// The last commit not yet sent, if a commit is deferred.
+    committed: Option<Committed>,
     /// The graph of the last swap sent, compensated: the graph the processor plays, or will.
     sent: Compensated,
     /// The last swap sent, until the processor reports it steady.
@@ -74,6 +90,12 @@ pub struct Controller {
     /// The channels of the processor's buffer pool, in its input and output regions.
     pool_inputs: usize,
     pool_outputs: usize,
+}
+
+/// A commit not yet sent: its graph, compensated, and its timeline sources.
+struct Committed {
+    graph: Compensated,
+    sources: TimelineSources,
 }
 
 /// A swap sent and not yet steady.
@@ -128,6 +150,14 @@ pub enum SendEventError {
     QueueFull(TimedEvent),
 }
 
+/// Why [`Controller::play`] or [`Controller::stop`] was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransportError {
+    /// The queue of transport commands is full: the processor takes them all at its next period.
+    /// Send the command again after a period.
+    QueueFull,
+}
+
 /// Capacity of the queue that carries swaps. One swap is in flight at most; a second place lets
 /// the controller push without checking that the processor has popped the last message.
 pub(crate) const MESSAGE_CAPACITY: usize = 2;
@@ -142,6 +172,7 @@ pub(crate) struct ControllerParts {
     pub(crate) stride: usize,
     pub(crate) messages: Producer<Box<SwapMessage>>,
     pub(crate) events: Producer<TimedEvent>,
+    pub(crate) transport: Producer<TransportCommand>,
     pub(crate) event_capacity: usize,
     pub(crate) pool_inputs: usize,
     pub(crate) pool_outputs: usize,
@@ -155,9 +186,12 @@ impl Controller {
             stride: parts.stride,
             messages: parts.messages,
             events: parts.events,
+            transport: parts.transport,
+            plays_sent: 0,
             event_capacity: parts.event_capacity,
             events_pushed: 0,
             draft: Description::default(),
+            sources: TimelineSources::default(),
             committed: None,
             sent: Compensated::default(),
             in_flight: None,
@@ -197,13 +231,67 @@ impl Controller {
         Ok(id)
     }
 
-    /// Removes a node from the description, with every edge to or from it.
+    /// Removes a node from the description, with every edge to or from it and its timeline
+    /// sources.
     pub fn remove_node(&mut self, node: NodeId) -> Result<(), GraphError> {
         if self.draft.nodes.remove(&node).is_none() {
             return Err(GraphError::UnknownNode(node));
         }
         self.draft.edges.retain(|edge| !touches(edge, node));
+        self.sources.sequences.remove(&node);
         Ok(())
+    }
+
+    /// Gives a node its timeline sources: MIDI sequences, whose events it receives while the
+    /// transport rolls, each in the samples its own position covers; none removes them. They take
+    /// effect at the next commit. The processor never frees a sequence: a replaced one reaches the
+    /// collector inside the old graph.
+    pub fn set_sequences(
+        &mut self,
+        node: NodeId,
+        sequences: Vec<Arc<MidiSequence>>,
+    ) -> Result<(), GraphError> {
+        if !self.draft.nodes.contains_key(&node) {
+            return Err(GraphError::UnknownNode(node));
+        }
+        if sequences.is_empty() {
+            self.sources.sequences.remove(&node);
+        } else {
+            self.sources.sequences.insert(node, sequences);
+        }
+        Ok(())
+    }
+
+    /// Sets the tempo map that lays the sequences' ticks on the timeline; until one is set, they
+    /// play nothing. It takes effect at the next commit.
+    pub fn set_tempo_map(&mut self, tempo_map: Arc<TempoMap>) {
+        self.sources.tempo_map = Some(tempo_map);
+    }
+
+    /// Plays from a timeline sample, `from`: the processor applies it at its next period's start.
+    /// Returns the play's sequence number, from 1, by which [`EngineStats::play_start`] says when
+    /// the output reaches `from`: the transport pre-rolls by the graph's largest compensation, so
+    /// that every path reaches the output on `from` together. While the transport rolls, it stops
+    /// first, as [`stop`](Self::stop) does, and the play starts at the first period after the stop
+    /// ends.
+    pub fn play(&mut self, from: SamplePosition) -> Result<u64, TransportError> {
+        let sequence = self.plays_sent + 1;
+        self.transport
+            .push(TransportCommand::Play(Play { from, sequence }))
+            .map_err(|_| TransportError::QueueFull)?;
+        self.plays_sent = sequence;
+        Ok(sequence)
+    }
+
+    /// Stops the transport, applied at the processor's next period's start. Every path ends on
+    /// the same timeline sample: what the most latent node has read, plus a fade's 5 ms. There each
+    /// node's sources end the notes it holds, release the sustain pedal and reset the pitch bend.
+    /// A stop asked before anything audible was read stops at once, silent. A play waiting for a
+    /// stop is cancelled.
+    pub fn stop(&mut self) -> Result<(), TransportError> {
+        self.transport
+            .push(TransportCommand::Stop)
+            .map_err(|_| TransportError::QueueFull)
     }
 
     /// Adds an edge to the description. It is checked at the next commit.
@@ -235,8 +323,9 @@ impl Controller {
     }
 
     /// Checks the description, compensates its latencies and sends it to the processor as a swap,
-    /// or defers it while another swap is in flight. A description that fails its check stays as
-    /// it is, to be fixed; so does one whose delay lines find no free slot in the arena.
+    /// with the timeline sources, or defers it while another swap is in flight. A description that
+    /// fails its check stays as it is, to be fixed; so does one whose delay lines find no free slot
+    /// in the arena.
     pub fn commit(&mut self) -> Result<Commit, GraphError> {
         self.draft.validate(
             self.context.capture_channels,
@@ -245,7 +334,10 @@ impl Controller {
         self.reclaim_slots();
         let plan = compensation::plan(&self.draft, self.context.playback_channels);
         let delay_lines = self.delay_line_nodes(&plan)?;
-        self.committed = Some(plan.compensate(&self.draft, &delay_lines));
+        self.committed = Some(Committed {
+            graph: plan.compensate(&self.draft, &delay_lines),
+            sources: self.sources.clone(),
+        });
         if self.in_flight.is_some() {
             return Ok(Commit::Deferred);
         }
@@ -357,7 +449,7 @@ impl Controller {
         let deferred = self
             .committed
             .as_ref()
-            .map(|committed| &committed.delay_lines);
+            .map(|committed| &committed.graph.delay_lines);
         let mut nodes = BTreeMap::new();
         let mut missing = Vec::new();
         for (&key, &channels) in plan.delay_lines() {
@@ -438,9 +530,13 @@ impl Controller {
     /// processor needs: the new nodes, new chunks of the arena, a larger pool. Returns the swap's
     /// sequence number, or `None` if the queue was full and the commit stays deferred.
     fn send_committed(&mut self) -> Option<u64> {
-        let target = self.committed.take()?;
+        let Committed {
+            graph: target,
+            sources,
+        } = self.committed.take()?;
         let sequence = self.next_sequence;
-        let compiled = compile(&self.sent, &target, sequence, self.context);
+        let mut compiled = compile(&self.sent, &target, sequence, self.context);
+        attach_sources(&mut compiled.graph, &sources);
 
         let added = compiled.added;
         let nodes: Vec<(NodeId, Option<Box<dyn Node>>)> = added
@@ -490,7 +586,10 @@ impl Controller {
                     }
                 }
             }
-            self.committed = Some(target);
+            self.committed = Some(Committed {
+                graph: target,
+                sources,
+            });
             return None;
         }
         self.chunks_sent = chunks_needed;
@@ -603,3 +702,13 @@ impl fmt::Display for SendEventError {
 }
 
 impl Error for SendEventError {}
+
+impl fmt::Display for TransportError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::QueueFull => write!(formatter, "the queue of transport commands is full"),
+        }
+    }
+}
+
+impl Error for TransportError {}

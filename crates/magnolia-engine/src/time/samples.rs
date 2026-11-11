@@ -1,6 +1,6 @@
 //! Samples: the grid the audio device plays.
 
-// The period will convert time with this module's code: nothing here may panic (ADR-0022).
+// The period converts time with this module's code: nothing here may panic (ADR-0022).
 #![warn(
     clippy::indexing_slicing,
     clippy::unwrap_used,

@@ -20,12 +20,14 @@
 //! for a fade, which would double the work of those blocks.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use super::compensation::Compensated;
 use super::compiled::{Channels, CompiledGraph, GainShape, Phase, Span, Step, Sum, Term};
 use super::description::{Description, NodeShape, topological_order};
 use super::graph::{Destination, Edge, NodeId, Source};
 use super::memory::written_vec;
+use super::sources::TimelineSources;
 
 /// The engine's channels and fade, which every compiled graph depends on.
 #[derive(Clone, Copy, Debug)]
@@ -152,11 +154,40 @@ pub(crate) fn compile(
             dropped_nodes: written_vec(dropped.len()),
             dropped,
             largest_ahead_in: new_graph.largest_ahead_in,
+            sequences: Box::new([]),
+            tempo_map: None,
         },
         input_channels: layout.input_channels,
         output_channels: layout.output_channels,
         added,
     }
+}
+
+/// Gives a compiled graph its timeline sources: the tempo map, and each node's sequences, which
+/// every phase's step for that node names. Every phase plays the sources committed with the graph.
+pub(crate) fn attach_sources(graph: &mut CompiledGraph, sources: &TimelineSources) {
+    let mut sequences = Vec::new();
+    let mut spans = BTreeMap::new();
+    for (&node, list) in &sources.sequences {
+        let start = sequences.len();
+        sequences.extend(list.iter().map(Arc::clone));
+        spans.insert(
+            node,
+            Span {
+                start,
+                end: sequences.len(),
+            },
+        );
+    }
+    for phase in &mut graph.phases {
+        for step in &mut phase.steps {
+            if let Some(&span) = spans.get(&step.node) {
+                step.sources = span;
+            }
+        }
+    }
+    graph.sequences = sequences.into();
+    graph.tempo_map = sources.tempo_map.clone();
 }
 
 /// An edge's gain in a crossfade, so that each path that changes carries one fade:
@@ -335,6 +366,8 @@ fn build_phase(plan: PhasePlan<'_>, layout: &Layout, context: CompileContext) ->
                 .find_map(|ahead_in| ahead_in.get(&node))
                 .copied()
                 .unwrap_or(0),
+            // `attach_sources` names the node's sequences, once the graph is compiled.
+            sources: Span { start: 0, end: 0 },
         });
     }
     let start = sums.len();

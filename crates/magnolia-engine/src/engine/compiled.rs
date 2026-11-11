@@ -13,10 +13,14 @@
     clippy::arithmetic_side_effects
 )]
 
+use std::sync::Arc;
+
 use super::arena::ArenaChunk;
 use super::graph::NodeId;
 use super::pool::BufferPool;
+use super::sequence::MidiSequence;
 use crate::node::Node;
+use crate::time::TempoMap;
 
 /// A swap's phases, in order, the last one steady, and the nodes it lets go.
 pub(crate) struct CompiledGraph {
@@ -33,8 +37,13 @@ pub(crate) struct CompiledGraph {
     /// moving them neither allocates nor faults. It goes to the collector, full.
     pub(crate) dropped_nodes: Vec<Box<dyn Node>>,
     /// The largest `ahead_in` of the steady phase's steps, in samples: the session's largest
-    /// compensation, by which the transport will pre-roll (ADR-0025).
+    /// compensation, by which the transport pre-rolls (ADR-0025).
     pub(crate) largest_ahead_in: u64,
+    /// The timeline sources' sequences, node after node; each step names its own (ADR-0027). The
+    /// graph holds them, so that a replaced snapshot reaches the collector inside the old graph.
+    pub(crate) sequences: Box<[Arc<MidiSequence>]>,
+    /// The tempo map that lays the sequences' ticks on the timeline; without one they play nothing.
+    pub(crate) tempo_map: Option<Arc<TempoMap>>,
 }
 
 impl CompiledGraph {
@@ -50,6 +59,11 @@ impl CompiledGraph {
     /// The index of the steady phase, the last.
     pub(crate) fn steady_index(&self) -> usize {
         self.phases.len().saturating_sub(1)
+    }
+
+    /// The sequences a span names.
+    pub(crate) fn sequences(&self, span: Span) -> &[Arc<MidiSequence>] {
+        span.of(&self.sequences)
     }
 }
 
@@ -99,8 +113,10 @@ pub(crate) struct Step {
     /// The sums into the node's input channels, one per channel, in order.
     pub(crate) sums: Span,
     /// How far ahead of the output the node's input runs, in samples: its compensation, the
-    /// distance at which it will see the transport (ADR-0025).
+    /// distance at which it sees the transport (ADR-0025).
     pub(crate) ahead_in: u64,
+    /// The node's timeline sources, in the graph's sequences.
+    pub(crate) sources: Span,
 }
 
 /// Consecutive channels of one region of the buffer pool.

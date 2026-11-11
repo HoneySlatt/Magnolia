@@ -2,8 +2,9 @@
 //! ([ADR-0007](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0007-the-audio-engine.md)).
 //!
 //! - [`engine`]: a graph of [`node`]s, edited and compiled by the controller, swapped without a
-//!   click, played by the processor on the real-time thread, freed by the collector;
-//! - [`nodes`]: the engine's own nodes, a sine, a gain and a test latency;
+//!   click, played by the processor on the real-time thread, freed by the collector; the transport,
+//!   and the MIDI sequences that nodes play from the timeline;
+//! - [`nodes`]: the engine's own nodes, a sine, a gain, a test latency and a test synth;
 //! - [`device`] and [`offline`]: what a backend lends the processor each period, and a backend
 //!   without a device, for tests;
 //! - [`stats`] and [`callback_times`]: what the engine reports of itself while it plays;

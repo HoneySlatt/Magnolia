@@ -10,6 +10,9 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
 - **Arena**: the store where the engine's nodes live, apart from any compiled graph, so that they
   survive a swap.
 - **Arrangement**: the timeline of a song's tracks and clips; FL Studio calls it the *playlist*.
+- **Audible region**: the timeline samples a play makes heard, from the position asked for up to
+  the stop; a timeline source plays only the events inside it
+  ([`ARCHITECTURE.md`](ARCHITECTURE.md#the-transport)).
 - **BBT**: a musical position in bars, beats and ticks.
 - **Best rival**: on a criterion, the rival that does best, measured; a lead is a margin over it
   ([ADR-0014](adr/0014-the-quality-bar-measured-against-the-market.md)).
@@ -21,6 +24,9 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
   ([`ARCHITECTURE.md`](ARCHITECTURE.md#memory-the-real-time-thread-touches)).
 - **Channel**: a strip of the mixer. Each track owns one; a multi-output instrument has child
   channels under its track ([ADR-0008](adr/0008-the-project-model.md)).
+- **Chase**: at a play's start, each MIDI sequence first sends the last pitch bend and controller
+  values set before it, so that the music starts as it would sound there
+  ([`ARCHITECTURE.md`](ARCHITECTURE.md#timeline-sources)).
 - **Collector**: the thread that frees what the real-time thread let go, so that it never frees
   memory itself.
 - **Comping**: building one take from the best parts of several.
@@ -107,6 +113,9 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
   Wine.
 - **Poisoned**: the processor's state after a panic on the real-time path: it writes silence to every
   output from then on, and says so ([ADR-0022](adr/0022-a-panic-on-the-real-time-path-gives-silence.md)).
+- **Pre-roll**: the samples the transport runs before the position a play asked for, as many as the
+  graph's largest compensation, so that every path reaches the output on that position together
+  ([ADR-0025](adr/0025-delay-compensation-by-reading-ahead.md)).
 - **Prefix**: a folder holding one Windows installation for Wine, its programs and its registry.
 - **Primary modifier**: the key that shortcuts use, Ctrl on Linux and Windows, Cmd on macOS.
 - **Processor**: the engine's real-time half, which a backend calls once a period; it applies swaps,
@@ -157,6 +166,12 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
   every frame is a whole number of them ([ADR-0018](adr/0018-the-time-model.md)).
 - **Timecode clock**: where timecode frames lie on the absolute timeline: a frame rate and a start
   label at a time position.
+- **Timeline source**: what gives a node events from the timeline while the transport rolls: a MIDI
+  sequence, and from M1.6 an automation lane
+  ([ADR-0027](adr/0027-timeline-events-from-sources-on-nodes.md)).
+- **Transport**: what plays and stops the timeline. Its clock is the timeline sample the output
+  plays; the engine's own clock counts every sample, rolling or not
+  ([`ARCHITECTURE.md`](ARCHITECTURE.md#the-transport)).
 - **WAL**: SQLite's write-ahead log, which makes each transaction whole or absent after a crash.
 - **Winelib**: a program built for Linux that also calls Windows' functions through Wine.
 - **Wine bridge**: the plugin host built for Windows, run under the system's Wine

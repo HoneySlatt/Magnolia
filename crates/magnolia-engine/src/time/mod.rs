@@ -48,7 +48,7 @@
 //! assert_eq!(clock.label(frame), Timecode { frames: 12, ..start });
 //! ```
 
-// The period will convert time with this module's code: nothing here may panic (ADR-0022).
+// The period converts time with this module's code: nothing here may panic (ADR-0022).
 #![warn(
     clippy::indexing_slicing,
     clippy::unwrap_used,

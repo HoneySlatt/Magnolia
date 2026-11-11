@@ -1,8 +1,9 @@
 //! The processor: the engine's real-time half, which a backend calls once a period.
 //!
-//! Each period it applies at most one swap the controller sent, takes the events due, runs the
-//! graph's nodes in sub-blocks, and fills the device's playback buffers. It never allocates,
-//! frees, locks or blocks; its one system call wakes the collector, which frees what it lets go.
+//! Each period it applies at most one swap the controller sent, then the transport's commands,
+//! takes the events due, runs the graph's nodes in sub-blocks, each with its own events and those
+//! its timeline sources play, and fills the device's playback buffers. It never allocates, frees,
+//! locks or blocks; its one system call wakes the collector, which frees what it lets go.
 
 // The processor runs this module's code in every period: nothing here may panic (ADR-0022).
 #![warn(
@@ -26,6 +27,8 @@ use super::events::EventInbox;
 use super::fade::{FadeTable, Gain};
 use super::graph::NodeId;
 use super::pool::{self, BufferPool};
+use super::sources::{NodeTimeline, SourceReader, Timeline};
+use super::transport::TransportClock;
 use crate::device::DeviceBuffers;
 use crate::node::{Event, ProcessContext, ProcessStatus};
 use crate::stats::EngineStats;
@@ -52,9 +55,11 @@ pub struct Processor {
     arena: Arena,
     fade: FadeTable,
     events: EventInbox,
+    sources: SourceReader,
+    transport: TransportClock,
     messages: Consumer<Box<SwapMessage>>,
     garbage: GarbageOut,
-    /// The first sample of the next period, on the engine's timeline.
+    /// The first sample of the next period, on the engine's clock.
     position: i64,
     poisoned: bool,
 }
@@ -82,6 +87,8 @@ pub(crate) struct ProcessorParts {
     pub(crate) arena: Arena,
     pub(crate) fade: FadeTable,
     pub(crate) events: EventInbox,
+    pub(crate) sources: SourceReader,
+    pub(crate) transport: TransportClock,
     pub(crate) messages: Consumer<Box<SwapMessage>>,
     pub(crate) garbage: GarbageOut,
 }
@@ -101,6 +108,8 @@ impl Processor {
             arena: parts.arena,
             fade: parts.fade,
             events: parts.events,
+            sources: parts.sources,
+            transport: parts.transport,
             messages: parts.messages,
             garbage: parts.garbage,
             position: 0,
@@ -130,7 +139,7 @@ impl Processor {
 
     /// How far ahead of the output a node's input runs in the phase being played, in samples, as
     /// its step records it; `None` for a node the phase does not run. For tests: the transport
-    /// will read the steps themselves (ADR-0025).
+    /// reads the steps themselves (ADR-0025).
     #[doc(hidden)]
     pub fn ahead_in(&self, node: NodeId) -> Option<u64> {
         let phase = self.graph.phase(self.phase)?;
@@ -139,7 +148,7 @@ impl Processor {
     }
 
     /// The largest compensation of the graph being played, in samples: the largest `ahead_in` of
-    /// its steady phase. For tests: the transport will pre-roll by it (ADR-0025).
+    /// its steady phase, by which the transport pre-rolls (ADR-0025). For tests.
     #[doc(hidden)]
     pub fn largest_ahead_in(&self) -> u64 {
         self.graph.largest_ahead_in
@@ -181,6 +190,9 @@ impl Processor {
         let frames = device.frames();
         self.garbage.flush_overflow();
         self.apply_swap();
+        // After the swap, so that a play pre-rolls by the compensation of the graph about to play.
+        self.transport
+            .apply_commands(self.position, self.graph.largest_ahead_in, &self.stats);
         // Every queued event may be taken, even while a swap waits: the controller sends an event
         // for a node a swap brings only once the processor has applied that swap.
         self.events.pop();
@@ -193,6 +205,7 @@ impl Processor {
             self.copy_playback_out(device, frames, done, length);
             done = done.saturating_add(length);
             self.advance_phase(length);
+            self.transport.advance(length);
         }
     }
 
@@ -239,12 +252,15 @@ impl Processor {
         }
     }
 
-    /// The next sub-block's length: what is left of the period, cut at the largest block and at
-    /// the end of the current phase.
+    /// The next sub-block's length: what is left of the period, cut at the largest block, at the
+    /// end of the current phase, and where the transport stops.
     fn sub_block_length(&self, remaining: usize) -> usize {
         let mut length = remaining.min(self.largest_block);
         if let Some(phase_length) = self.graph.phase(self.phase).and_then(|phase| phase.length) {
             length = length.min(phase_length.saturating_sub(self.phase_elapsed));
+        }
+        if let Some(until_stop) = self.transport.frames_until_stop() {
+            length = length.min(until_stop);
         }
         // Never zero, so that the period always moves on.
         length.max(1)
@@ -327,6 +343,7 @@ impl Processor {
 
     fn process_sub_block(&mut self, start: i64, length: usize) {
         let Self {
+            sample_rate,
             graph,
             phase,
             phase_elapsed,
@@ -334,6 +351,8 @@ impl Processor {
             arena,
             fade,
             events,
+            sources,
+            transport,
             stats,
             ..
         } = self;
@@ -342,6 +361,10 @@ impl Processor {
         };
         let taken = events.take_due(start.saturating_add(as_samples(length)), phase);
         stats.count_events_taken(taken as u64);
+        let timeline = Timeline {
+            tempo_map: graph.tempo_map.as_deref(),
+            rate: *sample_rate,
+        };
         let mut delivered: usize = 0;
         let mut errors: u64 = 0;
         let mut mismatches: u64 = 0;
@@ -351,7 +374,18 @@ impl Processor {
             }
             let node_events = events.events_of(step.node, start);
             let event_count = node_events.len();
-            match run_step(step, pool, arena, node_events, length) {
+            let node_timeline = NodeTimeline {
+                timeline,
+                sequences: graph.sequences(step.sources),
+                transport: transport.at(step.ahead_in),
+                play: transport.play(),
+            };
+            let step_events = StepEvents {
+                controller: node_events,
+                timeline: node_timeline,
+                sources,
+            };
+            match run_step(step, pool, arena, step_events, length) {
                 StepOutcome::Ran => delivered = delivered.saturating_add(event_count),
                 StepOutcome::Failed => {
                     delivered = delivered.saturating_add(event_count);
@@ -364,7 +398,7 @@ impl Processor {
             sum_into(pool, phase, sum, fade, *phase_elapsed, length);
         }
         let dropped = taken.saturating_sub(delivered);
-        stats.count_events_dropped(dropped as u64);
+        stats.count_events_dropped((dropped as u64).saturating_add(sources.take_dropped()));
         stats.count_node_errors(errors);
         stats.count_generation_mismatches(mismatches);
     }
@@ -466,19 +500,35 @@ fn mix(target: &mut [f32], source: &[f32], gain: Gain<'_>, accumulate: bool) {
     }
 }
 
+/// What a step's node may receive in a sub-block: the controller's events for it, and its timeline
+/// sources, which the reader turns into events.
+struct StepEvents<'a> {
+    controller: &'a [Event],
+    timeline: NodeTimeline<'a>,
+    sources: &'a mut SourceReader,
+}
+
 /// Runs one step's node over its channels, unless it sleeps through the sub-block, and acts on
-/// what it returns.
+/// what it returns. A sleeping node with an event, from the controller or its timeline sources,
+/// runs.
 fn run_step(
     step: &Step,
     pool: &mut BufferPool,
     arena: &mut Arena,
-    events: &[Event],
+    events: StepEvents<'_>,
     length: usize,
 ) -> StepOutcome {
     let Some(occupied) = arena.occupied_mut(step.node) else {
         silence(pool, step.outputs, length);
         return StepOutcome::Missing;
     };
+    let StepEvents {
+        controller,
+        timeline,
+        sources,
+    } = events;
+    let transport = timeline.transport;
+    let events = sources.node_events(controller, timeline, occupied.sources, length);
     let BufferPool {
         stride,
         inputs,
@@ -502,7 +552,8 @@ fn run_step(
         pool::channels_mut(outputs, *stride, step.outputs),
         output_flags,
         events,
-    );
+    )
+    .with_transport(transport);
     let status = occupied.node.process(&mut context);
     *occupied.sleeping = status == ProcessStatus::Sleep;
     if status == ProcessStatus::Error {
