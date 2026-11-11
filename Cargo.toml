@@ -4,6 +4,20 @@
 resolver = "3"
 members = ["crates/*"]
 
+# Every dependency is put to the owner first: its reason, an alternative weighed, its license
+# (AGENTS.md). Versions live here once; crates take them with `workspace = true`.
+[workspace.dependencies]
+magnolia-engine = { path = "crates/magnolia-engine" }
+# The JACK API, which PipeWire and JACK2 both serve (ADR-0007). It loads libjack at run time, so the
+# engine starts and says so when JACK is missing; its `log` feature is off.
+jack = { version = "0.14", default-features = false, features = ["dynamic_loading"] }
+# Single-producer single-consumer queues that never allocate, lock or block once built: what the
+# real-time thread exchanges with the others.
+rtrb = "0.4"
+# The C library's calls that std lacks: the audio thread's id and its scheduling policy, asked of the
+# kernel to say whether it runs in real time (ADR-0023). Used by the JACK backend alone.
+libc = "0.2"
+
 [workspace.package]
 version = "0.0.0"
 edition = "2024"

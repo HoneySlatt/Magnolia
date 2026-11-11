@@ -57,7 +57,15 @@
               pkgs.cargo-deny
               pkgs.cargo-fuzz
               pkgs.lychee
+              # jack-sys's build script asks pkg-config for libjack, though it loads it at run time.
+              pkgs.pkg-config
+              # JACK2: its libjack for the build, and `jackd`, whose dummy driver runs the JACK
+              # backend's tests without a sound card.
+              pkgs.jack2
             ];
+            # The JACK backend opens libjack.so.0 at run time, and NixOS has no library path of its
+            # own. `pw-jack` puts PipeWire's libjack before this one.
+            LD_LIBRARY_PATH = "${pkgs.lib.getLib pkgs.jack2}/lib";
           };
         }
       );
