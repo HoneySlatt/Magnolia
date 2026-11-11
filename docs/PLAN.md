@@ -25,9 +25,10 @@ tier, into [`measurements.md`](measurements.md).
   [ADR-0024](adr/0024-how-a-swap-avoids-a-click.md); `jack`, `rtrb` and `libc` taken; the
   [reference projects](reference-projects.md) adopted). Its checks pass; what only the owner's
   hardware can measure is [listed below](#m13--the-jack-backend-and-the-graph).
-- **M1.4, a session plays: in progress since 2026-11-11.** Designed, challenged and decided that day
-  ([ADR-0025](adr/0025-delay-compensation-by-reading-ahead.md) to
+- **M1.4, a session plays: built, 2026-11-11; waiting for the owner's measures by hand**, on the
+  owner's decisions of that day ([ADR-0025](adr/0025-delay-compensation-by-reading-ahead.md) to
   [ADR-0029](adr/0029-magnolias-own-wav-and-midi-file-readers.md); `serde` and `serde_json` taken).
+  What only the owner's hardware can measure is [listed below](#m14--a-session-plays).
 
 ## Status
 
@@ -36,7 +37,7 @@ tier, into [`measurements.md`](measurements.md).
 | [M1.1](#m11--the-workspace-and-its-checks) | The Rust workspace builds and is checked in CI | Done |
 | [M1.2](#m12--the-time-model) | Positions, tempo, meter and timecode are exact | Done |
 | [M1.3](#m13--the-jack-backend-and-the-graph) | A graph of nodes plays through the JACK API, swapped without a click | Built; waiting for the owner's measures by hand |
-| [M1.4](#m14--a-session-plays) | A test session of clips and MIDI plays from disk, delays compensated | In progress |
+| [M1.4](#m14--a-session-plays) | A test session of clips and MIDI plays from disk, delays compensated | Built; waiting for the owner's measures by hand |
 | [M1.5](#m15--recording-and-monitoring) | A voice is recorded and monitored at low latency | Planned |
 | [M1.6](#m16--plugin-hosts) | Native CLAP and VST3 plugins play out of the engine's process and survive a crash | Planned |
 | [M1.7](#m17--the-wine-bridge) | The owner's Windows plugins play under the system's Wine | Planned |
@@ -53,28 +54,15 @@ milestone first needs it.
 
 ### M1.1 — The workspace and its checks
 
-- **Goal.** Code can be written and checked from the first line.
-- **Delivers.** A Cargo workspace; the Rust toolchain in the development shell, with a nightly for
-  RealtimeSanitizer, `cargo fuzz` and Miri; `scripts/check.sh` with formatting, lints as errors,
-  tests, documentation and dependency policy (`cargo deny`); CI running the script.
-- **Done when.** CI is green on a first crate whose test proves, in a child process since the
-  sanitizer aborts, that RealtimeSanitizer catches an allocation in a function marked real-time.
-- **How to test.** `nix develop --command scripts/check.sh`.
-- **Measured.** The time of a full check and of the CI job; the iteration's budget set from them.
+Done, 2026-11-10: the Cargo workspace, the toolchains in the development shell, `scripts/check.sh`
+and CI; RealtimeSanitizer proved to catch an allocation in a function marked real-time
+([measurements](measurements.md#m11--the-workspace-and-its-checks)).
 
 ### M1.2 — The time model
 
-- **Goal.** Every position in Magnolia is exact over a film's length.
-- **Delivers.** 64-bit sample positions, and absolute positions in time units
-  ([ADR-0018](adr/0018-the-time-model.md)); fixed-point musical time; a tempo map with tempo and meter
-  changes; timecode at 23.976, 24, 25, 29.97 with and without drop-frame, 30, 50, 59.94 with and
-  without drop-frame, and 60; one written rounding rule for every conversion.
-- **Done when.** Conversions round-trip over ten hours without drift, by the rounding rule; tested
-  and fuzzed.
-- **How to test.** `cargo test`; `cargo fuzz` briefly in CI.
-- **Measured.** The time of a conversion, as the engine calls it per block.
-- **Delivered**: `magnolia_engine::time`, tested over ten hours against an independent oracle,
-  fuzzed, benchmarked ([measurements](measurements.md#m12--the-time-model)).
+Done, 2026-11-11: exact positions over a film's length ([ADR-0018](adr/0018-the-time-model.md)),
+in `magnolia_engine::time`, tested over ten hours against an independent oracle, fuzzed,
+benchmarked ([measurements](measurements.md#m12--the-time-model)).
 
 ### M1.3 — The JACK backend and the graph
 
@@ -120,18 +108,21 @@ milestone first needs it.
 - **How to test.** `cargo test`; the command line plays the session by hand.
 - **Measured.** The callback's histogram on the reference project without plugins; the disk
   thread's read-ahead.
-- **Decided**, 2026-11-11: sources read ahead, delay lines only where latencies meet, nothing live
-  delayed, play pre-rolled (ADR-0025); one stream per audio track in a ring of slots, the reader
-  woken by the processor (ADR-0026); timeline events from sources on nodes, structured, the event
-  queue bounded by count (ADR-0027); the session in JSON (ADR-0028); WAV and MIDI files read by
-  Magnolia's own code (ADR-0029). New crates `magnolia-session` and `magnolia-cli`.
-- **Build order**: the `time` module's no-panic lints; events (ADR-0027); compensation; the
-  transport; WAV; the disk reader and the players; the test nodes; the session, its loader, render
-  and generator; the command line; the null, then the measures.
-- **Where it stands**: built and in `main`: the `time` lints, events, compensation, WAV, MIDI files,
-  the transport and MIDI sources with `TestSynth`. Next: the disk reader and the audio player; then
-  the session file, its loader, render and generator; the command line; the nulls through JACK; the
-  measures.
+- **Delivered**, on ADR-0025 to ADR-0029: in `magnolia-engine`, compensation, structured events,
+  the transport, MIDI sequences, the disk reader, WAV files; `magnolia-session`, MIDI files, the
+  test session, its render and generator; `magnolia-cli`, the `magnolia` command. Tested: a render nulls against playback through the device-less backend and
+  through JACK2's dummy driver at 64 and 256 frames; compensation aligns `TestLatency` to the
+  sample. Figures in [`measurements.md`](measurements.md#m14--a-session-plays).
+- **By hand, by the owner**, with the reference projects generated as
+  [CONTRIBUTING](../CONTRIBUTING.md#test-sessions) says:
+  - listen through PipeWire: `pw-jack -p 64 cargo run --release -p magnolia-cli -- play
+    <high>/session.json --connect`; no click at the start, at the stop, nor at a swap; the real-time
+    report says the audio thread runs in real time;
+  - the callback's histogram on the high tier's project at 64 frames through the Focusrite, and on
+    the lowest tier's at 128 frames on the laptop on mains power: the worst callback under 85 % of
+    the period, the 99.9th percentile under 50 %, no disk underrun;
+  - on the laptop, the reader's low-water marks and refill times, which its storage sets;
+  - REAPER opens the generated WAV and MIDI files as they are (ADR-0029).
 
 ### M1.5 — Recording and monitoring
 

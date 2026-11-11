@@ -148,3 +148,85 @@ The CI job's time is that of run 43022262682, of commit `c517087`, one run; the 
 ran there on JACK2's dummy driver. The 2 s budget asks for "a session without plugins": until M1.4 plays sessions, the example's sine
 stands in for one. A check with nothing changed is mostly the fuzzing (40 s), the JACK backend's
 tests, which play in real time on their dummy servers, and the release build of the page-fault test.
+
+## M1.4 — A session plays
+
+Taken on 2026-11-11 on the high tier (AMD Ryzen 7 5800X, 8 cores, 16 threads, NVMe), with rustc
+1.99.1, the nightly of 2026-11-05 and JACK2 1.9.22, inside the development shell. Other work ran on
+the machine: the load average is noted with each table.
+
+### The callback on the reference projects, without plugins
+
+`magnolia play` on each generated reference project ([reference projects](reference-projects.md#generating-them))
+for 120 s, on a JACK2 server of its own, `jackd -r -d dummy -r 48000`: the dummy driver, without
+real time. Release build. The instrument tracks play `TestSynth`; buses and sends are gains. One run
+each; quantiles are the upper bounds of the histogram's buckets, within 6.25 %.
+
+| Project | Period | Periods | Median | 99.9th percentile | Maximum | Disk underruns | Load |
+|---|---|---|---|---|---|---|---|
+| High tier: 48 audio tracks, 24 MIDI tracks | 64 frames (1.33 ms) | 90,087 | 49.2 µs | 111 µs | 538 µs | 0 | 3.0 |
+| Lowest tier: 16 audio tracks, 8 MIDI tracks | 128 frames (2.67 ms) | 45,043 | 34.8 µs | 111 µs | 422 µs | 0 | 1.0–2.1 |
+
+The worst callbacks are 40 % and 16 % of their periods, the 99.9th percentiles 8.3 % and 4.1 %.
+These are not the [floor's](ROADMAP.md#floors) figures: the server had no real-time priority, and
+recorded 8 and 69 xruns and 4 and 30 gaps; on a dummy server without real time the backend's own
+overruns (23 and 25) count callbacks the server started late, not long ones. The floors are measured
+by the owner on the hardware ([PLAN](PLAN.md#m14--a-session-plays)).
+
+### The disk reader's read-ahead
+
+`cargo bench --bench disk_reader`: 16 tracks of 24-bit stereo, 30 s each, a read-ahead of 10 s.
+"Cold" drops the files from the page cache first (`dd iflag=nocache`). Load 1.7 to 1.1.
+
+| Run | First fill | Refills | Throughput |
+|---|---|---|---|
+| Swept without a thread, cold | 35.9 ms for 43.3 MB | 2.48 ms on average, 5.53 ms the longest | 1,744 MB/s |
+| Swept without a thread, warm | — | 2.33 ms on average | 1,850 MB/s |
+| Real time, on its thread, cold | primed in 9.5 ms | 5 of 19 MB, 11.5 ms each | 1,657 MB/s |
+| Real time, on its thread, warm | primed in 3.2 ms | 11.0 ms each | 1,719 MB/s |
+
+From a player's request to the reader's publication: 229 µs at the median, 236 µs the longest,
+cold; 238 and 246 µs warm. Over 30 s, every player's low-water mark was 239,872 frames, its refill
+threshold less one period: each refill landed before the player's next period. On this NVMe the
+reader is bound by its own work, not the disk: cold and warm are close.
+
+Through the reference projects above, the lowest low-water marks were 44,992 frames (0.94 s, high
+tier) and 88,356 frames (1.84 s, lowest tier), both while the play began: a play starts once half
+a second of each stream is ready, then the reader fills the rest of its 10 s while it plays. The
+reader read 930 MB in 33 refills, the longest 70 ms (high tier), and 251 MB, the longest 21 ms
+(lowest tier). The lowest tier's own storage is measured by the owner.
+
+Decoding a block of 4,096 stereo frames, warm: Int24 3.4 µs (0.84 ns a frame), Int16 0.77 µs, Int32
+0.54 µs, Float32 0.52 µs.
+
+### Generating and rendering the reference projects
+
+`cargo run --release -p magnolia-session --example generate`, and the offline render, in blocks of
+4,096 frames, of the 211 s each plays.
+
+| Project | Files | Generated in | Rendered in |
+|---|---|---|---|
+| Lowest tier | 665 MB | 3.7 s | 1.79 s, 118 times real time |
+| High tier | 2.18 GB | 12.5 s | 4.68 s, 45 times real time |
+
+Both renders had 0 underruns. A session's memory budget estimates 43.9 MiB (lowest tier) and
+141.9 MiB (high tier).
+
+### Compiling and checking
+
+The median of three runs unless noted, in a target folder of its own. Load average 1.7 to 3.2 for
+the builds, 1.7 to 7.2 for the checks.
+
+| What | Time | Budget ([floors](ROADMAP.md#floors)) |
+|---|---|---|
+| A debug build of the workspace from nothing | 4.2 s | 3 min |
+| A release build from nothing | 5.2 s | 10 min |
+| A debug build after a change to the engine, a low-level crate | 0.58 s | 10 s |
+| A change to the engine, `magnolia play` rebuilt, relaunched and playing the `small` session on a dummy JACK2 | 1.1 s (the build 1.0 s) | 2 s |
+| A full check from nothing, one run | 146 s | 3 min |
+| A full check, nothing changed, one run | 92 s | — |
+
+Before the fuzz targets ran side by side, the full check took 298 s from nothing and 232 s with
+nothing changed, over its budget: five targets of 20 s one after the other. `scripts/check.sh` now
+prints each step's time; the tests take about a minute, the JACK backend's playing in real time on
+their dummy servers.
