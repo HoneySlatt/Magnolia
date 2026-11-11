@@ -161,9 +161,6 @@ fn open(options: &Options, hertz: u32) -> Result<(Controller, Graph, JackBackend
         client_name: "magnolia-play".to_owned(),
         server_name: options.server.clone(),
         processor,
-        sample_rate: rate,
-        capture_channels: 0,
-        playback_channels: PLAYBACK,
     })?;
     Ok((controller, graph, backend))
 }
@@ -277,10 +274,15 @@ fn report(controller: &Controller, backend: &JackBackend, swaps: u32) {
         stats.server_xruns()
     );
     println!(
-        "Node errors: {}. Non-finite samples: {}. Poisoned: {}.{}",
+        "Node errors: {}. Non-finite samples: {}. Poisoned: {}.{}{}",
         stats.node_errors(),
         stats.non_finite_samples(),
         if stats.poisoned() { "yes" } else { "no" },
+        if backend.callback_panicked() {
+            " The backend's callback panicked: it played silence since."
+        } else {
+            ""
+        },
         if backend.server_shut_down() {
             " The server shut the client down."
         } else {

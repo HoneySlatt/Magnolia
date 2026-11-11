@@ -88,12 +88,14 @@ device's frame time, the server's xruns, the audio thread's id).
    next one.
 3. The controller compiles the committed description against the graph the processor plays,
    into **phases**, the last one **steady**. With `R` the edges removed and `A` the edges added:
-   the first commit, or a commit that adds or removes no edge, is one steady phase. Otherwise,
+   a commit that adds or removes no edge is one steady phase. Otherwise,
    if the union of both graphs is acyclic and holds at most 1.25 times the nodes of the larger, a
    **crossfade**: one phase runs the union. Otherwise a **dip**: the old graph with every edge of
    `R` fading out, then the new one with every edge of `A` fading in. Each fading phase lasts one
    fade, a raised cosine over 5 ms (240 samples at 48 kHz); on one edge, a fading-in gain and its
-   fading-out gain sum to 1 at every sample.
+   fading-out gain sum to 1 at every sample. A graph the processor installs before its first
+   period starts at its steady phase: nothing has sounded to fade from. Why a crossfade or a dip,
+   and the limit of 1.25 times: [ADR-0024](adr/0024-how-a-swap-avoids-a-click.md).
 4. In a crossfade, each path that changes carries one fade, so that the level holds when a node is
    inserted or removed: gains multiply along a path, and a fade on each of its edges would dip it
    by 2.5 dB at mid-fade. An edge of `R` fades out, unless it goes into a node the swap drops,
@@ -195,9 +197,10 @@ JACK2 both serve ([ADR-0007](adr/0007-the-audio-engine.md)). The `jack` crate lo
 the first client opens, so a program that never opens one runs without it. Run through `pw-jack`,
 the process loads PipeWire's libjack; otherwise the first `libjack.so.0` on its library path.
 
-`JackBackend::open` connects to a running server and never starts one (`NO_START_SERVER`). It fails
-with a plain error when libjack is missing, when no server runs, and when the server's rate differs
-from the engine's. It registers one port per engine channel, `capture_1` and on, `playback_1` and
+`JackBackend::open` connects to a running server and never starts one (`NO_START_SERVER`). It reads
+the engine's rate and channels from the processor. It fails with a plain error when libjack is
+missing, when no server runs, and when the server's rate differs from the engine's. It registers
+one port per engine channel, `capture_1` and on, `playback_1` and
 on, and activates the client: the server calls the processor from its next period, capture and
 playback in one callback.
 
@@ -261,9 +264,15 @@ rtkit grants them asynchronously, so a caller asks again after about a second.
 
 After a panic the processor writes silence and reports itself poisoned
 ([ADR-0022](adr/0022-a-panic-on-the-real-time-path-gives-silence.md)). The owner of the backend
-makes a new engine at the same rate, hands its processor to `replace_processor`, and commits the
-graph again on the new controller. The callback swaps it in at a period's start: the client stays
-active and its connections stay.
+makes a new engine at the same rate and channels, hands its processor to `replace_processor`, and
+commits the graph again on the new controller. The callback swaps it in at a period's start: the
+client stays active and its connections stay. A processor whose rate or channels differ from those
+the client was opened for is given back unused (`ReplaceError::Differs`).
+
+A panic in the callback's own code, outside the processor, is caught by the callback itself: it
+writes silence from then on, returns normally so that the client stays active and connected on both
+servers, and `callback_panicked` reports it. A new processor does not help there: close the backend
+and open it again.
 
 ### Closing, and a server that dies
 
@@ -276,7 +285,10 @@ collector thread are not freed. The tests show that nothing hangs or crashes.
 ### The `jack` crate on the real-time path
 
 Read in its code, not measured: around each process callback it takes a `std::sync::Mutex` with
-`try_lock`, which never waits, and catches panics. Its own wrapper of the port-registration
+`try_lock`, which never waits. When that lock is busy, the crate skips Magnolia's period and
+returns `Quit`, which on JACK2 deactivates the client. Its buffer-size callback takes the same lock,
+so a change of the period while a cycle runs could do it too, not only a closing client; on
+PipeWire, its locked-process default keeps the two from running at once, as far as was read. Its own wrapper of the port-registration
 notification locks a mutex and may allocate, on JACK2's notification thread or, on PipeWire, while
 the process cycle is held. Its `log` feature is off, so libjack's messages go to standard error.
 

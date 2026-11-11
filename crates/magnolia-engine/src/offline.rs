@@ -26,7 +26,8 @@ pub struct OfflineBackend {
 impl OfflineBackend {
     /// A backend for `processor`, with as many capture and playback channels as its engine.
     pub fn new(processor: Processor) -> Self {
-        let (capture_channels, playback_channels) = processor.channels();
+        let (capture_channels, playback_channels) =
+            (processor.capture_channels(), processor.playback_channels());
         Self {
             processor,
             capture: vec![Vec::new(); capture_channels],

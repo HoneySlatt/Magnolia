@@ -193,7 +193,7 @@ pub fn new(config: EngineConfig) -> Result<(Controller, Processor), EngineError>
         start_collector(config.garbage_capacity).map_err(EngineError::CollectorDidNotStart)?;
     // Silence: a graph without nodes, its playback channels summing nothing.
     let empty = Description::default();
-    let silence = compile(&empty, &empty, true, 0, context);
+    let silence = compile(&empty, &empty, 0, context);
     let pool = BufferPool::new(stride, silence.input_channels, silence.output_channels);
     let controller = Controller::new(ControllerParts {
         stats: Arc::clone(&stats),
@@ -207,6 +207,7 @@ pub fn new(config: EngineConfig) -> Result<(Controller, Processor), EngineError>
     });
     let processor = Processor::new(ProcessorParts {
         stats,
+        sample_rate: config.sample_rate,
         largest_block: config.largest_block,
         capture_channels: config.capture_channels,
         playback_channels: config.playback_channels,

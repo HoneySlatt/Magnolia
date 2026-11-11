@@ -3,7 +3,8 @@
 //!
 //! With `R` the edges removed and `A` the edges added:
 //!
-//! - the first commit, or one that adds and removes no edge, is one steady phase;
+//! - a commit that adds and removes no edge is one steady phase. The first commit is no exception:
+//!   its sources fade in from the silence before it, as any new source does;
 //! - otherwise, if the union of the two graphs is acyclic and holds at most 1.25 times the nodes
 //!   of the larger, a **crossfade**: one phase that runs the union, one fade long, then the steady
 //!   new graph. Each path that changes carries one fade, not one per edge, so that inserting or
@@ -40,12 +41,10 @@ pub(crate) struct Compiled {
     pub(crate) added: Vec<NodeId>,
 }
 
-/// Compiles the swap from `old`, the graph the processor plays, to `new`, both valid. `first` is
-/// true for the engine's first commit.
+/// Compiles the swap from `old`, the graph the processor plays, to `new`, both valid.
 pub(crate) fn compile(
     old: &Description,
     new: &Description,
-    first: bool,
     sequence: u64,
     context: CompileContext,
 ) -> Compiled {
@@ -74,7 +73,7 @@ pub(crate) fn compile(
         length: None,
         waiting_nodes: Vec::new(),
     };
-    let (laid_out, phases) = if first || !edges_change {
+    let (laid_out, phases) = if !edges_change {
         (&new.nodes, vec![steady])
     } else {
         let fade = Some(context.fade_frames);

@@ -99,13 +99,21 @@ impl Server {
     /// Starts a server under a new name, after [`refuse_pipewire`], and waits until a client can
     /// open on it.
     pub fn start(period: u32) -> Self {
-        Self::start_named(unique_server_name(), period).unwrap_or_else(|error| panic!("{error}"))
+        Self::start_at(48_000, period)
     }
 
-    fn start_named(name: String, period: u32) -> Result<Self, String> {
+    /// Starts a server as [`start`](Self::start) does, at `rate` Hz.
+    pub fn start_at(rate: u32, period: u32) -> Self {
+        Self::start_named(unique_server_name(), rate, period)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    fn start_named(name: String, rate: u32, period: u32) -> Result<Self, String> {
         refuse_pipewire();
         let child = Command::new("jackd")
-            .args(["-n", &name, "-r", "-d", "dummy", "-r", "48000", "-p"])
+            .args(["-n", &name, "-r", "-d", "dummy", "-r"])
+            .arg(rate.to_string())
+            .arg("-p")
             .arg(period.to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -209,7 +217,7 @@ impl Drop for Server {
             return;
         }
         // A server of the same name reclaims the dead one's entry and shared memory.
-        match Self::start_named(self.name.clone(), 1_024) {
+        match Self::start_named(self.name.clone(), 48_000, 1_024) {
             Ok(mut again) => {
                 again.stop();
                 again.remove_leftovers();

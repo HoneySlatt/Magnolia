@@ -10,8 +10,9 @@ each out of the engine's process. Its interface will be written on uwui, the own
 which is not ready yet. It is licensed under GPL-3.0-or-later, its copyright held by the owner
 alone ([ADR-0002](docs/adr/0002-gpl-3-0-or-later-copyright-kept.md)).
 
-Its real state: the design is done (ADRs 0001 to 0023); the workspace and its checks exist (M1.1);
-the engine holds the time model (M1.2) and plays a graph through JACK (M1.3, in progress).
+Its real state: the design is done (ADRs 0001 to 0024); the workspace and its checks exist (M1.1);
+the engine holds the time model (M1.2) and plays a graph through JACK (M1.3, built; waiting for the
+owner's measures by hand).
 
 Agents develop it; the owner sets its direction and validates its decisions. Anyone must be able to
 understand it from the repository alone. Documentation is part of every deliverable.
@@ -82,8 +83,9 @@ check to make it pass (a skipped test, a raised budget, a silenced lint) without
 ## Rules the code depends on
 
 - **The real-time path** never allocates, locks, blocks or makes a system call outside the
-  allowlist (futex, eventfd). RealtimeSanitizer checks it in CI
-  ([ADR-0007](docs/adr/0007-the-audio-engine.md)).
+  allowlist ([ADR-0023](docs/adr/0023-the-real-time-allowlist.md)). RealtimeSanitizer and
+  Clippy check it in CI ([ADR-0007](docs/adr/0007-the-audio-engine.md),
+  [ADR-0020](docs/adr/0020-clippy-forbids-the-locks-the-sanitizer-cannot-see.md)).
 - **A plugin never stalls the engine**: past its deadline, or dead, its block is silent, never
   bypassed.
 - **Time is exact**: absolute positions in 64-bit time units, the engine's in 64-bit samples,

@@ -44,6 +44,7 @@ period is taken as silence.
 
 - A panic is the one moment the real-time path may allocate and lock: unwinding allocates its
   payload, and the panic hook writes to standard error. It happens once, after a bug.
-- The poisoned processor goes to the collector like any old graph.
+- The poisoned processor goes back to the backend's handle, which drops it on its own thread, never
+  on the audio thread.
 - Panics in plugins never reach this path: plugins run in other processes
   ([ADR-0003](0003-every-plugin-out-of-the-engines-process.md)).

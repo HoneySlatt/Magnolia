@@ -1,9 +1,11 @@
-//! Errors on open: without a server, the backend says so and what to do, and never starts one.
+//! Errors on open and on replacing a processor: without a server, the backend says so and what to
+//! do, and never starts one; a server at another rate, or a replacement that does not match the
+//! client, is refused.
 
-use magnolia_jack::{JackBackend, JackOptions, OpenError};
+use magnolia_jack::{JackBackend, JackOptions, OpenError, ReplaceError};
 
-use crate::common::{refuse_pipewire, unique_server_name};
-use crate::support::{a_process_names, new_engine, one_at_a_time, rate};
+use crate::common::{Server, refuse_pipewire, unique_server_name};
+use crate::support::{Rig, a_process_names, new_engine, one_at_a_time};
 
 #[test]
 fn no_server_running_gives_the_no_server_error_and_never_starts_one() {
@@ -15,9 +17,6 @@ fn no_server_running_gives_the_no_server_error_and_never_starts_one() {
         client_name: "magnolia".to_owned(),
         server_name: Some(name.clone()),
         processor,
-        sample_rate: rate(),
-        capture_channels: 0,
-        playback_channels: 2,
     });
     let Err(error) = opened else {
         panic!("a backend opened without a server");
@@ -30,4 +29,42 @@ fn no_server_running_gives_the_no_server_error_and_never_starts_one() {
     assert!(text.contains("no JACK server is running") && text.contains(&name));
     assert!(text.contains("never starts a server"));
     assert!(!a_process_names(&name), "a server was started under {name}");
+}
+
+#[test]
+fn a_server_at_another_rate_gives_the_rate_error() {
+    let _turn = one_at_a_time();
+    let server = Server::start_at(44_100, 256);
+    let (_controller, processor) = new_engine(0, 2);
+    let opened = JackBackend::open(JackOptions {
+        client_name: "magnolia".to_owned(),
+        server_name: Some(server.name.clone()),
+        processor,
+    });
+    let Err(error) = opened else {
+        panic!("a 48 kHz engine opened on a 44.1 kHz server");
+    };
+    assert!(
+        matches!(
+            error,
+            OpenError::RateDiffers {
+                server: 44_100,
+                engine: 48_000
+            }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn a_replacement_with_other_channels_is_given_back_unused() {
+    let _turn = one_at_a_time();
+    let server = Server::start(256);
+    let mut rig = Rig::open(&server, 0, 2);
+    let (_other_controller, other) = new_engine(0, 1);
+    let Err(error) = rig.backend.replace_processor(other) else {
+        panic!("a processor of one channel replaced one of two");
+    };
+    assert!(matches!(error, ReplaceError::Differs(_)), "{error:?}");
+    assert_eq!(error.into_processor().playback_channels(), 1);
 }

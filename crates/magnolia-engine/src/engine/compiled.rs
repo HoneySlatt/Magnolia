@@ -43,6 +43,11 @@ impl CompiledGraph {
     pub(crate) fn is_steady(&self, index: usize) -> bool {
         index.checked_add(1) == Some(self.phases.len())
     }
+
+    /// The index of the steady phase, the last.
+    pub(crate) fn steady_index(&self) -> usize {
+        self.phases.len().saturating_sub(1)
+    }
 }
 
 /// One stage of a swap: which nodes run, in which order, and what each channel sums.

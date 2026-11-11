@@ -11,8 +11,10 @@ stage's audit triages the whole list.
 - **PipeWire was read in its code, not run** by an agent: its thread-init callback, its server
   names, its behaviour after a panic. The owner's listening, listed under
   [M1.3](PLAN.md#m13--the-jack-backend-and-the-graph), runs it.
-- **From the design's challenge, not done**: asking PipeWire for its quantum and for
-  `jack.locked-process=false`, so that other clients' notifications never skip a cycle; a ring of the
+- **From the design's challenge, not done**: asking PipeWire for its quantum; and
+  `jack.locked-process=false`, so that other clients' notifications never skip a cycle, which must
+  wait until the backend bypasses the `jack` crate's `AsyncClient`, since that default is what keeps
+  the crate's buffer-size callback from contending its lock with the process callback; a ring of the
   slowest blocks with their start delay and margin; a logger for libjack's messages that never takes
   stderr's lock. The `jack` crate itself takes a `Mutex::try_lock` around each period
   ([ADR-0020](adr/0020-clippy-forbids-the-locks-the-sanitizer-cannot-see.md)).
@@ -25,6 +27,16 @@ stage's audit triages the whole list.
   node may cost a hundred gains.
 - **JACK2 keeps `/dev/shm/jack-shm-registry`** after the backend's tests, as it does after any
   server.
-- **The time model's conversions were measured under load** (load average 34 to 36): their figures
-  are upper bounds until taken again on a quiet machine
-  ([measurements](measurements.md#m12--the-time-model)).
+- **An event due now can wait behind events far ahead**: the processor takes events in only while
+  its pending buffer has room (1,024 by default), so a sender that keeps that many events ahead holds
+  back one due now. Decided at M1.4, when the timeline's own events come.
+- **Paths without a test**: a generation mismatch (`processor.rs`), and the silence the JACK callback
+  writes while the server's rate differs from the engine's, since a JACK2 server cannot change its
+  rate while it runs.
+- **`missed_plugin_deadlines` is never written** before M1.6, which brings deadlines; its test checks
+  that it stays at zero.
+- **The facts read in PipeWire's and JACK2's code** (in ADR-0022 and the JACK backend's section of
+  `ARCHITECTURE.md`) name no file or version; their sources are in the M1.3 design challenge's notes,
+  not yet in [`survey.md`](survey.md).
+- **The test server's command line is written in three places** (`ARCHITECTURE.md`,
+  `CONTRIBUTING.md`, the tests' `common/mod.rs`): to keep in the code and link from the documents.

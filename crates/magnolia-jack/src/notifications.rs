@@ -6,6 +6,16 @@
 //! itself. PipeWire also skips a process cycle while a handler runs. So every handler here touches
 //! atomics only: no lock, no allocation, no wait.
 
+// Its handlers and the thread-init callback run on JACK's threads, some of them real-time, every
+// period or at its start: no panicking code (ADR-0022).
+#![warn(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
+
 use std::cell::Cell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
@@ -23,6 +33,8 @@ pub(crate) struct Shared {
     shut_down: AtomicBool,
     /// The rate the server last reported.
     server_rate: AtomicU32,
+    /// Whether the backend's own callback code panicked, outside the processor.
+    callback_panicked: AtomicBool,
 }
 
 impl Shared {
@@ -33,6 +45,7 @@ impl Shared {
             server_xruns: AtomicU64::new(0),
             shut_down: AtomicBool::new(false),
             server_rate: AtomicU32::new(server_rate),
+            callback_panicked: AtomicBool::new(false),
         }
     }
 
@@ -54,6 +67,14 @@ impl Shared {
 
     pub(crate) fn server_rate(&self) -> u32 {
         self.server_rate.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn callback_panicked(&self) -> bool {
+        self.callback_panicked.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_callback_panicked(&self) {
+        self.callback_panicked.store(true, Ordering::Relaxed);
     }
 }
 

@@ -95,8 +95,8 @@ fn description(slots: &[u32], chains: &[&[u32]]) -> Description {
     description
 }
 
-fn phase_lengths(old: &Description, new: &Description, first: bool) -> Vec<Option<usize>> {
-    let compiled = compile(old, new, first, 1, CONTEXT);
+fn phase_lengths(old: &Description, new: &Description) -> Vec<Option<usize>> {
+    let compiled = compile(old, new, 1, CONTEXT);
     compiled
         .graph
         .phases
@@ -106,12 +106,13 @@ fn phase_lengths(old: &Description, new: &Description, first: bool) -> Vec<Optio
 }
 
 #[test]
-fn the_first_commit_and_a_commit_without_new_edges_are_one_steady_phase() {
+fn a_commit_without_new_edges_is_one_steady_phase_and_the_first_commit_fades_in() {
     let empty = Description::default();
     let chain = description(&[0, 1], &[&[0, 1]]);
-    assert_eq!(phase_lengths(&empty, &chain, true), [None]);
+    // The first commit's sources fade in from silence, as any new source does.
+    assert_eq!(phase_lengths(&empty, &chain), [Some(240), None]);
     let more_nodes = description(&[0, 1, 2], &[&[0, 1]]);
-    assert_eq!(phase_lengths(&chain, &more_nodes, false), [None]);
+    assert_eq!(phase_lengths(&chain, &more_nodes), [None]);
 }
 
 #[test]
@@ -119,11 +120,11 @@ fn a_small_acyclic_union_crossfades_and_a_large_one_dips() {
     // Four nodes; one more node, one edge moved: the union holds 5, at most 1.25 times 4.
     let old = description(&[0, 1, 2, 3], &[&[0], &[1], &[2], &[3]]);
     let one_more = description(&[0, 1, 2, 3, 4], &[&[0], &[1], &[2], &[4]]);
-    assert_eq!(phase_lengths(&old, &one_more, false), [Some(240), None]);
+    assert_eq!(phase_lengths(&old, &one_more), [Some(240), None]);
     // Two replaced: the union holds 6 of 4, too many.
     let two_replaced = description(&[0, 1, 4, 5], &[&[0], &[1], &[4], &[5]]);
     assert_eq!(
-        phase_lengths(&old, &two_replaced, false),
+        phase_lengths(&old, &two_replaced),
         [Some(240), Some(240), None]
     );
 }
@@ -132,7 +133,7 @@ fn a_small_acyclic_union_crossfades_and_a_large_one_dips() {
 fn a_reordered_insert_dips_since_its_union_would_cycle() {
     let old = description(&[0, 1, 2], &[&[0, 1, 2]]);
     let reordered = description(&[0, 1, 2], &[&[0, 2, 1]]);
-    let compiled = compile(&old, &reordered, false, 1, CONTEXT);
+    let compiled = compile(&old, &reordered, 1, CONTEXT);
     let phases = &compiled.graph.phases;
     assert_eq!(phases.len(), 3);
     // The old order, every removed edge fading out; then the new order, every added edge fading in.
@@ -169,7 +170,7 @@ fn a_reordered_insert_dips_since_its_union_would_cycle() {
 fn a_dip_holds_the_events_of_its_new_nodes_through_its_first_phase() {
     let old = description(&[0, 1, 2, 3], &[&[0]]);
     let new = description(&[4, 5, 6, 7], &[&[4]]);
-    let compiled = compile(&old, &new, false, 1, CONTEXT);
+    let compiled = compile(&old, &new, 1, CONTEXT);
     let phases = &compiled.graph.phases;
     assert_eq!(phases.len(), 3);
     assert_eq!(
@@ -189,7 +190,7 @@ fn a_dip_holds_the_events_of_its_new_nodes_through_its_first_phase() {
 fn every_node_of_a_swap_has_channels_of_its_own() {
     let old = description(&[0, 1], &[&[0, 1]]);
     let new = description(&[1, 2], &[&[2, 1]]);
-    let compiled = compile(&old, &new, false, 1, CONTEXT);
+    let compiled = compile(&old, &new, 1, CONTEXT);
     // The playback channel, then one input for each of the three nodes; the same for outputs,
     // without capture.
     assert_eq!(compiled.input_channels, 4);

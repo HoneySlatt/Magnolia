@@ -15,6 +15,7 @@
     clippy::arithmetic_side_effects
 )]
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
 use jack::{AudioIn, AudioOut, Client, Control, Port, ProcessHandler, ProcessScope};
@@ -41,6 +42,8 @@ pub(crate) struct Callback {
     audio_thread_id: i32,
     /// The server's xruns already counted in the processor's statistics.
     xruns_counted: u64,
+    /// Whether this callback's own code panicked, outside the processor: silence from then on.
+    panicked: bool,
 }
 
 /// What a callback is made of.
@@ -67,6 +70,7 @@ impl Callback {
             frame_clock: FrameClock::default(),
             audio_thread_id: 0,
             xruns_counted: 0,
+            panicked: false,
         }
     }
 
@@ -128,8 +132,28 @@ impl Callback {
 impl ProcessHandler for Callback {
     /// One period. Real-time: no allocation, no lock, and no system call but the processor's wake
     /// of its collector; RealtimeSanitizer checks it (`tests/realtime_sanitizer.rs`).
+    ///
+    /// A panic in this callback's own code, outside the processor, which catches its own, is
+    /// caught here (ADR-0022): the callback writes silence from then on and returns `Continue`, so
+    /// that the client stays active and connected on both servers, and the handle reports it.
     #[cfg_attr(magnolia_rtsan, sanitize(realtime = "nonblocking"))]
     fn process(&mut self, client: &Client, scope: &ProcessScope) -> Control {
+        if !self.panicked {
+            let shared = Arc::clone(&self.shared);
+            self.panicked = !run_caught(&shared, || self.run_period(client, scope));
+        }
+        if self.panicked {
+            for port in &mut self.playback {
+                port.as_mut_slice(scope).fill(0.0);
+            }
+        }
+        Control::Continue
+    }
+}
+
+impl Callback {
+    /// One period's work, inside the process callback's catch.
+    fn run_period(&mut self, client: &Client, scope: &ProcessScope) {
         let entry = client.time();
         let cycle = scope.cycle_times().ok();
         self.swap_in_replacement();
@@ -165,7 +189,20 @@ impl ProcessHandler for Callback {
         {
             self.processor.stats().record_own_overrun();
         }
-        Control::Continue
+    }
+}
+
+/// Runs `period`, catching a panic: returns whether it ran to its end. On a panic, tells the handle
+/// through `shared`, and leaks the panic's payload rather than free it on the real-time thread:
+/// it happens once, after a bug (ADR-0022).
+fn run_caught(shared: &Shared, period: impl FnOnce()) -> bool {
+    match catch_unwind(AssertUnwindSafe(period)) {
+        Ok(()) => true,
+        Err(payload) => {
+            shared.set_callback_panicked();
+            std::mem::forget(payload);
+            false
+        }
     }
 }
 
@@ -255,7 +292,21 @@ impl FrameClock {
 
 #[cfg(test)]
 mod tests {
-    use super::{FrameClock, is_own_overrun};
+    use super::{FrameClock, Shared, is_own_overrun, run_caught};
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the test panics on purpose, off the real-time path"
+    )]
+    fn a_panic_in_the_callbacks_own_code_is_caught_and_reported() {
+        let shared = Shared::new(48_000);
+        assert!(run_caught(&shared, || {}), "a period that ends");
+        assert!(!shared.callback_panicked());
+        let ran_to_its_end = run_caught(&shared, || panic!("the callback's own code, on purpose"));
+        assert!(!ran_to_its_end);
+        assert!(shared.callback_panicked());
+    }
 
     #[test]
     fn an_own_overrun_ends_after_the_deadline_it_started_before_or_takes_a_period() {

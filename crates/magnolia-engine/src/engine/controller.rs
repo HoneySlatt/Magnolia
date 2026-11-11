@@ -335,9 +335,8 @@ impl Controller {
     /// sequence number, or `None` if the queue was full and the commit stays deferred.
     fn send_committed(&mut self) -> Option<u64> {
         let target = self.committed.take()?;
-        let first = self.next_sequence == 1;
         let sequence = self.next_sequence;
-        let compiled = compile(&self.sent, &target, first, sequence, self.context);
+        let compiled = compile(&self.sent, &target, sequence, self.context);
 
         let added = compiled.added;
         let nodes: Vec<(NodeId, Option<Box<dyn Node>>)> = added

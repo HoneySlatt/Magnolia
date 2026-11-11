@@ -32,9 +32,10 @@ tier, into [`measurements.md`](measurements.md).
   [ADR-0018](adr/0018-the-time-model.md), which amends ADR-0007: absolute positions are counted in
   time units, not samples. The figures are in
   [`measurements.md`](measurements.md#m12--the-time-model).
-- **M1.3, the JACK backend and the graph: built, 2026-11-11**, on the owner's decisions of that day
+- **M1.3, the JACK backend and the graph: built, 2026-11-11; waiting for the owner's measures by
+  hand**, on the owner's decisions of that day
   ([ADR-0019](adr/0019-the-sanitizers-nightly-code-behind-a-cfg.md) to
-  [ADR-0023](adr/0023-the-real-time-allowlist.md); `jack`, `rtrb` and `libc` taken; the
+  [ADR-0024](adr/0024-how-a-swap-avoids-a-click.md); `jack`, `rtrb` and `libc` taken; the
   [reference projects](reference-projects.md) adopted). Its checks pass; what only the owner's
   hardware can measure is [listed below](#m13--the-jack-backend-and-the-graph).
 - **Next: M1.4**, a session plays, on the owner's go.
@@ -45,7 +46,7 @@ tier, into [`measurements.md`](measurements.md).
 |---|---|---|
 | [M1.1](#m11--the-workspace-and-its-checks) | The Rust workspace builds and is checked in CI | Done |
 | [M1.2](#m12--the-time-model) | Positions, tempo, meter and timecode are exact | Done |
-| [M1.3](#m13--the-jack-backend-and-the-graph) | A graph of nodes plays through the JACK API, swapped without a click | Done; the owner's measures by hand pending |
+| [M1.3](#m13--the-jack-backend-and-the-graph) | A graph of nodes plays through the JACK API, swapped without a click | Built; waiting for the owner's measures by hand |
 | [M1.4](#m14--a-session-plays) | A test session of clips and MIDI plays from disk, delays compensated | Planned |
 | [M1.5](#m15--recording-and-monitoring) | A voice is recorded and monitored at low latency | Planned |
 | [M1.6](#m16--plugin-hosts) | Native CLAP and VST3 plugins play out of the engine's process and survive a crash | Planned |

@@ -79,9 +79,6 @@ impl Rig {
             client_name: "magnolia".to_owned(),
             server_name: Some(server.name.clone()),
             processor,
-            sample_rate: rate(),
-            capture_channels: capture,
-            playback_channels: playback,
         })
         .expect("the backend opens on the test's server");
         Self {

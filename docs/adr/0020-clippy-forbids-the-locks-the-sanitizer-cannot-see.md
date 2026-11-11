@@ -15,8 +15,8 @@ Measured on the pinned nightly in M1.1, it misses three things
 - an uncontended `std::sync::Mutex` or `RwLock`. On Linux, std's locks call the futex directly,
   without the C library, so the sanitizer sees them only when a lock is contended and waits;
 - `std::thread::sleep`, which calls `clock_nanosleep`, a call the sanitizer does not intercept;
-- the same for every std type built on those futexes: `Condvar`, `Barrier`, `OnceLock` and
-  `LazyLock` while another thread initialises them, the channels of `std::sync::mpsc`, and
+- the same for every std type built on those futexes: `Condvar`, `Barrier`, `Once`, `OnceLock`
+  and `LazyLock` while another thread initialises them, the channels of `std::sync::mpsc`, and
   `thread::park`.
 
 A lock that is never contended in a test can be contended on a user's machine, where it stalls the
@@ -28,8 +28,8 @@ prove that the real-time path takes no lock.
 The owner's choice of 2026-11-11.
 
 **Clippy forbids std's blocking types and calls in the engine's crates.** `clippy.toml` lists them
-under `disallowed-types` (`Mutex`, `RwLock`, `Condvar`, `Barrier`, `OnceLock`, `LazyLock`, the
-channels of `mpsc`) and `disallowed-methods` (`thread::sleep`, `thread::park`,
+under `disallowed-types` (`Mutex`, `RwLock`, `Condvar`, `Barrier`, `Once`, `OnceLock`, `LazyLock`,
+the channels of `mpsc`) and `disallowed-methods` (`thread::sleep`, `thread::park`,
 `thread::park_timeout`, `JoinHandle::join`). `scripts/check.sh` runs Clippy with warnings as errors,
 so a use fails CI.
 
@@ -53,7 +53,8 @@ runs on the real-time path, such as the interface, gets a `clippy.toml` of its o
 
 - Clippy reads only Magnolia's own code. A dependency that locks on the real-time path stays
   unseen: the `jack` crate takes a `Mutex` with `try_lock` in its process callback, which never
-  waits and is contended only while its client closes. Each dependency on the real-time path is
+  waits; when it is busy, as while the client closes or its buffer-size callback runs, the crate
+  skips the period and asks the server to stop calling it. Each dependency on the real-time path is
   read for this before it is taken.
 - The lint forbids a type everywhere in the crate, not only in real-time functions, so the threads
   that may block, such as the collector, carry exceptions in plain view.

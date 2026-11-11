@@ -25,7 +25,7 @@ interface, on uwui, is dark, dense, refined, accessible, drawn at 240 Hz and sti
 
 Accepted by the owner on 2026-11-06 ([ADR-0010](adr/0010-the-quality-bar.md)) and measured against
 the market since 2026-11-10 ([ADR-0014](adr/0014-the-quality-bar-measured-against-the-market.md)).
-Figures measured go to [`measurements.md`](measurements.md); only the check's times and the time model's conversions are measured yet.
+Figures measured go to [`measurements.md`](measurements.md), one section per milestone.
 
 ### How the bar works
 
@@ -83,7 +83,7 @@ project* is fixed in M1.3, one for each tier, and never tuned for afterwards: th
 | Engine efficiency | the processor's time per period on the reference project at most 1.1 times REAPER's on the same project, generated as an `.rpp` file | both programs' processor time, plugins alike | by hand at Stage 1's end |
 | Processing power | at least 0.9 times what REAPER holds running the plugin inside REAPER's own process, its default, at 64 and 128 frames; the figure at 32 frames recorded; revised on M1.6's prototype | DAWbench's method: instances of one plugin, then an instrument's voices, added until the first xrun or missed deadline | by hand at M1.6 and M1.9 |
 | Latency added | none: the round trip through Magnolia's monitoring path, plugin hosts in it, equals a direct loopback through the JACK API, to the sample | a loopback cable and `jack_iodelay`, each reopened several times | by hand |
-| The real-time path | no allocation, no lock, no system call outside the allowlist (futex, eventfd) | RealtimeSanitizer, the allowed calls suppressed by name | CI |
+| The real-time path | no allocation, no lock, no system call outside the allowlist ([ADR-0023](adr/0023-the-real-time-allowlist.md)) | RealtimeSanitizer, the allowed calls suppressed by the name of the function that makes them; Clippy against std's locks | CI |
 | A plugin's round trip | at least as good as yabridge's on the same plugin, per period and per plugin host | the bridge's benchmark | CI on test plugins; by hand under Wine with the owner's |
 | The Wine bridge's plugins | each plugin of the test set (the owner's Windows plugins, and the free Windows VST3 and CLAP plugins the owner installs) that works under yabridge loads, plays, opens its GUI, keeps its state and survives a kill; the list of results public | the test set | by hand at M1.7 and at each stage audit |
 | A plugin late or dead | a silent block, never an xrun; the deadline set in Stage 1 | a test plugin that hangs and one that crashes | CI |

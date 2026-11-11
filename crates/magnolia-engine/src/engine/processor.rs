@@ -28,7 +28,7 @@ use super::pool::{self, BufferPool};
 use crate::device::DeviceBuffers;
 use crate::node::{Event, ProcessContext, ProcessStatus};
 use crate::stats::EngineStats;
-use crate::time::SamplePosition;
+use crate::time::{SamplePosition, SampleRate};
 
 /// The engine's real-time half, made with its [`Controller`](super::Controller) by
 /// [`engine::new`](super::new).
@@ -37,6 +37,8 @@ use crate::time::SamplePosition;
 /// It is dropped off the real-time thread, when the backend closes; that ends the collector.
 pub struct Processor {
     stats: Arc<EngineStats>,
+    /// The engine's rate, at which the device must run.
+    sample_rate: SampleRate,
     /// The most frames a node is given at once: a period is cut into sub-blocks no longer.
     largest_block: usize,
     capture_channels: usize,
@@ -70,6 +72,7 @@ enum StepOutcome {
 /// The parts the engine builds a processor from.
 pub(crate) struct ProcessorParts {
     pub(crate) stats: Arc<EngineStats>,
+    pub(crate) sample_rate: SampleRate,
     pub(crate) largest_block: usize,
     pub(crate) capture_channels: usize,
     pub(crate) playback_channels: usize,
@@ -86,6 +89,7 @@ impl Processor {
     pub(crate) fn new(parts: ProcessorParts) -> Self {
         Self {
             stats: parts.stats,
+            sample_rate: parts.sample_rate,
             largest_block: parts.largest_block,
             capture_channels: parts.capture_channels,
             playback_channels: parts.playback_channels,
@@ -108,9 +112,19 @@ impl Processor {
         &self.stats
     }
 
-    /// The engine's capture and playback channels.
-    pub(crate) fn channels(&self) -> (usize, usize) {
-        (self.capture_channels, self.playback_channels)
+    /// The engine's rate: a backend runs the device at it, or refuses to play.
+    pub fn sample_rate(&self) -> SampleRate {
+        self.sample_rate
+    }
+
+    /// The engine's capture channels: a backend gives it as many device inputs.
+    pub fn capture_channels(&self) -> usize {
+        self.capture_channels
+    }
+
+    /// The engine's playback channels: a backend gives it as many device outputs.
+    pub fn playback_channels(&self) -> usize {
+        self.playback_channels
     }
 
     /// Processes one period: reads the device's capture buffers, fills its playback buffers.
@@ -191,10 +205,17 @@ impl Processor {
         if let Some(graph) = new_graph {
             let old = std::mem::replace(&mut self.graph, graph);
             self.garbage.release(Garbage::Graph(old));
-            self.phase = 0;
+            // Before the first period nothing has sounded, not even silence, so there is nothing to
+            // fade from: the graph starts at its steady phase. Once periods have played, a swap
+            // fades, the first commit's included (ADR-0024).
+            self.phase = if self.position == 0 {
+                self.graph.steady_index()
+            } else {
+                0
+            };
             self.phase_elapsed = 0;
             self.stats.publish_swap_applied(self.graph.sequence);
-            if self.graph.is_steady(0) {
+            if self.graph.is_steady(self.phase) {
                 self.reach_steady();
             }
         }

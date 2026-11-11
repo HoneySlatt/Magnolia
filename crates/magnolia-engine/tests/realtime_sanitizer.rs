@@ -120,7 +120,8 @@ fn pause() {
     thread::sleep(Duration::from_millis(100));
 }
 
-/// A lock held by a thread of its own until the process ends.
+/// A lock held by a thread of its own for five seconds, far longer than the case's wait takes to
+/// be stopped, then released, so that a build in which nothing stops the wait still ends.
 #[expect(
     clippy::disallowed_types,
     clippy::disallowed_methods,
@@ -133,9 +134,7 @@ fn held_lock() -> Arc<std::sync::Mutex<()>> {
     thread::spawn(move || {
         let _guard = holder_lock.lock().expect("the lock is new");
         holder_held.store(true, Ordering::Release);
-        loop {
-            thread::park();
-        }
+        thread::sleep(Duration::from_secs(5));
     });
     while !held.load(Ordering::Acquire) {
         thread::yield_now();
@@ -542,8 +541,13 @@ fn main() -> ExitCode {
     if let Some(case) = env::var_os(CASE_VARIABLE) {
         return run_case(&case.to_string_lossy());
     }
+    // Without the sanitizer, nothing stops `wake_then_wait`'s wait: its lock is held for seconds.
+    // A build that does not stop an allocation says so at once and runs nothing else.
+    if !check("allocate", Expected::Stopped) {
+        println!("  RealtimeSanitizer is not active in this build; the other cases are not run");
+        return ExitCode::FAILURE;
+    }
     let results = [
-        check("allocate", Expected::Stopped),
         check("halve", Expected::Silent),
         check("convert", Expected::Silent),
         check("engine", Expected::Silent),

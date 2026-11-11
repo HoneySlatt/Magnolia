@@ -128,9 +128,6 @@ fn play_the_backend(server: &str) {
         client_name: "magnolia".to_owned(),
         server_name: Some(server.to_owned()),
         processor,
-        sample_rate: rate,
-        capture_channels: 1,
-        playback_channels: 2,
     })
     .expect("the backend opens on the test's server");
     // The dummy driver's capture reaches the engine, its playback takes the engine's.

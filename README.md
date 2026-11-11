@@ -14,8 +14,8 @@ loops and stems.
 
 **Designed; the engine being built.** The direction, the quality bar and the first decisions were
 taken on 2026-11-06, the quality bar measured against the market on 2026-11-10. The Rust workspace
-and its checks exist, the engine's time model, and a graph of nodes that plays through the JACK API,
-on PipeWire and JACK2, from an example program. The first stage builds the audio engine and plugin
+and its checks exist, the engine's time model, and a graph of nodes that plays through the JACK API
+from an example program: tested on JACK2, built for PipeWire too, which the owner checks by ear. The first stage builds the audio engine and plugin
 hosting, without an interface; the interface comes at Stage 3, on
 [uwui](https://github.com/HoneySlatt/uwui), once a stable release of uwui holds what Magnolia needs.
 Magnolia is a later client of uwui, not one of the programs of its first stage.

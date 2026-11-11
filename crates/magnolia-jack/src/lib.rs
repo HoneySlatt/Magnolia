@@ -30,9 +30,6 @@
 //!     client_name: "magnolia".to_owned(),
 //!     server_name: None,
 //!     processor,
-//!     sample_rate: rate,
-//!     capture_channels: 0,
-//!     playback_channels: 2,
 //! })?;
 //! println!("{}", backend.realtime_status());
 //! let processor = backend.close()?;
@@ -47,5 +44,5 @@ mod callback;
 mod notifications;
 mod realtime;
 
-pub use backend::{CloseError, ConnectError, JackBackend, JackOptions, OpenError};
+pub use backend::{CloseError, ConnectError, JackBackend, JackOptions, OpenError, ReplaceError};
 pub use realtime::{AudioServer, RealtimePolicy, RealtimeStatus, ThreadScheduling};

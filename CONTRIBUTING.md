@@ -143,4 +143,4 @@ The fuzz targets' own formatting, lints and dependencies are checked with the sa
 `--manifest-path crates/magnolia-engine/fuzz/Cargo.toml`.
 
 How long a full check takes, and its budget, are in
-[`docs/measurements.md`](docs/measurements.md#m12--the-time-model).
+[`docs/measurements.md`](docs/measurements.md#m13--the-jack-backend-and-the-graph).

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use jack::{AsyncClient, AudioIn, AudioOut, Client, ClientOptions, ClientStatus, PortFlags};
 use magnolia_engine::engine::Processor;
-use magnolia_engine::time::SampleRate;
+
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::callback::{Callback, CallbackParts};
@@ -22,14 +22,10 @@ pub struct JackOptions {
     pub client_name: String,
     /// The server to connect to, by name; `None` for the default one.
     pub server_name: Option<String>,
-    /// The engine's processor, which the audio thread will call once a period.
+    /// The engine's processor, which the audio thread will call once a period. The server must
+    /// run at its rate; the client gets one input port per capture channel (`capture_1` and on)
+    /// and one output port per playback channel (`playback_1` and on).
     pub processor: Processor,
-    /// The engine's rate: the server must run at it.
-    pub sample_rate: SampleRate,
-    /// The engine's capture channels: one input port each, `capture_1` and on.
-    pub capture_channels: usize,
-    /// The engine's playback channels: one output port each, `playback_1` and on.
-    pub playback_channels: usize,
 }
 
 /// Plays an engine's [`Processor`] through the JACK API, on PipeWire or on JACK2.
@@ -70,10 +66,9 @@ impl JackBackend {
             client_name,
             server_name,
             processor,
-            sample_rate,
-            capture_channels,
-            playback_channels,
         } = options;
+        let capture_channels = processor.capture_channels();
+        let playback_channels = processor.playback_channels();
         let opened = match &server_name {
             Some(server) => {
                 Client::new_with_server_name(&client_name, server, ClientOptions::NO_START_SERVER)
@@ -83,7 +78,7 @@ impl JackBackend {
         let (client, _) =
             opened.map_err(|error| OpenError::from_client_error(error, server_name))?;
 
-        let engine_rate = sample_rate.hertz();
+        let engine_rate = processor.sample_rate().hertz();
         let server_rate = client.sample_rate();
         if server_rate != engine_rate {
             return Err(OpenError::RateDiffers {
@@ -173,10 +168,11 @@ impl JackBackend {
         self.shared.server_rate()
     }
 
-    /// Whether the server's rate now differs from the engine's: the backend then writes silence
-    /// without calling the processor, until the rate is back.
-    pub fn rate_differs(&self) -> bool {
-        self.shared.server_rate() != self.engine_rate
+    /// Whether the backend's own callback code panicked, outside the processor, which catches its
+    /// own panics: the callback then writes silence every period, the client still active and
+    /// connected (ADR-0022). A new processor does not help; close and open the backend again.
+    pub fn callback_panicked(&self) -> bool {
+        self.shared.callback_panicked()
     }
 
     /// Whether the server shut the client down, as when it stopped or died: the processor is no
@@ -241,13 +237,20 @@ impl JackBackend {
     /// Use it to rebuild a poisoned engine
     /// ([ADR-0022](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0022-a-panic-on-the-real-time-path-gives-silence.md)):
     /// make a new engine at the same rate, hand its processor here, and commit the graph again on
-    /// its controller. Gives the processor back, unused and boxed, while a replacement handed
-    /// earlier still waits for the audio thread.
-    pub fn replace_processor(&mut self, processor: Processor) -> Result<(), Box<Processor>> {
+    /// its controller. Gives the processor back, unused, when its rate or channels differ from
+    /// the one the client was opened for, or while a replacement handed earlier still waits for
+    /// the audio thread.
+    pub fn replace_processor(&mut self, processor: Processor) -> Result<(), ReplaceError> {
         self.poll();
+        let matches = processor.sample_rate().hertz() == self.engine_rate
+            && processor.capture_channels() == self.capture_ports.len()
+            && processor.playback_channels() == self.playback_ports.len();
+        if !matches {
+            return Err(ReplaceError::Differs(Box::new(processor)));
+        }
         self.replacements
             .push(Box::new(processor))
-            .map_err(|rtrb::PushError::Full(processor)| processor)
+            .map_err(|rtrb::PushError::Full(processor)| ReplaceError::Busy(processor))
     }
 
     /// Drops, on the caller's thread, the processors the audio thread has replaced. Never blocks.
@@ -383,10 +386,54 @@ pub enum CloseError {
     /// point into the callback's state, the `jack` crate keeps that state, the processor with it,
     /// for the rest of the process's life: its memory and its collector thread are not freed.
     NotDeactivated,
-    /// The backend's own callback code panicked outside the processor, which catches its own
-    /// panics; the `jack` crate then stopped calling it and dropped the processor.
+    /// The callback panicked where even its own catch could not: while writing silence after a
+    /// first panic. The `jack` crate then stopped calling it and dropped the processor.
     CallbackPanicked,
 }
+
+/// Why [`JackBackend::replace_processor`] gave a processor back, unused.
+pub enum ReplaceError {
+    /// Its rate or its channels differ from those the client was opened for: open a new backend
+    /// for it instead.
+    Differs(Box<Processor>),
+    /// A replacement handed earlier still waits for the audio thread: try again after a period.
+    Busy(Box<Processor>),
+}
+
+impl ReplaceError {
+    /// The processor given back.
+    pub fn into_processor(self) -> Processor {
+        match self {
+            Self::Differs(processor) | Self::Busy(processor) => *processor,
+        }
+    }
+}
+
+impl fmt::Debug for ReplaceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Differs(_) => "ReplaceError::Differs(..)",
+            Self::Busy(_) => "ReplaceError::Busy(..)",
+        })
+    }
+}
+
+impl fmt::Display for ReplaceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Differs(_) => {
+                "the new processor's rate or channels differ from those the JACK client was \
+                 opened for; open a new backend for it"
+            }
+            Self::Busy(_) => {
+                "a processor handed earlier still waits for the audio thread; try again after a \
+                 period"
+            }
+        })
+    }
+}
+
+impl std::error::Error for ReplaceError {}
 
 impl fmt::Display for CloseError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {

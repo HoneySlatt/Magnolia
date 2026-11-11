@@ -8,7 +8,7 @@ use magnolia_engine::engine::{Commit, Destination, Source};
 use magnolia_engine::nodes::{Gain, Sine};
 
 use crate::support::{
-    FADE, Rig, Switch, assert_matches, fade_in, fade_out, largest_step, rate, sine,
+    Constant, FADE, Rig, Switch, assert_matches, fade_in, fade_out, largest_step, rate, sine,
 };
 
 /// The periods each swap is played at.
@@ -380,4 +380,41 @@ fn a_swap_committed_during_a_fade_waits_for_it_then_poll_sends_it() {
             assert_matches(&played, &expected, TOLERANCE, &what);
         }
     }
+}
+
+#[test]
+fn a_first_commit_after_silent_periods_fades_in_and_one_before_the_first_period_starts_at_once() {
+    // After periods of silence, the first graph's source fades in rather than step in.
+    let mut rig = Rig::new(0, 1);
+    let silence = rig.play(&[64, 64]);
+    assert!(silence.iter().all(|&sample| sample == 0.0));
+    let one = rig.add(Constant::new(1.0));
+    rig.controller
+        .connect(Source::Node(one, 0), Destination::Playback(0));
+    rig.controller.commit().unwrap();
+    let played = rig.play_until_steady(64);
+    let expected: Vec<f64> = (0..played.len())
+        .map(|index| {
+            if index < FADE {
+                fade_in(index, FADE)
+            } else {
+                1.0
+            }
+        })
+        .collect();
+    assert_matches(&played, &expected, 1e-6, "a first commit after silence");
+
+    // Committed before any period has played, there is nothing to fade from.
+    let mut rig = Rig::new(0, 1);
+    let one = rig.add(Constant::new(1.0));
+    rig.controller
+        .connect(Source::Node(one, 0), Destination::Playback(0));
+    rig.controller.commit().unwrap();
+    let played = rig.play(&[64]);
+    assert_matches(
+        &played,
+        &[1.0; 64],
+        0.0,
+        "a first commit before the first period",
+    );
 }
