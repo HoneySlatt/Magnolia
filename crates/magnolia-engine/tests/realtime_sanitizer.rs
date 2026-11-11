@@ -75,6 +75,10 @@ fn tempo_map() -> TempoMap {
 
 /// Runs `work` on a new thread and waits for it, as the audio thread will run. Only the functions
 /// marked `nonblocking` that `work` calls run in the real-time context; the rest of `work` does not.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test's main thread waits for the case's thread; it never runs in a real-time context"
+)]
 fn on_new_thread(work: impl FnOnce() + Send + 'static) {
     thread::spawn(work)
         .join()

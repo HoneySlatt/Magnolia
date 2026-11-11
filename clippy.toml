@@ -1,0 +1,27 @@
+# What RealtimeSanitizer cannot see on the real-time path: std's locks, uncontended, and its sleeps
+# and blocking waits (ADR-0020). Every crate of the workspace is the engine's so far. A use off the
+# real-time path carries `#[expect(clippy::disallowed_types)]` or `#[expect(clippy::disallowed_methods)]`
+# with a `reason` that names its thread.
+
+disallowed-types = [
+    { path = "std::sync::Mutex", reason = "locks: never on the real-time path (ADR-0020)" },
+    { path = "std::sync::RwLock", reason = "locks: never on the real-time path (ADR-0020)" },
+    { path = "std::sync::Condvar", reason = "blocks: never on the real-time path (ADR-0020)" },
+    { path = "std::sync::Barrier", reason = "blocks: never on the real-time path (ADR-0020)" },
+    { path = "std::sync::OnceLock", reason = "blocks while another thread initialises it (ADR-0020)" },
+    { path = "std::sync::LazyLock", reason = "blocks while another thread initialises it (ADR-0020)" },
+    { path = "std::sync::mpsc::Sender", reason = "may lock and block; use rtrb (ADR-0020)" },
+    { path = "std::sync::mpsc::SyncSender", reason = "may lock and block; use rtrb (ADR-0020)" },
+    { path = "std::sync::mpsc::Receiver", reason = "may lock and block; use rtrb (ADR-0020)" },
+]
+
+# A type that is only inferred is not caught above, so the channels' constructors are listed here.
+disallowed-methods = [
+    { path = "std::thread::sleep", reason = "sleeps: never on the real-time path (ADR-0020)" },
+    { path = "std::thread::park", reason = "blocks: never on the real-time path (ADR-0020)" },
+    { path = "std::thread::park_timeout", reason = "blocks: never on the real-time path (ADR-0020)" },
+    { path = "std::thread::JoinHandle::join", reason = "blocks: never on the real-time path (ADR-0020)" },
+    { path = "std::thread::ScopedJoinHandle::join", reason = "blocks: never on the real-time path (ADR-0020)" },
+    { path = "std::sync::mpsc::channel", reason = "may lock and block; use rtrb (ADR-0020)" },
+    { path = "std::sync::mpsc::sync_channel", reason = "may lock and block; use rtrb (ADR-0020)" },
+]

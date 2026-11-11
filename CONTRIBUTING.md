@@ -66,7 +66,7 @@ fails. CI runs it unchanged, on each push to `main`, each pull request and once 
 | AGENTS.md length | `AGENTS.md` under 1,500 words | `wc -w AGENTS.md` |
 | scripts | The scripts' syntax | `for script in scripts/*.sh; do bash -n "$script"; done` |
 | formatting | rustfmt's format, the fuzz targets' too | `cargo fmt --all --check` |
-| lints | Clippy and the compiler's lints of `Cargo.toml`, warnings as errors, the fuzz targets' too | `cargo clippy --workspace --all-targets --locked -- -D warnings` |
+| lints | Clippy and the compiler's lints of `Cargo.toml`, warnings as errors, the fuzz targets' too; `clippy.toml` forbids std's locks and blocking waits ([ADR-0020](docs/adr/0020-clippy-forbids-the-locks-the-sanitizer-cannot-see.md)) | `cargo clippy --workspace --all-targets --locked -- -D warnings` |
 | tests | Every test on the stable toolchain | `cargo test --workspace --locked` |
 | documentation | rustdoc, warnings as errors | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked` |
 | dependencies | Licenses, RustSec advisories and sources, by `deny.toml`, the fuzz targets' too; fetches the advisories | `cargo deny --locked check` |

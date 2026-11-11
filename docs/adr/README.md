@@ -28,3 +28,4 @@ New ADRs copy [`0000-template.md`](0000-template.md) and take the next free numb
 | [0017](0017-macos-a-candidate-stage-after-stage-4.md) | macOS, a candidate stage after Stage 4 | Accepted; amends 0001 |
 | [0018](0018-the-time-model.md) | The time model | Accepted; amends 0007 |
 | [0019](0019-the-sanitizers-nightly-code-behind-a-cfg.md) | The sanitizer's nightly code behind a cfg | Accepted; amends 0013 |
+| [0020](0020-clippy-forbids-the-locks-the-sanitizer-cannot-see.md) | Clippy forbids the locks the sanitizer cannot see | Accepted |

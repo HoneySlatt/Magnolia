@@ -193,11 +193,6 @@ milestone first needs it.
 
 ## Known debt
 
-- **RealtimeSanitizer does not see every lock.** It stops `malloc`, `free` and system calls inside
-  a marked function, but not an uncontended `std::sync::Mutex` or `RwLock`, nor `thread::sleep`:
-  std's locks on Linux use a futex directly, caught only when contended. What covers the gap, such
-  as Clippy's `disallowed-methods` on std's locks and sleep in real-time code, is decided by an ADR
-  before M1.3 ([ARCHITECTURE.md](ARCHITECTURE.md#checking-the-real-time-path)).
 - **The sanitizer's reports name addresses, not functions**, until the shell has a symbolizer or the
   runs set `allow_addr2line=true`. ADR-0007's allowlist, suppressed by name, needs names: settled in
   M1.3, taking care that a suppression of `syscall` does not hide a blocking wait.

@@ -60,8 +60,10 @@ not there.
 Its limit, measured on the pinned nightly: an uncontended `std::sync::Mutex` or `RwLock` and
 `thread::sleep` pass unreported. std's locks on Linux use a futex directly, which the sanitizer sees
 only when a lock is contended and waits; `thread::sleep` calls `clock_nanosleep`, which it does not
-intercept. A clean run therefore does not prove that the real-time path takes no lock. What covers
-the gap is known debt in the [PLAN](PLAN.md#known-debt).
+intercept. A clean run therefore does not prove that the real-time path takes no lock. Clippy
+covers the gap: `clippy.toml` forbids std's locks, sleeps and blocking waits in the engine's crates,
+and each use off the real-time path carries an `#[expect]` that names its thread
+([ADR-0020](adr/0020-clippy-forbids-the-locks-the-sanitizer-cannot-see.md)).
 
 Because the sanitizer ends the process, a test of it runs each case in a child process and reads
 its exit status and standard error: `crates/magnolia-engine/tests/realtime_sanitizer.rs`. One of its
