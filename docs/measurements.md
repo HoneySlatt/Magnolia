@@ -142,7 +142,9 @@ average 8 to 17.
 | A change to the engine, the example rebuilt and playing on a dummy JACK2 | 0.77 s | 2 s |
 | A full check from nothing, one run | 93.6 s | 3 min |
 | A full check, nothing changed, one run | 74.7 s | — |
+| The CI job | 2 min 53 s | 20 min |
 
-The 2 s budget asks for "a session without plugins": until M1.4 plays sessions, the example's sine
+The CI job's time is that of run 43022262682, of commit `c517087`, one run; the JACK backend's tests
+ran there on JACK2's dummy driver. The 2 s budget asks for "a session without plugins": until M1.4 plays sessions, the example's sine
 stands in for one. A check with nothing changed is mostly the fuzzing (40 s), the JACK backend's
 tests, which play in real time on their dummy servers, and the release build of the page-fault test.
