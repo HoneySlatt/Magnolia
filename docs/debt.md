@@ -49,6 +49,15 @@ stage's audit triages the whole list.
   `load/budget.rs` against `engine/compensation.rs`) and its rounding of streams and buffers: a
   change to either must change both until the engine exposes its own estimate; Stage 2's project
   replaces the test session.
+- **`JackBackend::close` stalls on a JACK2 server started with `jackd -S`**: the `jack` crate
+  invalidates its callbacks before it deactivates the client, so a cycle in between ends the
+  client's thread and a synchronous server waits for it, then may refuse to deactivate it
+  (`NotDeactivated`, the processor lost). Fixing it means bypassing the crate's `AsyncClient`, as
+  the first item does ([ARCHITECTURE](ARCHITECTURE.md#the-jack-backend)).
+- **The null through JACK tells a period copied mid-period by x86's ordering of stores and loads**
+  (`crates/magnolia-jack/tests/jack/session.rs`): to revisit when CI runs on another architecture.
+- **`magnolia play` ends at once on Ctrl-C**, with no fade and no figures: handling the signal needs
+  `unsafe` or a dependency; M1.8's command surface decides.
 - **Paths without a test**: a generation mismatch (`processor.rs`), and the silence the JACK callback
   writes while the server's rate differs from the engine's, since a JACK2 server cannot change its
   rate while it runs.
