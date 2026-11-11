@@ -128,6 +128,10 @@ milestone first needs it.
 - **Build order**: the `time` module's no-panic lints; events (ADR-0027); compensation; the
   transport; WAV; the disk reader and the players; the test nodes; the session, its loader, render
   and generator; the command line; the null, then the measures.
+- **Where it stands**: built and in `main`: the `time` lints, events, compensation, WAV, MIDI files,
+  the transport and MIDI sources with `TestSynth`. Next: the disk reader and the audio player; then
+  the session file, its loader, render and generator; the command line; the nulls through JACK; the
+  measures.
 
 ### M1.5 — Recording and monitoring
 
