@@ -121,8 +121,13 @@ fn parse_play(arguments: &[OsString]) -> Result<PlayOptions, UsageError> {
         };
         match option {
             "--server" => {
-                let name = value(&mut arguments, option)?.to_owned();
-                set_once(&mut server, option, name)?;
+                let name = value(&mut arguments, option)?;
+                if name.is_empty() {
+                    return Err(UsageError(
+                        "--server needs a server's name, not an empty one".to_owned(),
+                    ));
+                }
+                set_once(&mut server, option, name.to_owned())?;
             }
             "--connect" => set_once(&mut connect, option, ())?,
             "--from" => {
@@ -442,7 +447,7 @@ mod tests {
 
     #[test]
     fn each_misuse_is_said_plainly() {
-        let cases: [(&[&str], &str); 18] = [
+        let cases: [(&[&str], &str); 19] = [
             (&[], "no command given"),
             (&["paly", "session.json"], "unknown command \"paly\""),
             (&["play"], "play needs a session file"),
@@ -456,6 +461,10 @@ mod tests {
                 "play has no option \"--block\"",
             ),
             (&["play", "a.json", "--server"], "--server needs a value"),
+            (
+                &["play", "a.json", "--server", ""],
+                "--server needs a server's name, not an empty one",
+            ),
             (
                 &["play", "a.json", "--server", "--connect"],
                 "--server needs a value, not the option \"--connect\"",

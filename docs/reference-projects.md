@@ -102,9 +102,9 @@ their reverb will go; the other plugins' places hold nothing yet. Rendered offli
 peaks at -3.0 dBFS in the lowest tier's project and -4.3 dBFS in the high tier's. The live input of
 the high tier comes with recording (M1.5).
 
-To render one offline into a WAV file of floats:
+To render one offline into a WAV file of floats, with the [command
+line](ARCHITECTURE.md#the-command-line):
 
 ```sh
-cargo run --release -p magnolia-session --example render -- /tmp/magnolia-lowest/session.json \
-    /tmp/magnolia-lowest.wav
+cargo run --release -p magnolia-cli -- render /tmp/magnolia-lowest/session.json /tmp/magnolia-lowest.wav
 ```

@@ -574,6 +574,14 @@ PipeWire, its locked-process default keeps the two from running at once, as far 
 notification locks a mutex and may allocate, on JACK2's notification thread or, on PipeWire, while
 the process cycle is held. Its `log` feature is off, so libjack's messages go to standard error.
 
+On deactivation, as in `JackBackend::close`, the crate marks its callbacks invalid before it calls
+`jack_deactivate`, so a cycle that the server runs in between returns `Quit` (read in
+`client/async_client.rs` and `client/callbacks.rs` of `jack` 0.14). A JACK2 server in its default,
+asynchronous mode goes on. One in synchronous mode, `jackd -S`, waits for that client until ten
+times its client timeout: measured with `-t 5000`, a stall of 50 s at closing. With the default
+timeout, the deactivation's own wait gives up first, and `close` returns
+`CloseError::NotDeactivated`.
+
 ### Its tests
 
 `crates/magnolia-jack/tests/jack/` runs each behaviour on a JACK2 server of its own, `jackd -n
@@ -586,13 +594,15 @@ the gap counters show a skipped cycle, five times at most.
 
 `tests/jack/session.rs` is the null through JACK: the small test session, played by a
 `SessionPlayer` through the backend at 64 and at 256 frames, equals its offline render to the bit
-from the play's first audible sample. Its recorder reads, in each period, the engine sample at
-which Magnolia's period started (`EngineStats::block_start`): JACK runs it after Magnolia, whose
-outputs it reads, so the recording is aligned on the engine's own samples, and the first audible
-sample is where `EngineStats::play_start` says. A take lasts nine seconds, in which the default,
-asynchronous server skips a cycle every few seconds at 64 frames without real time; so its server
-runs in JACK2's synchronous mode, `-S`, which waits for a late client and reports an xrun instead,
-with a client timeout of 5 s, `-t 5000`, which a loaded machine needs there.
+from the play's first audible sample, and is silent before it. Its recorder keeps, with each
+period, the engine sample at which Magnolia's period started (`EngineStats::block_start`): JACK
+runs it after Magnolia, whose outputs it reads, so each period is compared with the render where
+the engine says it lies, and the first audible sample is where `EngineStats::play_start` says. A
+period Magnolia was playing while the recorder copied it, seen by the engine's count of periods
+and its block start, is set aside. A cycle the server skips leaves a hole or a repeat, never a
+period out of place; without real time at 64 frames, the server skips cycles every few seconds, and
+a take lasts nine. So takes are played until each sample of the render has been heard in at least
+one, five takes at most.
 
 ## The test session
 
@@ -748,8 +758,9 @@ each is one plain sentence on standard error, and bad arguments or a bad session
 Seconds, as `--from 1.5`, are read exactly into time units, digits and a fraction, then placed on
 the session's samples by `place`.
 
-`magnolia render <session.json> <out.wav> [--block FRAMES]` runs [`render`](#the-offline-render)
-into a file it creates, never over one, and removes that file when the render fails.
+`magnolia render <session.json> <out.wav> [--block FRAMES]` runs
+[`render_to_file`](#the-offline-render): the file appears whole or not at all, never over another.
+It prints the frames, the time taken and the memory the session asks for, estimated.
 
 `magnolia play <session.json> [--server NAME] [--connect] [--from SECONDS] [--seconds N]`
 (`play.rs`):

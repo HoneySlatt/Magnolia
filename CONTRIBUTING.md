@@ -55,10 +55,10 @@ server, a test starts one under the same name and stops it cleanly, which frees 
 the socket and semaphores named after that server (`tests/common/mod.rs`).
 
 The null through JACK (`tests/jack/session.rs`) plays the small test session for nine seconds at 64
-and at 256 frames. Its server runs in JACK2's synchronous mode with a client timeout of 5 s, `-S -t
-5000` before `-d`: without real time at 64 frames, the default mode skips a client's cycle every few
-seconds, which spoils a take, while the synchronous mode waits for a late client and reports an
-xrun instead (`Settings` in `tests/common/mod.rs` says why the timeout).
+and at 256 frames, on the same servers. Without real time at 64 frames, a server skips a client's
+cycle every few seconds; the test then plays the session again, until each sample has been
+compared in at least one take, five takes at most. With `-- --nocapture`, it prints each take's skipped cycles,
+the samples not yet heard and how long closing its clients took.
 
 The command line's tests (`crates/magnolia-cli/tests/cli/`) start their servers the same way,
 through the same `tests/common/mod.rs`, and refuse PipeWire's libjack too.
@@ -97,19 +97,20 @@ cargo run --release -p magnolia-session --example generate -- lowest /tmp/magnol
 cargo run --release -p magnolia-session --example generate -- high /tmp/magnolia-high
 ```
 
-Both print what they wrote and how long it took; the render also prints the memory the session
-asks for, which may not pass 1 GiB. The render never writes over a file, and one that fails leaves
-nothing behind. Delete the folders afterwards: nothing cleans them.
+Each prints what it wrote and how long it took. Delete the folders afterwards: nothing cleans them.
 
 ### Playing and rendering a session
 
 The command line, `magnolia` ([ARCHITECTURE](docs/ARCHITECTURE.md#the-command-line)), renders a
 session offline, from its start to its last clip's end and one second of tail, into a WAV file of
-32-bit floats it creates, never over a file, in blocks of 4,096 frames or `--block N`:
+32-bit floats it creates, in blocks of 4,096 frames or `--block N`:
 
 ```sh
 cargo run --release -p magnolia-cli -- render /tmp/magnolia-small/session.json /tmp/magnolia-small.wav
 ```
+
+It never writes over a file, and a render that fails leaves nothing behind. It prints what it
+wrote, how long it took, and the memory the session asks for, estimated, which may not pass 1 GiB.
 
 It plays one through JACK, on PipeWire through `pw-jack`, connected to the sound card:
 

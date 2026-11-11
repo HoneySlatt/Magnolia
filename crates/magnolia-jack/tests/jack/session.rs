@@ -1,18 +1,22 @@
 //! The null through JACK: the small test session, played by a `SessionPlayer` through the backend
 //! on the test's own server, at 64 and at 256 frames, and recorded by a plain JACK client, equals
-//! its offline render to the bit from the play's first audible sample, without a disk underrun.
+//! its offline render to the bit at every sample from the play's first audible one, silent before
+//! it, without a disk underrun.
 //!
-//! The recorder reads, in each period, the engine sample at which Magnolia's processor started
-//! that period: JACK runs the recorder after Magnolia in each cycle, since it reads Magnolia's
-//! outputs. So the recording is aligned to the engine's samples, and the play's first audible
-//! sample is where the engine says it is, not where the signal seems to start.
+//! The recorder keeps, with each period, the engine sample at which Magnolia's processor started
+//! the period it copied: JACK runs the recorder after Magnolia in each cycle, since it reads
+//! Magnolia's outputs. So every period recorded is compared with the render where the engine says
+//! it lies, not where the signal seems to start. A cycle the server skips, for Magnolia or for the
+//! recorder, leaves a hole or a repeat in the recording, never a period out of place: without real
+//! time at 64 frames, the server skips a cycle every few seconds, and a take lasts nine. So takes
+//! are played until each sample of the render has been heard in at least one, five takes at most.
 
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use jack::{
     AsyncClient, AudioIn, Client, ClientOptions, Control, Port, ProcessHandler, ProcessScope,
@@ -24,12 +28,15 @@ use magnolia_jack::{JackBackend, JackOptions};
 use magnolia_session::generate::{Kind, generate};
 use magnolia_session::{Session, SessionPlayer, render};
 
-use crate::common::{Server, Settings};
-use crate::support::{Gaps, Take, first_unbroken_take, one_at_a_time, wait_for};
+use crate::common::Server;
+use crate::support::{Gaps, one_at_a_time, wait_for};
 
 /// What the recorder may record before the play's first audible sample: the disk reader's
 /// priming and the pre-roll, far below 10 seconds at 48 kHz.
 const LEAD: usize = 480_000;
+
+/// How many takes may be played, at most, until every sample of the render has been heard.
+const TAKES: usize = 5;
 
 #[test]
 fn the_small_session_plays_through_jack_at_64_frames_to_the_bit_what_it_renders() {
@@ -55,64 +62,95 @@ fn plays_through_jack_what_it_renders(period: u32) {
         "every channel of the render sounds"
     );
 
-    let played = first_unbroken_take(|| play_through_jack(&session, period, frames));
-
-    assert_eq!(played.disk_underruns, 0, "at {period} frames");
-    assert_eq!(played.channels.len(), rendered.len(), "the playback ports");
-    // Each period recorded follows on from the one before, in the engine's samples: the recorded
-    // sample `i` is the engine's sample `first + i`.
-    for (index, pair) in played.period_starts.windows(2).enumerate() {
-        assert_eq!(
-            pair[1] - pair[0],
-            i64::from(period),
-            "the recorded period {index} is followed by engine sample {}, not the next",
-            pair[1]
+    let mut heard = vec![false; frames];
+    let mut skipped = Vec::new();
+    for take in 1..=TAKES {
+        let played = play_through_jack(&session, period, frames);
+        assert_eq!(played.disk_underruns, 0, "at {period} frames, take {take}");
+        assert_eq!(played.channels.len(), rendered.len(), "the playback ports");
+        compare(&played, &rendered, period, &mut heard);
+        skipped.push(played.skipped_cycles);
+        let unheard = heard.iter().filter(|&&heard| !heard).count();
+        let set_aside = played.period_starts.iter().filter(|start| start.is_none());
+        eprintln!(
+            "the null at {period} frames, take {take}: {} cycles skipped, {} of {} periods set \
+             aside, {unheard} samples not yet heard; torn down in {:?}",
+            played.skipped_cycles,
+            set_aside.count(),
+            played.period_starts.len(),
+            played.teardown
         );
+        if unheard == 0 {
+            return;
+        }
     }
-    let first = played.period_starts[0];
-    let audible = usize::try_from(played.audible_at - first)
-        .expect("the recording started before the play's first audible sample");
-    for (channel, (recorded, rendered)) in played.channels.iter().zip(&rendered).enumerate() {
-        assert!(
-            recorded[..audible].iter().all(|&sample| sample == 0.0),
-            "channel {channel} sounded before the play's first audible sample"
-        );
-        let heard = &recorded[audible..audible + frames];
-        if let Some(frame) = heard
-            .iter()
-            .zip(rendered)
-            .position(|(heard, rendered)| heard.to_bits() != rendered.to_bits())
-        {
-            panic!(
-                "at {period} frames, channel {channel}, frame {frame} of the play: {} where {} was \
-                 rendered",
-                heard[frame], rendered[frame]
-            );
+    let unheard = heard.iter().filter(|&&heard| !heard).count();
+    panic!(
+        "after {TAKES} takes at {period} frames, {unheard} samples of the render were never \
+         heard; the server skipped cycles in each: {skipped:?}"
+    );
+}
+
+/// Compares every period a take kept with the render, at the timeline sample its engine sample
+/// gives: silent before the play's first audible sample, the render to the bit from there. Marks
+/// the render's samples heard.
+fn compare(played: &Played, rendered: &[Vec<f32>], period: u32, heard: &mut [bool]) {
+    let period = period as usize;
+    for (index, start) in played.period_starts.iter().enumerate() {
+        // A period Magnolia was playing while the recorder copied it was not kept.
+        let Some(start) = *start else {
+            continue;
+        };
+        for frame in 0..period {
+            let timeline = start + frame as i64 - played.audible_at;
+            for (channel, recorded) in played.channels.iter().enumerate() {
+                let sample = recorded[index * period + frame];
+                match usize::try_from(timeline) {
+                    Err(_) => assert!(
+                        sample == 0.0,
+                        "channel {channel} sounded {} samples before the play's first audible \
+                         one, at {period} frames",
+                        -timeline
+                    ),
+                    Ok(at) if at < heard.len() => assert!(
+                        sample.to_bits() == rendered[channel][at].to_bits(),
+                        "at {period} frames, channel {channel}, sample {at} of the play: {sample} \
+                         where {} was rendered",
+                        rendered[channel][at]
+                    ),
+                    Ok(_) => {}
+                }
+            }
+            if let Ok(at) = usize::try_from(timeline)
+                && at < heard.len()
+            {
+                heard[at] = true;
+            }
         }
     }
 }
 
-/// What a take recorded, and what the engine said of it.
+/// What a take recorded, and what the engine and the server said of it.
 struct Played {
-    /// Each playback channel, from the first period recorded.
+    /// Each playback channel, period after period as recorded.
     channels: Vec<Vec<f32>>,
-    /// The engine sample at which each recorded period starts.
-    period_starts: Vec<i64>,
+    /// The engine sample at which each recorded period starts; `None` for a period that Magnolia
+    /// was playing while the recorder copied it.
+    period_starts: Vec<Option<i64>>,
     /// The engine sample at which the output plays the play's first timeline sample.
     audible_at: i64,
     disk_underruns: u64,
+    /// Cycles the server skipped while it recorded, Magnolia's or the recorder's: gaps in their
+    /// frame times.
+    skipped_cycles: u64,
+    /// How long closing the recorder and the backend took.
+    teardown: Duration,
 }
 
 /// Plays the session from sample 0 through the backend on a server of its own, at `period`
 /// frames, and records its playback until `frames` samples from its first audible one.
-fn play_through_jack(session: &Session, period: u32, frames: usize) -> Take<Played> {
-    // Synchronous: without real time, the default mode skips a cycle every few seconds at 64
-    // frames, and a take lasts nine.
-    let server = Server::start_with(Settings {
-        rate: 48_000,
-        period,
-        synchronous: true,
-    });
+fn play_through_jack(session: &Session, period: u32, frames: usize) -> Played {
+    let server = Server::start(period);
     let (mut player, processor) = SessionPlayer::new(session).unwrap();
     let channels = processor.playback_channels();
     let backend = JackBackend::open(JackOptions {
@@ -145,30 +183,27 @@ fn play_through_jack(session: &Session, period: u32, frames: usize) -> Take<Play
     let audible_at = stats.play_start().unwrap().audible_at.0;
     let end = audible_at + frames as i64;
     wait_for("the recording", Duration::from_secs(30), || {
-        let through = recorder.recorded_through();
+        let through = recorder.last_period_end();
         assert!(
             through.is_some_and(|through| through >= end) || !recorder.is_full(),
-            "the recording was full before the play's end: it started {} samples before the \
-             play's first audible sample",
-            recorder
-                .first_period_start()
-                .map_or(0, |first| audible_at - first)
+            "the recording was full before the play's end"
         );
         through.is_some_and(|through| through >= end)
     });
     let disk_underruns = player.report().disk_underruns;
     let skipped_cycles = stats.frame_time_gaps() - gaps + recorder.gaps();
+    let tearing_down = Instant::now();
     let (channels, period_starts) = recorder.finish();
     player.stop().unwrap();
     backend.close().expect("the backend closes");
-    Take {
-        result: Played {
-            channels,
-            period_starts,
-            audible_at,
-            disk_underruns,
-        },
+    let teardown = tearing_down.elapsed();
+    Played {
+        channels,
+        period_starts,
+        audible_at,
+        disk_underruns,
         skipped_cycles,
+        teardown,
     }
 }
 
@@ -200,16 +235,17 @@ fn render_channels(session: &Session) -> Vec<Vec<f32>> {
 }
 
 /// A plain JACK client, apart from Magnolia, that records its inputs in whole periods once armed,
-/// with the engine sample at which Magnolia's processor started each period it records.
+/// each with the engine sample at which Magnolia's processor started the period it copied.
 struct Recorder {
     client: AsyncClient<(), Recording>,
     armed: Arc<AtomicBool>,
-    recorded: Arc<AtomicUsize>,
-    /// The engine sample of the first period recorded; `i64::MIN` before it.
-    first_period_start: Arc<AtomicI64>,
+    /// The engine sample after the last period recorded, kept or not; `i64::MIN` before it.
+    last_period_end: Arc<AtomicI64>,
+    /// The periods recorded, kept or not.
+    periods_recorded: Arc<AtomicUsize>,
+    /// The most periods it records.
+    room: usize,
     gaps: Arc<AtomicU64>,
-    capacity: usize,
-    period: usize,
     inputs: Vec<String>,
 }
 
@@ -217,43 +253,44 @@ struct Recording {
     inputs: Vec<Port<AudioIn>>,
     engine: Arc<EngineStats>,
     armed: Arc<AtomicBool>,
+    /// The frames of every period: the server's own, which never changes on the dummy driver.
+    period: usize,
     /// Each input's samples; their capacity is the length to record, so they never grow on the
     /// audio thread.
     channels: Vec<Vec<f32>>,
-    /// The engine sample at which each period recorded starts.
-    period_starts: Vec<i64>,
-    recorded: Arc<AtomicUsize>,
-    first_period_start: Arc<AtomicI64>,
+    /// Where each period recorded starts, as `Played::period_starts`.
+    period_starts: Vec<Option<i64>>,
+    last_period_end: Arc<AtomicI64>,
+    periods_recorded: Arc<AtomicUsize>,
     gaps: Gaps,
 }
 
 impl ProcessHandler for Recording {
     fn process(&mut self, _: &Client, scope: &ProcessScope) -> Control {
         self.gaps.note(scope);
-        if !self.armed.load(Ordering::Acquire) {
-            return Control::Continue;
-        }
         let frames = scope.n_frames() as usize;
-        let full = self
-            .channels
-            .iter()
-            .any(|channel| channel.capacity() - channel.len() < frames)
-            || self.period_starts.len() == self.period_starts.capacity();
-        if full {
+        let full = self.period_starts.len() == self.period_starts.capacity();
+        if !self.armed.load(Ordering::Acquire) || full || frames != self.period {
             return Control::Continue;
         }
-        // Magnolia's processor ran this cycle's period before this client, and published where
-        // it started.
-        let start = self.engine.block_start().0;
-        if self.period_starts.is_empty() {
-            self.first_period_start.store(start, Ordering::Relaxed);
-        }
-        self.period_starts.push(start);
+        // Magnolia's processor publishes where a period starts as it begins it, and counts the
+        // period as it ends it, every period of the server's length from engine sample 0. Its
+        // outputs hold the period that starts at `start` when it had ended that period and
+        // began no other while they were copied. That the second look sees a period begun
+        // during the copy rests on x86's order of stores and of loads, Magnolia's only target.
+        let before = (self.engine.periods(), self.engine.block_start().0);
         for (channel, input) in self.channels.iter_mut().zip(&self.inputs) {
             channel.extend_from_slice(input.as_slice(scope));
         }
-        let recorded = self.channels.first().map_or(0, Vec::len);
-        self.recorded.store(recorded, Ordering::Release);
+        let after = (self.engine.periods(), self.engine.block_start().0);
+        let (periods, start) = before;
+        let ended = periods > 0 && start == (periods as i64 - 1) * self.period as i64;
+        self.period_starts
+            .push((ended && before == after).then_some(start));
+        self.last_period_end
+            .store(start + self.period as i64, Ordering::Release);
+        self.periods_recorded
+            .store(self.period_starts.len(), Ordering::Release);
         Control::Continue
     }
 }
@@ -281,30 +318,31 @@ impl Recorder {
         let inputs = ports.iter().map(|port| port.name().unwrap()).collect();
         let period = period as usize;
         let armed = Arc::new(AtomicBool::new(false));
-        let recorded = Arc::new(AtomicUsize::new(0));
-        let first_period_start = Arc::new(AtomicI64::new(i64::MIN));
+        let last_period_end = Arc::new(AtomicI64::new(i64::MIN));
+        let periods_recorded = Arc::new(AtomicUsize::new(0));
+        let room = capacity / period;
         let gaps = Arc::new(AtomicU64::new(0));
         let recording = Recording {
             inputs: ports,
             engine,
             armed: Arc::clone(&armed),
+            period,
             channels: (0..channels)
                 .map(|_| Vec::with_capacity(capacity))
                 .collect(),
-            period_starts: Vec::with_capacity(capacity.div_ceil(period)),
-            recorded: Arc::clone(&recorded),
-            first_period_start: Arc::clone(&first_period_start),
+            period_starts: Vec::with_capacity(room),
+            last_period_end: Arc::clone(&last_period_end),
+            periods_recorded: Arc::clone(&periods_recorded),
             gaps: Gaps::new(Arc::clone(&gaps)),
         };
         let client = client.activate_async((), recording).unwrap();
         Self {
             client,
             armed,
-            recorded,
-            first_period_start,
+            last_period_end,
+            periods_recorded,
+            room,
             gaps,
-            capacity,
-            period,
             inputs,
         }
     }
@@ -321,26 +359,15 @@ impl Recorder {
         self.armed.store(true, Ordering::Release);
     }
 
-    /// The engine sample of the first period recorded.
-    fn first_period_start(&self) -> Option<i64> {
-        let first = self.first_period_start.load(Ordering::Relaxed);
-        (first != i64::MIN).then_some(first)
-    }
-
-    /// The engine sample after the last one recorded.
-    fn recorded_through(&self) -> Option<i64> {
-        let recorded = self.recorded.load(Ordering::Acquire);
-        if recorded == 0 {
-            return None;
-        }
-        // Stored before the count, which was read with acquire.
-        self.first_period_start()
-            .map(|first| first + recorded as i64)
+    /// The engine sample after the last period recorded, kept or not.
+    fn last_period_end(&self) -> Option<i64> {
+        let end = self.last_period_end.load(Ordering::Acquire);
+        (end != i64::MIN).then_some(end)
     }
 
     /// Whether it has no room left for another period.
     fn is_full(&self) -> bool {
-        self.capacity - self.recorded.load(Ordering::Acquire) < self.period
+        self.periods_recorded.load(Ordering::Acquire) >= self.room
     }
 
     /// Cycles the server skipped for it.
@@ -349,7 +376,7 @@ impl Recorder {
     }
 
     /// Deactivates it and returns each channel and where each period recorded starts.
-    fn finish(self) -> (Vec<Vec<f32>>, Vec<i64>) {
+    fn finish(self) -> (Vec<Vec<f32>>, Vec<Option<i64>>) {
         let (_, _, recording) = self.client.deactivate().unwrap();
         (recording.channels, recording.period_starts)
     }

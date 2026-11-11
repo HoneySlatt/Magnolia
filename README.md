@@ -16,8 +16,9 @@ loops and stems.
 taken on 2026-11-06, the quality bar measured against the market on 2026-11-10. The Rust workspace
 and its checks exist, the engine's time model, and a graph of nodes that plays through the JACK API
 from an example program: tested on JACK2, built for PipeWire too, which the owner checks by ear. A
-command line plays a test session of audio and MIDI clips from disk through JACK: tested on JACK2,
-it plays to the bit what it renders offline. The first stage builds the audio engine and plugin
+command line plays a test session of audio and MIDI clips from disk through JACK, or renders it
+offline; a test shows, on JACK2, that the session played through the JACK backend equals its
+offline render to the bit. The first stage builds the audio engine and plugin
 hosting, without an interface; the interface comes at Stage 3, on
 [uwui](https://github.com/HoneySlatt/uwui), once a stable release of uwui holds what Magnolia needs.
 Magnolia is a later client of uwui, not one of the programs of its first stage.

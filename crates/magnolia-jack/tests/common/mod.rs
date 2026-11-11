@@ -81,8 +81,7 @@ pub fn unique_server_name() -> String {
 }
 
 /// A JACK2 server of the test's own, on the dummy driver, without real time: `jackd -n <name>
-/// -r -d dummy -r 48000 -p <period>`, with `-S -t 5000` before `-d` in synchronous mode. Dropping
-/// it stops it, by its pid, on a panic too.
+/// -r -d dummy -r 48000 -p <period>`. Dropping it stops it, by its pid, on a panic too.
 ///
 /// A server that dies without stopping cleanly keeps its entry in JACK2's registry of servers,
 /// which holds eight, and its shared memory, until a server of the same name starts again: after a
@@ -96,57 +95,26 @@ pub struct Server {
     killed: bool,
 }
 
-/// How a test's server runs.
-#[derive(Clone, Copy, Debug)]
-pub struct Settings {
-    /// Its rate, in hertz.
-    pub rate: u32,
-    /// Its period, in frames.
-    pub period: u32,
-    /// Whether it runs in JACK2's synchronous mode, `-S`: it then waits for every client's period
-    /// before the next one, and reports an xrun when that takes longer than a period, where the
-    /// default, asynchronous mode skips the cycle of a client that is late. Without real time at
-    /// 64 frames, the asynchronous mode skips a cycle every few seconds on a desktop.
-    ///
-    /// It comes with a client timeout of 5 s, `-t 5000`. With the default, on a loaded machine,
-    /// the server's wait for its clients failed ("SuspendRefNum error", "engine may now behave
-    /// abnormally"), and a client's deactivation failed after it; with 5 s it did not, measured.
-    pub synchronous: bool,
-}
-
 impl Server {
-    /// Starts a server at 48 kHz in the default, asynchronous mode, under a new name, after
-    /// [`refuse_pipewire`], and waits until a client can open on it.
+    /// Starts a server under a new name, after [`refuse_pipewire`], and waits until a client can
+    /// open on it.
     pub fn start(period: u32) -> Self {
         Self::start_at(48_000, period)
     }
 
     /// Starts a server as [`start`](Self::start) does, at `rate` Hz.
     pub fn start_at(rate: u32, period: u32) -> Self {
-        Self::start_with(Settings {
-            rate,
-            period,
-            synchronous: false,
-        })
+        Self::start_named(unique_server_name(), rate, period)
+            .unwrap_or_else(|error| panic!("{error}"))
     }
 
-    /// Starts a server as [`start`](Self::start) does, with `settings`.
-    pub fn start_with(settings: Settings) -> Self {
-        Self::start_named(unique_server_name(), settings).unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    fn start_named(name: String, settings: Settings) -> Result<Self, String> {
+    fn start_named(name: String, rate: u32, period: u32) -> Result<Self, String> {
         refuse_pipewire();
-        let mut command = Command::new("jackd");
-        command.args(["-n", &name, "-r"]);
-        if settings.synchronous {
-            command.args(["-S", "-t", "5000"]);
-        }
-        let child = command
-            .args(["-d", "dummy", "-r"])
-            .arg(settings.rate.to_string())
+        let child = Command::new("jackd")
+            .args(["-n", &name, "-r", "-d", "dummy", "-r"])
+            .arg(rate.to_string())
             .arg("-p")
-            .arg(settings.period.to_string())
+            .arg(period.to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -249,12 +217,7 @@ impl Drop for Server {
             return;
         }
         // A server of the same name reclaims the dead one's entry and shared memory.
-        let settings = Settings {
-            rate: 48_000,
-            period: 1_024,
-            synchronous: false,
-        };
-        match Self::start_named(self.name.clone(), settings) {
+        match Self::start_named(self.name.clone(), 48_000, 1_024) {
             Ok(mut again) => {
                 again.stop();
                 again.remove_leftovers();
