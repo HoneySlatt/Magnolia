@@ -3,10 +3,12 @@
 //! next note; a play chases the bends and controllers set before its start, and leaves out the
 //! notes that began before it; at one tick, a note off then a note on of the same key retriggers
 //! the note; a note off and a note on of one key at one sample leave the note held, whatever the
-//! order of the sequences, so that the stop ends it; at one sample a node gets note offs first, then
-//! its timeline's events before the controller's; events past a node's room are dropped and
-//! counted, and a note whose note on was dropped sends no note off; sequences and the tempo map take
-//! effect at a commit; a stop ends the notes a node holds even if its sequences changed.
+//! order of the sequences, so that the stop ends it; overlapping notes of one key in one sequence
+//! end where the next starts, so that a stop ends the last; at one sample a node gets note offs
+//! first, then its timeline's events before the controller's; events past a node's room are
+//! dropped and counted, and a note whose note on was dropped sends no note off; sequences and the
+//! tempo map take effect at a commit; a stop ends the notes a node holds even if its sequences
+//! changed.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -187,10 +189,10 @@ fn a_sleeping_synth_wakes_on_its_sequences_next_note() {
     assert_eq!(calls_after[woken], calls_after[woken - 1] + 1);
 }
 
-/// A synth and a listener, both on `sequence`, played from `from` at 120 quarters a minute;
+/// A synth and a listener, both on `sequences`, played from `from` at 120 quarters a minute;
 /// returns what played from the published sample, and what the listener heard.
 fn play_and_listen(
-    sequence: Arc<MidiSequence>,
+    sequences: &[Arc<MidiSequence>],
     from: i64,
     periods: usize,
 ) -> (Vec<f32>, Vec<(i64, Event)>) {
@@ -201,7 +203,7 @@ fn play_and_listen(
     for node in [synth, listener] {
         rig.controller
             .connect(Source::Node(node, 0), Destination::Playback(0));
-        give(&mut rig, node, vec![Arc::clone(&sequence)]);
+        give(&mut rig, node, sequences.to_vec());
     }
     rig.controller.set_tempo_map(steady_tempo());
     rig.controller.commit().unwrap();
@@ -232,10 +234,10 @@ fn a_play_chases_the_bends_and_controllers_set_before_its_start() {
     };
     // Up two semitones, set a quarter before the start, or at the start, or never; and the note
     // two semitones up, unbent.
-    let (chased, heard) = play_and_listen(with(vec![bend(QUARTER, 0, 1.0)], 69), from, 100);
-    let (at_start, _) = play_and_listen(with(vec![bend(2 * QUARTER, 0, 1.0)], 69), from, 100);
-    let (unbent, _) = play_and_listen(with(Vec::new(), 69), from, 100);
-    let (higher, _) = play_and_listen(with(Vec::new(), 71), from, 100);
+    let (chased, heard) = play_and_listen(&[with(vec![bend(QUARTER, 0, 1.0)], 69)], from, 100);
+    let (at_start, _) = play_and_listen(&[with(vec![bend(2 * QUARTER, 0, 1.0)], 69)], from, 100);
+    let (unbent, _) = play_and_listen(&[with(Vec::new(), 69)], from, 100);
+    let (higher, _) = play_and_listen(&[with(Vec::new(), 71)], from, 100);
     assert_ne!(first_sound(&chased), None);
     assert_eq!(
         chased, at_start,
@@ -299,12 +301,13 @@ fn a_play_chases_the_bends_and_controllers_set_before_its_start() {
 fn a_note_that_began_before_the_start_does_not_play_nor_end_another() {
     let map = steady_tempo();
     let from = sample_of(&map, 2 * QUARTER);
-    // A note held across the start, and the same key struck after it, before the first one ends.
-    let sequence = notes(vec![
-        note(QUARTER, 2 * QUARTER, 60),
-        note(2 * QUARTER + QUARTER / 2, QUARTER, 60),
-    ]);
-    let (played, heard) = play_and_listen(sequence, from, 200);
+    // A note held across the start, and the same key struck after it, before the first one ends:
+    // from two sequences, as one sequence ends a note where its key starts again.
+    let sequences = [
+        notes(vec![note(QUARTER, 2 * QUARTER, 60)]),
+        notes(vec![note(2 * QUARTER + QUARTER / 2, QUARTER, 60)]),
+    ];
+    let (played, heard) = play_and_listen(&sequences, from, 200);
     let keys: Vec<(i64, bool)> = heard
         .iter()
         .map(|&(sample, event)| (sample, matches!(event.kind, EventKind::NoteOn(_))))
@@ -328,8 +331,8 @@ fn at_one_tick_a_note_off_then_a_note_on_of_the_same_key_retriggers_the_note() {
     let map = steady_tempo();
     let both = notes(vec![note(0, QUARTER, 60), note(QUARTER, QUARTER, 60)]);
     let second_alone = notes(vec![note(QUARTER, QUARTER, 60)]);
-    let (retriggered, heard) = play_and_listen(both, 0, 120);
-    let (alone, _) = play_and_listen(second_alone, 0, 120);
+    let (retriggered, heard) = play_and_listen(&[both], 0, 120);
+    let (alone, _) = play_and_listen(&[second_alone], 0, 120);
     let at = sample_of(&map, QUARTER);
     let at_one_tick: Vec<EventKind> = heard
         .iter()
@@ -398,15 +401,49 @@ fn a_note_off_and_a_note_on_of_one_key_at_one_sample_leave_the_note_for_the_stop
         assert_eq!(note_offs, [retriggered, stop]);
         assert_eq!(first_sound(&after), None);
     }
-    // Two notes of one key in one sequence, the second struck less than a sample before the first
-    // ends: both land on one sample, and both sounded, so each ends.
-    let overlapping = notes(vec![
-        note(0, QUARTER, 60),
-        note(QUARTER - 100, 4 * QUARTER, 60),
-    ]);
+    // Two notes of one key from two sequences, the second struck less than a sample before the
+    // first ends: both land on one sample, and both sounded, so each ends.
+    let overlapping = [
+        notes(vec![note(0, QUARTER, 60)]),
+        notes(vec![note(QUARTER - 100, 4 * QUARTER, 60)]),
+    ];
     assert_eq!(sample_of(&map, QUARTER - 100), retriggered);
-    let (after, note_offs) = play_then_stop(&[overlapping], stop_after);
+    let (after, note_offs) = play_then_stop(&overlapping, stop_after);
     assert_eq!(note_offs, [retriggered, stop]);
+    assert_eq!(first_sound(&after), None);
+}
+
+/// The note ons and note offs among `heard`, at their samples.
+fn notes_heard(heard: &[(i64, Event)]) -> Vec<(i64, &'static str)> {
+    heard
+        .iter()
+        .filter_map(|&(at, event)| match event.kind {
+            EventKind::NoteOn(_) => Some((at, "on")),
+            EventKind::NoteOff(_) => Some((at, "off")),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn overlapping_notes_of_one_key_in_one_sequence_end_where_the_next_starts() {
+    let map = steady_tempo();
+    // A from quarter 0 to 2, and B of the same key from quarter 1 to 3: A ends where B starts.
+    let overlapping = notes(vec![
+        note(0, 2 * QUARTER, 60),
+        note(QUARTER, 2 * QUARTER, 60),
+    ]);
+    let at = |quarter: i64| sample_of(&map, quarter * QUARTER);
+    let (_, heard) = play_and_listen(&[Arc::clone(&overlapping)], 0, 200);
+    assert_eq!(
+        notes_heard(&heard),
+        [(0, "on"), (at(1), "off"), (at(1), "on"), (at(3), "off")]
+    );
+    // Stopped while B is held, after A's own end: the stop ends B, and the synth falls silent.
+    let stop_after = 59_392;
+    assert!((at(2)..at(3)).contains(&(stop_after as i64)));
+    let (after, note_offs) = play_then_stop(&[overlapping], stop_after);
+    assert_eq!(note_offs, [at(1), stop_after as i64 + FADE as i64]);
     assert_eq!(first_sound(&after), None);
 }
 

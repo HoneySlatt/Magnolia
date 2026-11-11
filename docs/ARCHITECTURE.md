@@ -225,10 +225,12 @@ compensation changes jumps by the difference ([debt](debt.md)).
 A node may have **timeline sources**: MIDI sequences from M1.4, automation lanes from M1.6
 ([ADR-0027](adr/0027-timeline-events-from-sources-on-nodes.md)). A `MidiSequence` is built off the
 real-time thread from one track's clips (`engine/sequence.rs`) and never changes. Each note becomes
-a note on at its start and a note off at its end or its clip's end, whichever comes first; the
-events are sorted by tick, and at one tick the note offs come first, then bends and controllers,
-then note ons. It also keeps each channel's pitch bends and each controller's values, sorted by
-tick, for the chase.
+a note on at its start and a note off at its end, its clip's end, or where a later note of its
+channel and key starts, whichever comes first: within one sequence a key is never held twice, as in
+the piano rolls of FL Studio and Ableton Live, and of notes of one key struck on one tick only the
+last listed plays. The events are sorted by tick, and at one tick the note offs come first, then
+bends and controllers, then note ons. It also keeps each channel's pitch bends and each controller's
+values, sorted by tick, for the chase.
 
 `Controller::set_sequences(node, sequences)` and `Controller::set_tempo_map(map)` change what the
 controller holds; the next commit sends them inside the compiled graph, each step naming its node's
@@ -247,8 +249,10 @@ reader (`engine/sources.rs`):
    than a sample, whose note off would come first;
 4. sorts what it found by offset, note offs first, then in the order found, and walks it in that
    order, the order the node receives it: a note on holds its note, a note off ends a held note and
-   is left out for a note not held, one that never sounded. So a note ended and struck again on one
-   sample stays held, whichever sequences, or ticks within a sample, the two came from;
+   is left out for a note not held: one that never sounded, or the second note off of a key that
+   two of the node's sequences held at once, since the node holds one bit per channel and key
+   ([debt](debt.md)). So a note ended and struck again on one sample stays held, whichever
+   sequences, or ticks within a sample, the two came from;
 5. once the node's position reaches the region's stop, or has passed it in one jump, as when a
    swap raises the node's compensation, sends a note off for every note the node holds, then, on
    each channel its sequences use, the sustain pedal (controller 64) at 0 and the pitch bend at 0:
@@ -625,9 +629,9 @@ module's documentation gives the format, an example and every rule; this section
 The ranges of every value: the rate is one the time model takes, a tempo lies from 1 to 1,000
 quarter notes a minute, channels from 1 to 1,024 (the master's from 2), a latency up to 65,536
 samples, every gain finite, every clip at least a frame or a tick long, at or after the timeline's
-zero and ending within 2^41 samples of it, so that no session asks for an endless render. The tempo
-map builds. Each track has the
-fields of its kind and no other: an audio track its channels, a MIDI track its instrument; an audio
+zero and ending within 24 hours of it at the session's rate, so that a test session lasts at most a
+day and its render with it; over it, the clip's `length` is refused. The tempo map builds. Each
+track has the fields of its kind and no other: an audio track its channels, a MIDI track its instrument; an audio
 clip its file offset and gain, a MIDI clip neither. Bus names are unique and none is `master`;
 every output and send names `master` or a bus; what feeds a bus or the master has its channels, or
 is mono into stereo; no bus feeds itself back, through any chain of buses, checked once per bus. A
@@ -643,7 +647,11 @@ path to it, so `file/position.rs` walks the text up to the error's position to n
 checks the loader needs again, such as resolving the routing or placing a clip, are the same
 functions, so that one rule has one copy. The fuzz target `session_file` feeds the parser text, raw
 or built like a session with arbitrary values, and checks that a session that parses names no file
-outside its folder and writes back to text that parses.
+outside its folder and writes back to text that parses. The fuzz target `session_open` feeds
+`Session::open` text, raw or a session that opens changed in a few places, beside small WAV and
+MIDI files it writes at its start, so that most inputs reach the memory estimate, the MIDI files'
+clips and the sequences; it checks that a session that opens fits its budget and lasts at most a
+day.
 
 ### The memory budget
 
@@ -696,8 +704,9 @@ by the first tick at or after (exact for every common division, rounded up for o
 1,000); each note off ends the earliest note of its channel and key still held, first in, first
 out, and one that ends none is ignored; a note without its note off ends at the clip's end, and a
 note that lasts no tick after scaling does not play; velocities and controllers' values divided by
-127, pitch bends by 8,192. The file's tempo and time signatures are ignored: the session's tempo map
-rules.
+127, pitch bends by 8,192. The track's sequence then ends each note where a later note of its
+channel and key starts ([above](#timeline-sources)). The file's tempo and time signatures are
+ignored: the session's tempo map rules.
 
 ### The offline render
 
@@ -714,7 +723,8 @@ fails removes its partial file, and a file in the way is never written over.
 The render is the same to the bit whatever its blocks, and a play from sample 0 through a
 `SessionPlayer`, in periods of any length, plays the same bits from where its output reaches that
 sample: `tests/session.rs` renders the small session in blocks of 4,096, 64 and 1,000 and plays it
-in random periods of 1 to 5,000 frames, waiting for the disk reader between periods.
+in random periods of 1 to 5,000 frames, waiting for the disk reader between periods. Its sends into
+a latent bus put two delay lines in its graph, which the test counts, so that the null passes them.
 
 `SessionPlayer::start(from, timeout)` stops any play under way, locates the reader, waits until it
 has primed the cue, then plays it, the order the disk reader documents

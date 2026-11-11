@@ -1,12 +1,13 @@
-//! Fuzzes the test session's parser with arbitrary text. Nothing may panic; a session that parses
-//! must name no file outside its folder, and must write back to text that parses.
+//! Fuzzes the test session's parser with arbitrary text, raw or built (`session_text.rs`). Nothing
+//! may panic; a session that parses must name no file outside its folder, and must write back to
+//! text that parses.
 //!
-//! From an empty corpus, as in CI, raw bytes seldom grow into JSON that follows the schema within
-//! seconds. So most inputs build a session shaped like a real one, whose every number, name and
-//! choice may still be arbitrary or out of range, written as JSON and sometimes cut short or with a
-//! byte changed; the rest are read as text as they are.
+//! The sessions it builds are shaped like real ones, but every number, name and choice may still be
+//! arbitrary or out of range, so that the parser's refusals are fuzzed as much as what it accepts.
 
 #![no_main]
+
+mod session_text;
 
 use std::path::{Component, Path};
 
@@ -17,40 +18,14 @@ use magnolia_session::file::{
     TempoSection, Track, TrackKind, TrackSend,
 };
 
+use session_text::{often, session_text};
+
 /// The names outputs, sends and buses draw from, so that they meet, clash and loop.
 const NAMES: [&str; 5] = ["master", "drums", "beat", "room", "vocals"];
 
 fuzz_target!(|input: &[u8]| {
-    match input.split_first() {
-        // One input in eight, by its first byte, is the text itself.
-        Some((&mode, raw)) if mode < 32 => {
-            if let Ok(text) = std::str::from_utf8(raw) {
-                check(text);
-            }
-        }
-        _ => {
-            let mut input = Unstructured::new(input);
-            // An input that runs out before its session is whole is left: that is not a failure.
-            let Ok(session) = session(&mut input) else {
-                return;
-            };
-            let mut text = session
-                .to_json()
-                .expect("a session built of plain values writes");
-            if input.ratio(1, 8).unwrap_or(false) {
-                let at = input.int_in_range(0..=text.len()).unwrap_or(0);
-                // Cut, or change one byte, where a character starts.
-                if text.is_char_boundary(at) {
-                    if input.ratio(1, 2).unwrap_or(false) {
-                        text.truncate(at);
-                    } else if at < text.len() && text.is_char_boundary(at + 1) {
-                        let byte: u8 = input.int_in_range(0x20..=0x7E).unwrap_or(b'x');
-                        text.replace_range(at..at + 1, &char::from(byte).to_string());
-                    }
-                }
-            }
-            check(&text);
-        }
+    if let Some(text) = session_text(input, session) {
+        check(&text);
     }
 });
 
@@ -205,16 +180,4 @@ fn list<T>(
     (0..input.int_in_range(0..=most)?)
         .map(|_| item(input))
         .collect()
-}
-
-/// What `likely` gives, fifteen times in sixteen; an arbitrary value otherwise.
-fn often<'a, T: libfuzzer_sys::arbitrary::Arbitrary<'a>>(
-    input: &mut Unstructured<'a>,
-    likely: impl FnOnce(&mut Unstructured<'a>) -> Result<T>,
-) -> Result<T> {
-    if input.ratio(1, 16)? {
-        input.arbitrary()
-    } else {
-        likely(input)
-    }
 }

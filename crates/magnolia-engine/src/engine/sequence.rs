@@ -143,11 +143,14 @@ impl Error for SequenceError {}
 /// One track's MIDI clips, flattened into one list of events sorted by tick, and the pitch bends
 /// and controllers' values that a play chases at its start.
 ///
-/// Each note becomes a note on at its start and a note off at its end or at its clip's end,
-/// whichever comes first; a note that starts at or past its clip's end, and a bend or a
-/// controller's change there, do not play. At one tick, the note offs come first, so that a note
-/// ended and started again there sounds; then the bends and controllers' changes, so that a note
-/// starts with them; then the note ons; each group in the order of the clips, then of their lists.
+/// Each note becomes a note on at its start and a note off at its end, at its clip's end, or where
+/// a later note of its channel and key starts, whichever comes first: within one sequence a key is
+/// never held twice, as in the piano rolls of FL Studio and Ableton Live, so that each note off
+/// ends the note it was made for. Of notes of one channel and key struck on one tick, only the last
+/// listed plays. A note that starts at or past its clip's end, and a bend or a controller's change
+/// there, do not play. At one tick, the note offs come first, so that a note ended and started
+/// again there sounds; then the bends and controllers' changes, so that a note starts with them;
+/// then the note ons; each group in the order of the clips, then of their lists.
 ///
 /// It also keeps, per channel, its pitch bends and, per channel and controller, the controller's
 /// changes, sorted by tick: at a play's start, each sends the last value before the start
@@ -226,6 +229,7 @@ fn rank_at_one_tick(kind: EventKind) -> u8 {
 impl MidiSequence {
     /// The sequence of `clips`, or why they cannot make one.
     pub fn new(clips: &[MidiClip]) -> Result<MidiSequence, SequenceError> {
+        let mut notes = Vec::new();
         let mut events = Vec::new();
         let mut lanes: BTreeMap<LaneKind, Vec<LanePoint>> = BTreeMap::new();
         let mut channels = 0_u16;
@@ -243,25 +247,15 @@ impl MidiSequence {
                     continue;
                 }
                 let end = note.tick.saturating_add(note.length).min(clip.length);
-                let (on, off) = (in_clip.absolute(note.tick)?, in_clip.absolute(end)?);
-                let played = Note {
-                    id: None,
-                    channel: note.channel,
-                    key: note.key,
-                    velocity: note.velocity,
-                };
-                events.push(SequenceEvent {
-                    tick: on,
-                    kind: EventKind::NoteOn(played),
-                    paired_tick: off,
-                });
-                events.push(SequenceEvent {
-                    tick: off,
-                    kind: EventKind::NoteOff(Note {
-                        velocity: 0.0,
-                        ..played
-                    }),
-                    paired_tick: on,
+                notes.push(PlacedNote {
+                    on: in_clip.absolute(note.tick)?,
+                    off: in_clip.absolute(end)?,
+                    note: Note {
+                        id: None,
+                        channel: note.channel,
+                        key: note.key,
+                        velocity: note.velocity,
+                    },
                 });
                 channels |= channel_bit(note.channel);
             }
@@ -320,6 +314,23 @@ impl MidiSequence {
                 channels |= channel_bit(channel);
             }
         }
+        end_where_their_keys_start_again(&mut notes);
+        events.reserve_exact(notes.len().saturating_mul(2));
+        for PlacedNote { on, off, note } in notes {
+            events.push(SequenceEvent {
+                tick: on,
+                kind: EventKind::NoteOn(note),
+                paired_tick: off,
+            });
+            events.push(SequenceEvent {
+                tick: off,
+                kind: EventKind::NoteOff(Note {
+                    velocity: 0.0,
+                    ..note
+                }),
+                paired_tick: on,
+            });
+        }
         // Stable sorts: at one tick and rank, the order of the clips and their lists stays.
         events.sort_by_key(|event| (event.tick, rank_at_one_tick(event.kind)));
         let lanes = lanes
@@ -360,6 +371,38 @@ impl MidiSequence {
 /// A channel's bit among 16; none for a channel above 15.
 pub(crate) fn channel_bit(channel: u8) -> u16 {
     1_u16.checked_shl(u32::from(channel)).unwrap_or(0)
+}
+
+/// A note of a sequence, before it becomes a note on and a note off: its ticks on the tempo map.
+struct PlacedNote {
+    on: i64,
+    off: i64,
+    note: Note,
+}
+
+/// Ends each note where the next note of its channel and key starts, if that comes before its own
+/// end, so that a key is never held twice. A note that the next one starts with lasts no tick and
+/// is left out: of notes struck together, the last listed plays.
+fn end_where_their_keys_start_again(notes: &mut Vec<PlacedNote>) {
+    // By channel, key and start; the index, unique, keeps notes struck together in listed order.
+    let mut by_key: Vec<(u8, u8, i64, usize)> = notes
+        .iter()
+        .enumerate()
+        .map(|(index, placed)| (placed.note.channel, placed.note.key, placed.on, index))
+        .collect();
+    by_key.sort_unstable();
+    for pair in by_key.windows(2) {
+        if let [
+            (channel, key, _, index),
+            (next_channel, next_key, next_on, _),
+        ] = *pair
+            && (channel, key) == (next_channel, next_key)
+            && let Some(placed) = notes.get_mut(index)
+        {
+            placed.off = placed.off.min(next_on);
+        }
+    }
+    notes.retain(|placed| placed.off > placed.on);
 }
 
 /// One clip's ticks, checked: its start and length, and its index for the errors.
@@ -502,6 +545,78 @@ mod tests {
             .ok_or("two note offs at the clip's end")?;
         assert_eq!(off.paired_tick, 1_090);
         assert_eq!(sequence.channels(), 0b1001);
+        Ok(())
+    }
+
+    #[test]
+    fn a_note_ends_where_a_later_note_of_its_channel_and_key_starts() -> Result<(), Box<dyn Error>>
+    {
+        let on_channel = |channel, note: MidiNote| MidiNote { channel, ..note };
+        let first = MidiClip {
+            notes: vec![
+                // Overlapping: the first ends where the second starts.
+                note(0, 200, 60),
+                note(100, 200, 60),
+                // The same key on another channel is another note.
+                on_channel(1, note(150, 100, 60)),
+                // A short note inside a long one: the long one ends where it starts.
+                note(400, 300, 61),
+                note(450, 50, 61),
+                // Struck together: the last listed plays.
+                note(600, 100, 62),
+                note(600, 50, 62),
+                // One ends where the next starts: neither changes.
+                note(800, 50, 63),
+                note(850, 50, 63),
+                // Held to the clip's end, where the next clip strikes the key later.
+                note(900, 500, 64),
+            ],
+            ..clip(0, 1_000)
+        };
+        let second = MidiClip {
+            notes: vec![note(0, 20, 64)],
+            ..clip(950, 100)
+        };
+        let sequence = MidiSequence::new(&[first, second])?;
+        let notes: Vec<(i64, &str, u8)> = kinds(&sequence)
+            .into_iter()
+            .filter(|&(_, kind, _)| kind == "on" || kind == "off")
+            .collect();
+        assert_eq!(
+            notes,
+            [
+                (0, "on", 60),
+                (100, "off", 60),
+                (100, "on", 60),
+                (150, "on", 60),
+                (250, "off", 60),
+                (300, "off", 60),
+                (400, "on", 61),
+                (450, "off", 61),
+                (450, "on", 61),
+                (500, "off", 61),
+                (600, "on", 62),
+                (650, "off", 62),
+                (800, "on", 63),
+                (850, "off", 63),
+                (850, "on", 63),
+                (900, "off", 63),
+                (900, "on", 64),
+                (950, "off", 64),
+                (950, "on", 64),
+                (970, "off", 64),
+            ]
+        );
+        // A note cut short: its note on knows its new end, and its note off its start.
+        let [on] = sequence.events_between(0, 1) else {
+            return Err("one note on at tick 0".into());
+        };
+        assert_eq!(on.paired_tick, 100);
+        let [off, _] = sequence.events_between(100, 101) else {
+            return Err("a note off and a note on at tick 100".into());
+        };
+        assert!(matches!(off.kind, EventKind::NoteOff(Note { key: 60, .. })));
+        assert_eq!(off.paired_tick, 0);
         Ok(())
     }
 

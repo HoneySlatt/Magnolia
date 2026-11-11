@@ -13,7 +13,10 @@
 //! - a note that began before the region's start does not play, nor does its note off; nor does a
 //!   note shorter than a sample, whose note off would otherwise come first;
 //! - a note off goes only to a note the node holds, in the order the node receives its events: at
-//!   one sample the note offs come first, so a note ended and struck again there stays held;
+//!   one sample the note offs come first, so a note ended and struck again there stays held. One
+//!   sequence never holds a key twice; two sequences of one node may, and the node's notes are one
+//!   bit per channel and key, so the second note off of such a key is left out
+//!   (`docs/debt.md`);
 //! - when the node's position reaches the region's stop, or passes it in one jump, as a swap that
 //!   raises its compensation makes it, the node gets a note off for every note it holds, then the
 //!   sustain pedal (controller 64) at 0 and the pitch bend at 0 on each channel its sequences use;
@@ -369,7 +372,7 @@ fn may_be_held(
 
 /// Walks the sorted events in the order the node receives them, updating the notes it holds: a
 /// note on holds its note; a note off ends a held note, and is dropped, uncounted, for a note not
-/// held, which never sounded.
+/// held: one that never sounded, or the second note off of a key two sequences held at once.
 fn keep_in_order(found: &mut Vec<TimelineEvent>, held: &mut KeySet) {
     found.retain(|event| match event.kind {
         EventKind::NoteOn(note) => {

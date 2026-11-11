@@ -47,8 +47,8 @@
 //! The schema is strict: a field unknown or missing, a value of the wrong type or out of range, a
 //! version newer than this reader's, each refuses the file with a [`FileError`] that names the
 //! field by its path, such as `tracks[1].clips[0].start`. Other limits: every position lies at or
-//! after the timeline's zero, where a render starts, and every clip ends within 2^41 samples of
-//! it; a track's audio clips do not overlap
+//! after the timeline's zero, where a render starts, and every clip ends within 24 hours of it, at
+//! the session's rate, so that a render lasts at most a day; a track's audio clips do not overlap
 //! ([ADR-0026](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0026-one-stream-per-audio-track.md));
 //! a session reads at most [`MAX_AUDIO_FILES`] audio files, each kept open while it plays. The
 //! memory a session asks for is checked when it is opened, against

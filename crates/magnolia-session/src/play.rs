@@ -24,7 +24,6 @@ use crate::load::{LoadedSource, Session};
 pub struct SessionPlayer {
     controller: Controller,
     reader: DiskReader,
-    last_sample: SamplePosition,
     /// The audio tracks' names, in the reader's order.
     audio_tracks: Vec<String>,
 }
@@ -41,7 +40,7 @@ impl SessionPlayer {
             controller,
             processor,
             reader,
-            last_sample,
+            ..
         } = session.build(ReaderMode::Thread)?;
         let audio_tracks = session
             .tracks
@@ -52,7 +51,6 @@ impl SessionPlayer {
         let player = Self {
             controller,
             reader,
-            last_sample,
             audio_tracks,
         };
         Ok((player, processor))
@@ -88,11 +86,6 @@ impl SessionPlayer {
     /// period.
     pub fn stop(&mut self) -> Result<(), TransportError> {
         self.controller.stop()
-    }
-
-    /// The sample after the session's last clip.
-    pub fn last_sample(&self) -> SamplePosition {
-        self.last_sample
     }
 
     /// The engine's statistics.
@@ -144,7 +137,9 @@ pub struct PlayReport {
     pub callback_times: Snapshot,
     /// The frames the audio players lacked, which played as silence.
     pub disk_underruns: u64,
-    /// The events dropped, past what a node may receive in one sub-block.
+    /// The events dropped: the controller's that no node of the current graph took, and the
+    /// timeline sources' past the room a node has for them in one sub-block
+    /// ([`EngineStats::events_dropped`]).
     pub events_dropped: u64,
     /// How many times a node returned an error.
     pub node_errors: u64,

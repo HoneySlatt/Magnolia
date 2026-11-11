@@ -12,7 +12,9 @@ use std::thread;
 use std::time::Duration;
 
 use magnolia_engine::offline::OfflineBackend;
-use magnolia_engine::time::{MusicalPosition, SamplePosition, place};
+use magnolia_engine::time::{
+    MusicalPosition, SamplePosition, TICKS_PER_QUARTER, TIME_UNITS_PER_SECOND, place,
+};
 use magnolia_engine::wav::{SampleFormat, WavError, WavWriter, decode, read_info};
 use magnolia_session::file::{self, FileError, Problem};
 use magnolia_session::generate::{Kind, generate};
@@ -20,7 +22,9 @@ use magnolia_session::load::{
     AudioProblem, MAX_FILE_BYTES, MEMORY_BUDGET, MemoryEstimate, MidiProblem,
 };
 use magnolia_session::midi_file::{self, EventKind, Format, MidiFile, Track, TrackEvent};
-use magnolia_session::{LoadError, RenderError, Session, SessionPlayer, render, render_to_file};
+use magnolia_session::{
+    LoadError, ReaderMode, RenderError, Session, SessionPlayer, render, render_to_file,
+};
 use serde_json::{Value, json};
 
 /// A folder of its own under the system's temporary folder, removed with everything in it when
@@ -543,20 +547,64 @@ fn a_midi_file_past_its_limit_is_refused_unread() {
     assert_eq!(field, "tracks[1].clips[0].file");
 }
 
+/// The samples of 24 hours at 48 kHz: the most a session at that rate may last.
+const DAY_AT_48_KHZ: i64 = 24 * 60 * 60 * 48_000;
+
+/// Asserts that `session` is refused for the clip at `clip`, which ends past 24 hours.
+fn refused_for_its_length(dir: &TempDir, session: &Value, clip: &str) {
+    let error = refused(dir, session);
+    assert_eq!(error.field(), format!("{clip}.length"));
+    assert!(matches!(error.problem(), Problem::OutOfRange { .. }));
+    assert!(error.to_string().contains("24 hours"), "{error}");
+}
+
 #[test]
-fn a_midi_clip_ends_within_2_to_the_41_samples() {
-    let dir = TempDir::new("long-midi");
+fn a_session_lasts_at_most_24_hours() {
+    let dir = TempDir::new("long-session");
     let mut session = valid_session(&dir);
+    // At 120 BPM a quarter lasts 24,000 samples, and 24 hours 172,800 quarters.
+    session["tempo"]["changes"][0]["bpm"] = json!([120, 1]);
+    let day_in_ticks = 172_800 * TICKS_PER_QUARTER;
+    session["tracks"][1]["clips"][0]["length"] = json!(day_in_ticks);
+    assert_eq!(
+        open(&dir, &session).unwrap().last_sample(),
+        SamplePosition(DAY_AT_48_KHZ)
+    );
+    session["tracks"][1]["clips"][0]["length"] = json!(day_in_ticks + 1);
+    refused_for_its_length(&dir, &session, "tracks[1].clips[0]");
     // At 1 BPM, 2^60 ticks last 450,000 years.
     session["tempo"]["changes"][0]["bpm"] = json!([1, 1]);
     session["tracks"][1]["clips"][0]["length"] = json!(1_u64 << 60);
-    let error = refused(&dir, &session);
-    assert_eq!(error.field(), "tracks[1].clips[0].length");
-    assert!(matches!(error.problem(), Problem::OutOfRange { .. }));
-    // 2^41 samples at 140 BPM are 2^41 / 48,000 * 140 / 60 quarters, about 1.07e8.
-    session["tempo"]["changes"][0]["bpm"] = json!([140, 1]);
-    session["tracks"][1]["clips"][0]["length"] = json!(100_000_000_u64 * 4_838_400);
-    open(&dir, &session).unwrap();
+    refused_for_its_length(&dir, &session, "tracks[1].clips[0]");
+
+    // An audio clip of 24,000 frames that ends on the 24 hours, then a sample later.
+    let mut session = valid_session(&dir);
+    let sample = TIME_UNITS_PER_SECOND / 48_000;
+    let start = (DAY_AT_48_KHZ - 24_000) * sample;
+    session["tracks"][0]["clips"][0]["start"] = json!(start);
+    assert_eq!(
+        open(&dir, &session).unwrap().last_sample(),
+        SamplePosition(DAY_AT_48_KHZ)
+    );
+    session["tracks"][0]["clips"][0]["start"] = json!(start + sample);
+    refused_for_its_length(&dir, &session, "tracks[0].clips[0]");
+}
+
+#[test]
+fn a_midi_clip_of_months_is_refused_before_a_render_asks_for_them() {
+    let dir = TempDir::new("months");
+    generate(Kind::Small, dir.path()).unwrap();
+    let path = dir.path().join("session.json");
+    let mut session: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    // The first MIDI track, its clip 2e14 ticks long: 307 days at the small session's tempo.
+    let midi = session["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|track| track["kind"] == "midi")
+        .unwrap();
+    session["tracks"][midi]["clips"][0]["length"] = json!(200_000_000_000_000_u64);
+    refused_for_its_length(&dir, &session, &format!("tracks[{midi}].clips[0]"));
 }
 
 // The memory budget.
@@ -593,10 +641,14 @@ fn the_estimate_counts_streams_and_delays_as_the_engine_allocates_them() {
     generate(Kind::Small, dir.path()).unwrap();
     let session = Session::open(dir.path().join("session.json")).unwrap();
     let estimate = session.memory_estimate();
-    // Two mono tracks and two stereo ones; a bus of two channels 64 samples late, and a mono
-    // track 300 samples late; no delay line, as no track's sends go later than its output.
+    // Two mono tracks and two stereo ones; buses of two channels 64 and 100 samples late, and a
+    // mono track 300 samples late; and the delay lines of the two tracks that send to the bus 100
+    // samples late, each on the two channels of its output, the vocals' bus or the master.
     assert_eq!(estimate.streams, 6 * STREAM_FRAMES * 4);
-    assert_eq!(estimate.delays, (2 * 64 + 300) * 4);
+    assert_eq!(
+        estimate.delays,
+        (2 * 64 + 2 * 100 + 300 + 2 * (2 * 100)) * 4
+    );
     assert!(estimate.total() < MEMORY_BUDGET / 10, "{estimate}");
 }
 
@@ -788,6 +840,11 @@ fn the_small_session_plays_to_the_bit_what_it_renders() {
     let dir = TempDir::new("null");
     generate(Kind::Small, dir.path()).unwrap();
     let session = Session::open(dir.path().join("session.json")).unwrap();
+    // The null passes delay lines: the vocal and the lead send to the room, a latent bus, while
+    // their direct paths go to the vocals' bus and to the master, one delay line each.
+    let built = session.build(ReaderMode::Offline).unwrap();
+    assert_eq!(built.controller.delay_lines().len(), 2);
+    drop(built);
 
     let (rendered, frames, compensation) = render_channels(&session, 4_096);
     let last = u64::try_from(session.last_sample().0).unwrap();
@@ -1226,7 +1283,7 @@ fn digest(dir: &Path) -> u64 {
 /// they differ only as meant, then put the new digest the failure prints here, in the same commit
 /// as the change, and say so in its message. If it is not meant, the generator has lost its
 /// determinism: a function whose precision differs between machines, or an order that does.
-const SMALL_SESSION_DIGEST: u64 = 0xCC4B_07FD_B27C_153A;
+const SMALL_SESSION_DIGEST: u64 = 0xC0FB_E9B5_5D27_1739;
 
 #[test]
 fn the_small_session_is_the_same_on_every_machine() {

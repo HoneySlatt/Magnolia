@@ -19,9 +19,15 @@ use super::{
 /// The channels of a MIDI track's instrument: the test synth's two outputs.
 pub(crate) const INSTRUMENT_CHANNELS: u16 = 2;
 
-/// The furthest from the timeline's zero a clip may end: 2^41 samples, the disk reader's limit,
-/// 530 days at 48 kHz. A MIDI clip keeps to it too, so that no session asks for an endless render.
-const TIMELINE_LIMIT: i64 = 1 << 41;
+/// The longest a test session lasts: every clip, audio or MIDI, ends within 24 hours of the
+/// timeline's zero, so that a render writes at most a day of audio and its tail. At the highest
+/// rate, 768 kHz, that is 6.6e10 samples, well within the disk reader's 2^41 frames.
+const LONGEST_SESSION_SECONDS: i64 = 24 * 60 * 60;
+
+/// The sample after the last a clip may hold at `rate`: 24 hours from the timeline's zero.
+fn session_end(rate: SampleRate) -> i64 {
+    i64::from(rate.hertz()).saturating_mul(LONGEST_SESSION_SECONDS)
+}
 
 /// Where an output or a send goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -456,12 +462,12 @@ pub(crate) fn place_audio_clip(
     let end = i64::try_from(clip.length)
         .ok()
         .and_then(|length| start.0.checked_add(length))
-        .filter(|&end| end <= TIMELINE_LIMIT)
+        .filter(|&end| end <= session_end(rate))
         .ok_or_else(|| {
             out_of_range(
                 format!("{field}.length"),
                 clip.length,
-                "the clip must end within 2^41 frames of the timeline's zero",
+                "the clip must end within 24 hours of the timeline's zero, at the session's rate",
             )
         })?;
     if file_offset.checked_add(clip.length).is_none() {
@@ -508,13 +514,13 @@ pub(crate) fn place_midi_clip(
             tempo_map,
             &rate,
         )?;
-        (end.0 <= TIMELINE_LIMIT).then_some((length, end))
+        (end.0 <= session_end(rate)).then_some((length, end))
     });
     let (length, end) = placed.ok_or_else(|| {
         out_of_range(
             format!("{field}.length"),
             clip.length,
-            "the clip must end within 2^41 samples of the timeline's zero",
+            "the clip must end within 24 hours of the timeline's zero, at the session's rate",
         )
     })?;
     Ok(PlacedMidiClip {

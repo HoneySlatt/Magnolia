@@ -92,8 +92,9 @@ impl Session {
     ///
     /// A MIDI clip plays its whole file, every track merged, its ticks scaled from the file's
     /// division by the first tick at or after; each note off ends the earliest note of its channel
-    /// and key, and a note without its note off ends at the clip's end. The file's tempo and time
-    /// signatures are ignored: the session's tempo map rules.
+    /// and key, and a note without its note off ends at the clip's end. The track's sequence ends
+    /// each note where a later note of its channel and key starts, in any of its clips. The file's
+    /// tempo and time signatures are ignored: the session's tempo map rules.
     ///
     /// # Errors
     ///

@@ -107,7 +107,7 @@ done
 # above has checked their lock files.
 # libFuzzer runs one target on one core, so the targets run side by side, as many at once as the
 # machine has cores: each keeps a whole core for its time, and the step takes a fraction of their
-# sum. Each target's output goes to its own log, printed whole when it fails.
+# sum. Each run's output goes to its own log, printed whole when it fails.
 step "fuzzing, ${fuzz_seconds} s per target, up to $(nproc) at once"
 fuzz_logs="$fuzz_target_dir/logs"
 mkdir -p "$fuzz_logs"
@@ -125,29 +125,37 @@ for dir in "${fuzz_dirs[@]}"; do
         runs+=("$dir $target")
     done
 done
+# A run's name, which its log and its status take: its crate's and its target's, such as
+# `magnolia-session.session_open`, as two crates may name a target alike.
+fuzz_run_name() {
+    local dir=$1 target=$2
+    echo "$(basename "$(dirname "$dir")").$target"
+}
 # xargs runs them, at most one per core. Each run writes its output to its log and its status
 # beside it, which tell, once all are done, which failed.
 fuzz_one() {
-    local dir=$1 target=$2
+    local dir=$1 target=$2 name
+    name=$(fuzz_run_name "$dir" "$target")
     if nightly cargo fuzz run --fuzz-dir "$dir" --target-dir "$fuzz_target_dir" \
-        "$target" -- -max_total_time="$fuzz_seconds" >"$fuzz_logs/$target.log" 2>&1; then
-        echo 0 >"$fuzz_logs/$target.status"
+        "$target" -- -max_total_time="$fuzz_seconds" >"$fuzz_logs/$name.log" 2>&1; then
+        echo 0 >"$fuzz_logs/$name.status"
     else
-        echo 1 >"$fuzz_logs/$target.status"
+        echo 1 >"$fuzz_logs/$name.status"
     fi
 }
-export -f fuzz_one
+export -f fuzz_run_name fuzz_one
 export fuzz_target_dir fuzz_seconds fuzz_logs
 rm -f "$fuzz_logs"/*.status
 printf '%s\n' "${runs[@]}" | xargs -P "$(nproc)" -L 1 bash -c 'fuzz_one "$0" "$1"'
 fuzz_failed=0
 for run in "${runs[@]}"; do
     read -r dir target <<<"$run"
-    if [ "$(cat "$fuzz_logs/$target.status" 2>/dev/null)" = 0 ]; then
-        echo "$target: $(grep -E '^Done [0-9]+ runs' "$fuzz_logs/$target.log" || echo done)"
+    name=$(fuzz_run_name "$dir" "$target")
+    if [ "$(cat "$fuzz_logs/$name.status" 2>/dev/null)" = 0 ]; then
+        echo "$name: $(grep -E '^Done [0-9]+ runs' "$fuzz_logs/$name.log" || echo done)"
     else
-        echo "$target failed; its crash, if any, is in $dir/artifacts/$target/" >&2
-        cat "$fuzz_logs/$target.log" >&2
+        echo "$name failed; its crash, if any, is in $dir/artifacts/$target/" >&2
+        cat "$fuzz_logs/$name.log" >&2
         fuzz_failed=1
     fi
 done

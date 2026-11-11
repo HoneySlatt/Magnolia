@@ -58,10 +58,11 @@ pub enum Kind {
     /// score's strings and brass), the same song. 2.18 GB.
     High,
     /// A session of about 8 seconds that holds every feature of the file: gaps between clips, a
-    /// file offset, a start between two samples, gains, latent inserts on a bus and a track, sends,
-    /// a bus into a bus, mono into stereo, MIDI with pitch bends and controllers, a MIDI file of
-    /// 1,000 ticks a quarter, a clip cut short and a file played by two clips, a tempo change and a
-    /// meter change.
+    /// file offset, a start between two samples, gains, latent inserts on buses and a track, sends
+    /// into a latent bus from tracks whose outputs go elsewhere, so that the engine adds delay
+    /// lines, a bus into a bus, mono into stereo, MIDI with pitch bends and controllers, a MIDI
+    /// file of 1,000 ticks a quarter, a clip cut short and a file played by two clips, a tempo
+    /// change and a meter change.
     Small,
 }
 
@@ -657,7 +658,17 @@ fn small(song: &Song) -> Plan {
         1.0,
     );
     plan.bus("beat", MASTER, vec![Insert::Gain { value: 0.8 }], 1.0);
-    plan.bus("room", MASTER, vec![Insert::Gain { value: 0.5 }], 1.0);
+    // A latent bus fed by sends, as a reverb with lookahead would be: the tracks that send to it
+    // and go elsewhere directly reach their outputs through delay lines.
+    plan.bus(
+        "room",
+        MASTER,
+        vec![
+            Insert::Gain { value: 0.5 },
+            Insert::TestLatency { samples: 100 },
+        ],
+        1.0,
+    );
 
     // Mono into a stereo bus, two clips with a gap of a bar between them, a send.
     let vocal = AudioPart::Voice {

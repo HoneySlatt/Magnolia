@@ -24,7 +24,10 @@ const CHANNELS: usize = 16;
 ///   it, rounded up for others, such as 1,000;
 /// - each note off ending the earliest note of its channel and key still held, first in, first
 ///   out; a note off that ends none is ignored, a note that lasts no tick after scaling does not
-///   play, and a note without its note off ends at the clip's end;
+///   play, and a note without its note off ends at the clip's end; the track's sequence then ends
+///   each note where a later note of its channel and key starts
+///   ([`MidiSequence`](magnolia_engine::engine::MidiSequence)), so that notes of one key that
+///   overlap play one after the other, as in a piano roll;
 /// - velocities divided by 127, controllers' values by 127, pitch bends by 8,192 and kept from -1
 ///   to 1;
 /// - the file's tempo and time signatures ignored: the session's tempo map lays the clip on the

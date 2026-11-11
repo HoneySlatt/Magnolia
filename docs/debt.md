@@ -34,6 +34,13 @@ stage's audit triages the whole list.
 - **A swap that changes a playing source's compensation jumps its read position**
   ([ADR-0025](adr/0025-delay-compensation-by-reading-ahead.md)); M1.6 designs the resync with
   latency changes.
+- **Two sequences of one node that overlap on one key**: one sequence never holds a key twice
+  (`engine/sequence.rs`), but two may, as two MIDI tracks into one multi-timbral instrument will.
+  The node's notes are one bit per channel and key, so the first note off releases the key, and
+  the second note off, or the stop's, is never sent. The test synth releases every voice of a key
+  at once, so the second note is only cut short; from M1.6, a plugin that releases one voice per
+  note off keeps that voice sounding after the stop
+  ([ARCHITECTURE](ARCHITECTURE.md#timeline-sources)).
 - **The total compensation of a path is not capped**: only each node's latency is, at
   `MAX_LATENCY`; k latent nodes in series at the cap need delay lines of k × 65,536 samples per
   channel, allocated on the controller's thread.
