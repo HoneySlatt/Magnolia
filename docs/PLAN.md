@@ -32,7 +32,12 @@ tier, into [`measurements.md`](measurements.md).
   [ADR-0018](adr/0018-the-time-model.md), which amends ADR-0007: absolute positions are counted in
   time units, not samples. The figures are in
   [`measurements.md`](measurements.md#m12--the-time-model).
-- **Next: M1.3**, the JACK backend and the graph, on the owner's go.
+- **M1.3, the JACK backend and the graph: built, 2026-11-11**, on the owner's decisions of that day
+  ([ADR-0019](adr/0019-the-sanitizers-nightly-code-behind-a-cfg.md) to
+  [ADR-0023](adr/0023-the-real-time-allowlist.md); `jack`, `rtrb` and `libc` taken; the
+  [reference projects](reference-projects.md) adopted). Its checks pass; what only the owner's
+  hardware can measure is [listed below](#m13--the-jack-backend-and-the-graph).
+- **Next: M1.4**, a session plays, on the owner's go.
 
 ## Status
 
@@ -40,7 +45,7 @@ tier, into [`measurements.md`](measurements.md).
 |---|---|---|
 | [M1.1](#m11--the-workspace-and-its-checks) | The Rust workspace builds and is checked in CI | Done |
 | [M1.2](#m12--the-time-model) | Positions, tempo, meter and timecode are exact | Done |
-| [M1.3](#m13--the-jack-backend-and-the-graph) | A graph of nodes plays through the JACK API, swapped without a click | Planned |
+| [M1.3](#m13--the-jack-backend-and-the-graph) | A graph of nodes plays through the JACK API, swapped without a click | Done; the owner's measures by hand pending |
 | [M1.4](#m14--a-session-plays) | A test session of clips and MIDI plays from disk, delays compensated | Planned |
 | [M1.5](#m15--recording-and-monitoring) | A voice is recorded and monitored at low latency | Planned |
 | [M1.6](#m16--plugin-hosts) | Native CLAP and VST3 plugins play out of the engine's process and survive a crash | Planned |
@@ -98,6 +103,24 @@ milestone first needs it.
   named; the lowest tier's reference project defined, its plugins named; its memory, within
   2.5 GB, is measured at M1.9, once it can play
   ([ADR-0014](adr/0014-the-quality-bar-measured-against-the-market.md)).
+- **Delivered**, on the owner's decisions of 2026-11-11: in `magnolia-engine`, nodes under
+  [ADR-0021](adr/0021-the-node-contract.md)'s contract in an arena, the compiled graph swapped by a
+  crossfade or a dip, one swap in flight, sample-accurate events, the collector, the histogram and
+  counters, silence on a panic ([ADR-0022](adr/0022-a-panic-on-the-real-time-path-gives-silence.md)),
+  a device-less backend; `magnolia-jack`, the duplex backend, its report of real-time rights and an
+  example that plays a sine. Tested against an oracle, on JACK2's dummy driver in CI, and under
+  RealtimeSanitizer with its [allowlist](adr/0023-the-real-time-allowlist.md). Figures in
+  [`measurements.md`](measurements.md#m13--the-jack-backend-and-the-graph).
+- **By hand, by the owner** (agents have no sound card and no display):
+  - listen through PipeWire: `pw-jack -p 64 cargo run --release -p magnolia-jack --example play --
+    --connect --seconds 60` ([CONTRIBUTING](../CONTRIBUTING.md#playing-through-jack)); no click at
+    each crossfade, every two seconds; the real-time report says the audio thread runs in real time;
+  - the callback's histogram at 64 frames on the high tier, through the Focusrite (its model
+    recorded), with `--load 64` and more: the worst callback under 85 % of the period, the 99.9th
+    percentile under 50 %;
+  - the same through JACK2 if it is installed, `jackd -R`;
+  - the laptop of the lowest tier on mains power, its frequency governor and audio device named, at
+    128 and 64 frames.
 
 ### M1.4 — A session plays
 
@@ -194,12 +217,7 @@ milestone first needs it.
 
 ## Known debt
 
-- **The sanitizer's reports name addresses, not functions**, until the shell has a symbolizer or the
-  runs set `allow_addr2line=true`. ADR-0007's allowlist, suppressed by name, needs names: settled in
-  M1.3, taking care that a suppression of `syscall` does not hide a blocking wait.
-- **The time model's conversions were measured under load** (load average 34 to 36): their figures
-  are upper bounds until taken again on a quiet machine
-  ([measurements](measurements.md#m12--the-time-model)).
+The known debt is in [`debt.md`](debt.md).
 
 Finished stages move to [`history.md`](history.md), in a few lines each, so that this file holds the
 current stage only, under about 2,000 words.

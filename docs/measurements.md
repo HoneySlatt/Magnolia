@@ -76,3 +76,64 @@ full check from nothing again, at 118 s, while the load average rose from 16 to 
 Four-fifths of a check with nothing changed is the fuzzing, 20 s per target; a check from nothing
 also builds libFuzzer and the nightly's sanitizer builds. The engine has no program yet, so the 2 s
 from a change to the engine relaunched and ready is not measured.
+
+## M1.3 — The JACK backend and the graph
+
+Taken on 2026-11-11 on the high tier (AMD Ryzen 7 5800X, 8 cores, 16 threads), with rustc 1.99.1,
+the nightly rustc 1.101.0 of 2026-11-05 and JACK2 1.9.22, inside the development shell. The owner's
+own programs ran meanwhile: load average 6 to 17, noted with each table.
+
+### The callback on a dummy JACK2 server
+
+`examples/play.rs` with `--seconds 12 --swap-every 0 --load 64` (a sine through a gain on two
+outputs, and 64 more chains of a sine and a gain), on `jackd -r -d dummy -r 48000`: JACK2's dummy
+driver, which needs no sound card, run without real time. Release build. One run each; the
+histogram's quantiles are the upper bounds of their buckets, within 6.25 %.
+
+| Period | Periods | Median | 99.9th percentile | Maximum | Over 50 % / 85 % of the period |
+|---|---|---|---|---|---|
+| 256 frames (5.33 ms) | 2,250 | 213 µs | 351 µs | 351 µs | 0 % / 0 % |
+| 64 frames (1.33 ms) | 9,001 | 55.3 µs | 98.3 µs | 310 µs | 0 % / 0 % |
+
+Own overruns, gaps, server xruns, node errors and non-finite samples were all 0 in both runs. These
+are not the [floor's](ROADMAP.md#floors) figures: the server had no real-time priority and the
+machine was shared. The floor is measured by the owner, through `pw-jack` on the Focusrite, on the
+high tier (see the [PLAN](PLAN.md#m13--the-jack-backend-and-the-graph)).
+
+### At rest
+
+The same program with nothing swapped, voluntary context switches of each of its threads read in
+`/proc/<pid>/task/*/status` at 2 s and at 11 s.
+
+| Thread | 256 frames | 64 frames |
+|---|---|---|
+| main, collector, JACK2's two client threads | +0 each | +0 each |
+| JACK's process thread | +1,693 (one per period) | +6,765 (one per period) |
+
+Nothing of Magnolia's wakes outside the device's callback. M1.3 has no transport yet, so "at rest"
+here means no edit: the graph still plays its sine.
+
+### No page fault in a swap
+
+`page_faults::a_swap_takes_no_page_fault_on_the_processing_thread_after_warm_up`, the processing
+thread's minor faults across each swap after the first round: 0 within the pool and 0 with a larger
+pool, in debug and release builds. With the pool's pre-write removed by hand, once, the release build
+took 49 to 428 faults per swap.
+
+### Compiling and checking
+
+`time`-like wall clock in the development shell, the median of three runs unless noted. Load
+average 8 to 17.
+
+| What | Time | Budget ([floors](ROADMAP.md#floors)) |
+|---|---|---|
+| A debug build of the workspace from nothing | 1.56 s | 3 min |
+| A release build from nothing | 1.91 s | 10 min |
+| A debug build after a change to the engine, a low-level crate | 0.44 s | 10 s |
+| A change to the engine, the example rebuilt and playing on a dummy JACK2 | 0.77 s | 2 s |
+| A full check from nothing, one run | 93.6 s | 3 min |
+| A full check, nothing changed, one run | 74.7 s | — |
+
+The 2 s budget asks for "a session without plugins": until M1.4 plays sessions, the example's sine
+stands in for one. A check with nothing changed is mostly the fuzzing (40 s), the JACK backend's
+tests, which play in real time on their dummy servers, and the release build of the page-fault test.

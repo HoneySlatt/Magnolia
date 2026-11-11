@@ -29,8 +29,9 @@ The first entry downloads both toolchains, about 1 GB.
 
 ## Building and testing
 
-The engine is a library; the JACK backend plays it, and its example plays a sine. The commands that
-build and test them, and measure the time model's conversions:
+The engine is a library; the JACK backend plays it, and its example plays a sine
+([Playing through JACK](#playing-through-jack)). The commands that build and test them, and measure
+the time model's conversions:
 
 ```sh
 cargo build --workspace
