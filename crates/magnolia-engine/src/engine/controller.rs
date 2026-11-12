@@ -356,7 +356,10 @@ impl Controller {
             self.context.playback_channels,
         )?;
         self.reclaim_slots();
-        let plan = compensation::plan(&self.draft, self.context.playback_channels);
+        let sequences = &self.sources.sequences;
+        let plan = compensation::plan(&self.draft, self.context.playback_channels, |node| {
+            sequences.contains_key(&node)
+        });
         let delay_lines = self.delay_line_nodes(&plan)?;
         self.committed = Some(Committed {
             graph: plan.compensate(&self.draft, &delay_lines),

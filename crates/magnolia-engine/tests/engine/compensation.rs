@@ -10,6 +10,7 @@ use magnolia_engine::node::{MAX_LATENCY, Node, ProcessContext, ProcessStatus};
 use magnolia_engine::nodes::{Gain, Sine, TestLatency};
 
 use crate::support::{Constant, LARGEST_BLOCK, Rig, rate};
+use crate::timeline_support::{QUARTER, give, note, notes};
 
 /// Period lengths, in turn: within the largest block, above it, and one sample.
 const PERIODS: [usize; 7] = [64, 1_000, 100, 2_048, 37, 4_096, 1];
@@ -145,7 +146,29 @@ fn nothing_live_is_delayed() {
         let processor = rig.backend.processor();
         assert_eq!(processor.ahead_in(a), Some(u64::from(first)), "{what}");
         assert_eq!(processor.ahead_in(b), Some(u64::from(second)), "{what}");
+        // Live nodes read nothing ahead, so they lengthen no play's pre-roll (ADR-0032).
+        assert_eq!(processor.largest_ahead_in(), 0, "{what}");
     }
+}
+
+#[test]
+fn a_live_latent_node_with_timeline_sources_counts_in_the_pre_roll() {
+    let mut rig = Rig::new(1, 1);
+    let live = rig.add(TestLatency::new(1, 480));
+    rig.controller
+        .connect(Source::Capture(0), Destination::Node(live, 0));
+    rig.controller
+        .connect(Source::Node(live, 0), Destination::Playback(0));
+    rig.controller.commit().unwrap();
+    rig.play(&[64]);
+    assert_eq!(rig.backend.processor().largest_ahead_in(), 0);
+
+    // With a sequence, the node plays the timeline from the play's start, which needs the
+    // pre-roll to reach its latency: otherwise its first events and its chase would be lost.
+    give(&mut rig, live, vec![notes(vec![note(0, QUARTER, 60)])]);
+    rig.controller.commit().unwrap();
+    rig.play_until_steady(64);
+    assert_eq!(rig.backend.processor().largest_ahead_in(), 480);
 }
 
 /// Three sines, each to the playback channel and to a bus that delays by 500 samples.

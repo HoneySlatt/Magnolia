@@ -52,8 +52,9 @@ pub(crate) struct Compensated {
     pub(crate) description: Description,
     /// In samples, for every node of `description`.
     pub(crate) ahead_in: BTreeMap<NodeId, u64>,
-    /// The largest `ahead_in` of the audible nodes: the session's largest compensation, by which
-    /// the transport pre-rolls; 0 for a graph without them. A delay line runs no further ahead
+    /// The largest `ahead_in` of the audible nodes, live ones counted only when they have timeline
+    /// sources: the session's largest compensation, by which the transport pre-rolls; 0 for a
+    /// graph without them. A delay line runs no further ahead
     /// than the node that feeds it.
     pub(crate) largest_ahead_in: u64,
     /// The delay lines' nodes.
@@ -76,7 +77,7 @@ pub(crate) struct Plan {
     /// The delay lines the plan needs, each with its channels: as many as its destination's
     /// inputs.
     delay_lines: BTreeMap<DelayKey, usize>,
-    /// The largest `ahead_in` of the audible nodes.
+    /// The largest `ahead_in` of the audible nodes, live ones only with timeline sources.
     largest_ahead_in: u64,
 }
 
@@ -153,7 +154,13 @@ impl Plan {
 
 /// Plans the compensation of `description`, valid, for an engine of `playback_channels`: how far
 /// ahead each node runs, which edges need a delay, and the delay lines they go through.
-pub(crate) fn plan(description: &Description, playback_channels: usize) -> Plan {
+/// `reads_timeline` says which nodes have timeline sources: a live node counts in the pre-roll only
+/// if it has some, since a live path has nothing else to read ahead (ADR-0032).
+pub(crate) fn plan(
+    description: &Description,
+    playback_channels: usize,
+    reads_timeline: impl Fn(NodeId) -> bool,
+) -> Plan {
     let order = topological_order(description.nodes.keys().copied(), &description.edges)
         .expect("a committed description is acyclic");
     let mut fed_by: BTreeMap<NodeId, Vec<Destination>> = BTreeMap::new();
@@ -246,6 +253,7 @@ pub(crate) fn plan(description: &Description, playback_channels: usize) -> Plan 
     }
     let largest_ahead_in = audible
         .iter()
+        .filter(|node| !live.contains(node) || reads_timeline(**node))
         .filter_map(|node| ahead_in.get(node))
         .copied()
         .max()

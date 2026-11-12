@@ -87,7 +87,8 @@ period, the last swap applied and the last one steady, where the last play start
 errors, events taken and events dropped, non-finite samples, generation mismatches, latencies capped,
 missed plugin deadlines and the frames the audio players lacked (`disk_underruns`), the generations
 of disk streams handed out and the latest primed, the poisoned flag, the histogram of callback times, and the counters a backend fills
-(its own overruns, gaps in the device's frame time, the server's xruns, the audio thread's id).
+(its own overruns, gaps in the device's frame time, the server's xruns, the audio thread's id, the
+device's capture and playback latencies, in one word).
 
 ### A swap
 
@@ -169,7 +170,9 @@ which starts empty, is silent for that line's delay ([debt](debt.md)). A delay l
 allocated and written by the controller (`engine/memory.rs`); it sleeps once its inputs have been
 silent for its delay and a whole sub-block. Each compiled step records its node's `ahead_in`, and
 the compiled graph the largest of the audible nodes, the session's largest compensation, by which
-the transport pre-rolls ([below](#the-transport)).
+the transport pre-rolls ([below](#the-transport)). A live node counts in it only when it has
+timeline sources: a live path reads nothing else ahead, so monitoring through a latent plugin
+lengthens no play's pre-roll ([ADR-0032](adr/0032-recording-by-a-capture-tap-of-the-processor.md)).
 
 ### The transport
 
