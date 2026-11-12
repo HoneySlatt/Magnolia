@@ -23,12 +23,15 @@ tier, into [`measurements.md`](measurements.md).
   hand**, on the owner's decisions of that day
   ([ADR-0019](adr/0019-the-sanitizers-nightly-code-behind-a-cfg.md) to
   [ADR-0024](adr/0024-how-a-swap-avoids-a-click.md); `jack`, `rtrb` and `libc` taken; the
-  [reference projects](reference-projects.md) adopted). Its checks pass; what only the owner's
-  hardware can measure is [listed below](#m13--the-jack-backend-and-the-graph).
+  [reference projects](reference-projects.md) adopted). What only the owner's hardware can
+  measure is [listed below](#m13--the-jack-backend-and-the-graph).
 - **M1.4, a session plays: built, 2026-11-11; waiting for the owner's measures by hand**, on the
   owner's decisions of that day ([ADR-0025](adr/0025-delay-compensation-by-reading-ahead.md) to
   [ADR-0029](adr/0029-magnolias-own-wav-and-midi-file-readers.md); `serde` and `serde_json` taken).
   What only the owner's hardware can measure is [listed below](#m14--a-session-plays).
+- **M1.5, recording and monitoring: in progress**, on the owner's decisions of 2026-11-12
+  ([ADR-0030](adr/0030-takes-in-wav-of-unknown-length-repaired-on-recovery.md) to
+  [ADR-0032](adr/0032-recording-by-a-capture-tap-of-the-processor.md)).
 
 ## Status
 
@@ -38,7 +41,7 @@ tier, into [`measurements.md`](measurements.md).
 | [M1.2](#m12--the-time-model) | Positions, tempo, meter and timecode are exact | Done |
 | [M1.3](#m13--the-jack-backend-and-the-graph) | A graph of nodes plays through the JACK API, swapped without a click | Built; waiting for the owner's measures by hand |
 | [M1.4](#m14--a-session-plays) | A test session of clips and MIDI plays from disk, delays compensated | Built; waiting for the owner's measures by hand |
-| [M1.5](#m15--recording-and-monitoring) | A voice is recorded and monitored at low latency | Planned |
+| [M1.5](#m15--recording-and-monitoring) | A voice is recorded and monitored at low latency | In progress |
 | [M1.6](#m16--plugin-hosts) | Native CLAP and VST3 plugins play out of the engine's process and survive a crash | Planned |
 | [M1.7](#m17--the-wine-bridge) | The owner's Windows plugins play under the system's Wine | Planned |
 | [M1.8](#m18--plugin-windows-and-the-command-surface) | Plugin GUIs open; the engine is driven by the command line and MCP | Planned |
@@ -47,10 +50,9 @@ tier, into [`measurements.md`](measurements.md).
 ## Stage 1 — The engine and the plugins
 
 Magnolia plays, records and monitors at low latency on Linux, hosting the owner's plugins out of
-the engine's process, without an interface
+process, without an interface
 ([ADR-0006](adr/0006-the-interface-on-uwui-after-the-engine-and-the-project.md),
-[ADR-0007](adr/0007-the-audio-engine.md)). Each new dependency is put to the owner when its
-milestone first needs it.
+[ADR-0007](adr/0007-the-audio-engine.md)).
 
 ### M1.1 — The workspace and its checks
 
@@ -72,7 +74,7 @@ benchmarked ([measurements](measurements.md#m12--the-time-model)).
   engine's histogram of callback times; the reference projects of both tiers, defined and fixed.
 - **Done when.** A graph swap makes no click, tested; RealtimeSanitizer finds nothing; the engine
   reports missing real-time rights plainly.
-- **How to test.** `cargo test` on the backend without a device; playing by hand through `pw-jack`.
+- **How to test.** `cargo test` without a device; playing by hand through `pw-jack`.
 - **Measured.** The callback's histogram at 64 frames on the high tier; rest with the transport
   stopped; the laptop of the lowest tier on mains power, its frequency governor and audio device
   named; the lowest tier's reference project defined, its plugins named; its memory, within

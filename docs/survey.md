@@ -272,3 +272,52 @@ User Guide 7.85, Pro Tools Reference Guide 2025.12); Bitwig documents none of it
   that plugins may sound different offline.
 - Of Rust's WAV readers, neither `hound` 3.5.1 (2023) nor `symphonia` 0.6.1 (2026) reads RF64; the
   MIDI file reader `midly` 0.5.3 dates from 2023-01-01 (crates.io, 2026-11-11).
+
+## Recording, 2026-11-12
+
+Read for M1.5 in the projects' code (Ardour's master branch, libsndfile, FFmpeg, SoX, JACK2's
+`develop`, jack-example-tools, PipeWire), the specifications, and the manuals (REAPER User Guide
+7.85 and its release notes, Pro Tools Reference Guide 2025.12). Bitwig documents none of it; Logic,
+Cubase, Nuendo and Studio One gave no first-hand source.
+
+- Ardour records 32-bit float RF64 that falls back to WAV when small, one mono file per channel. It
+  writes the sizes once, at the end; until then libsndfile leaves a RIFF size of 8 and a data size
+  of 0
+  ([sndfilesource.cc](https://raw.githubusercontent.com/Ardour/ardour/master/libs/ardour/sndfilesource.cc),
+  [rf64.c](https://raw.githubusercontent.com/libsndfile/libsndfile/master/src/rf64.c)). No sync
+  during a take was found. Arming saves a pending state and a log of takes, which the next load
+  offers to recover, repairing the headers
+  ([session_state.cc](https://raw.githubusercontent.com/Ardour/ardour/master/libs/ardour/session_state.cc)).
+- Ardour's writer drains a ring per channel, 10 s by default, in writes of 131,072 samples; a block
+  the ring has no room for is dropped and marked, not padded, so the rest lands early
+  ([disk_writer.cc](https://raw.githubusercontent.com/Ardour/ardour/master/libs/ardour/disk_writer.cc),
+  [disk_io.cc](https://raw.githubusercontent.com/Ardour/ardour/master/libs/ardour/disk_io.cc)).
+- REAPER has written "a meaningful header so a power outage during recording will usually produce a
+  readable file" since 2006, and reads a 0-length data chunk since 5.25 (release notes). Pro Tools
+  writes Broadcast WAV, its time stamp "the location in the Timeline at which the recording began".
+  Neither documents its writer further.
+- A data size of 0xFFFFFFFF is read to the file's end by FFmpeg
+  ([wavdec.c](https://raw.githubusercontent.com/FFmpeg/FFmpeg/master/libavformat/wavdec.c)), SoX
+  ([wav.c](https://raw.githubusercontent.com/chirlu/sox/master/src/wav.c)) and libsndfile, which
+  clamps it ([wav.c](https://raw.githubusercontent.com/libsndfile/libsndfile/master/src/wav.c)).
+  A data size of 0 is read to the end by FFmpeg, as empty by SoX, and by libsndfile only beside a
+  RIFF size of exactly 8.
+- BW64 defines no unknown length; a recorder reserves a `JUNK` chunk that becomes `ds64` at 4 GiB
+  ([ITU-R BS.2088-2](https://www.itu.int/dms_pubrec/itu-r/rec/bs/R-REC-BS.2088-2-202511-I!!PDF-E.pdf)).
+  Apple's CAF defines a data size of -1 as unknown
+  ([CAF specification](https://developer.apple.com/library/archive/documentation/MusicAudio/Reference/CAFSpec/CAF_spec/CAF_spec.html)).
+  `bext`'s `TimeReference` counts samples since midnight
+  ([EBU Tech 3285](https://tech.ebu.ch/docs/tech/tech3285.pdf)); Ardour writes there a take's
+  timeline position and reads it back.
+- Ardour places a take by its input latency plus its output latency, and calibrates the extra in the
+  server, half on each side, from its own multi-tone measure
+  ([disk_writer.cc](https://raw.githubusercontent.com/Ardour/ardour/master/libs/ardour/disk_writer.cc),
+  [engine_dialog.cc](https://raw.githubusercontent.com/Ardour/ardour/master/gtk2_ardour/engine_dialog.cc)).
+  REAPER uses the driver's figures plus manual input and output offsets.
+- JACK2's drivers report capture as one period plus `-I`, playback as the buffering plus `-O`; the
+  dummy driver, asynchronous by default, one period and two
+  ([JackAudioDriver.cpp](https://raw.githubusercontent.com/jackaudio/jack2/develop/common/JackAudioDriver.cpp)).
+  `jack_iodelay` prints the "extra loopback latency" beyond what JACK reports
+  ([iodelay.cpp](https://raw.githubusercontent.com/jackaudio/jack-example-tools/main/tools/iodelay.cpp)).
+- Ardour, REAPER and Pro Tools let an armed track monitor its input, always or only when stopped and
+  while recording; Ardour and Pro Tools record a track's input before its plugins by default.

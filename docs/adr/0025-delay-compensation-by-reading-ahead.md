@@ -1,7 +1,7 @@
 # 0025. Delay compensation by reading ahead
 
 - Status: Accepted; amends 0007 (how delays compensate latencies) and 0021 (a node's latency, the
-  transport it sees)
+  transport it sees); amended by 0032
 - Date: 2026-11-11
 
 ## Context

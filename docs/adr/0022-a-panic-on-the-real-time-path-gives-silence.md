@@ -1,6 +1,6 @@
 # 0022. A panic on the real-time path gives silence, and is reported
 
-- Status: Accepted
+- Status: Accepted; amended by 0032
 - Date: 2026-11-11
 
 ## Context

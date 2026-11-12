@@ -1,6 +1,6 @@
 # 0029. Magnolia's own WAV and MIDI file readers
 
-- Status: Accepted
+- Status: Accepted; amended by 0030
 - Date: 2026-11-11
 
 ## Context
