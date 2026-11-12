@@ -46,6 +46,9 @@ pub struct EngineStats {
     frame_time_gaps: AtomicU64,
     server_xruns: AtomicU64,
     audio_thread_id: AtomicI32,
+    /// The device's latencies, the capture's in the high 32 bits and the playback's in the low 32,
+    /// in one word, so that the real-time thread reads both at once without waiting.
+    device_latency: AtomicU64,
     /// The last play's start: its sequence number, then the engine sample at which the output
     /// reaches its first timeline sample, as an `i64`'s bits. The processor writes it, never
     /// waiting; a reader that meets a write tries again.
@@ -63,6 +66,36 @@ pub struct PlayStart {
     pub sequence: u64,
     /// The engine sample at which the output plays the play's first timeline sample.
     pub audible_at: SamplePosition,
+}
+
+/// The device's latencies as the audio server reports them, in frames
+/// ([ADR-0031](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0031-the-round-trip-reported-and-takes-placed-by-it.md)):
+/// how long a captured frame took to reach the engine, and how long a frame the engine plays takes
+/// to reach the output. Both 0 for a device without latency, as the device-less backend.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DeviceLatency {
+    /// From the input to the engine's capture buffers, in frames.
+    pub capture: u32,
+    /// From the engine's playback buffers to the output, in frames.
+    pub playback: u32,
+}
+
+impl DeviceLatency {
+    /// The round trip the server reports: the capture latency plus the playback latency.
+    pub fn round_trip(self) -> u64 {
+        u64::from(self.capture).saturating_add(u64::from(self.playback))
+    }
+
+    fn packed(self) -> u64 {
+        (u64::from(self.capture) << 32) | u64::from(self.playback)
+    }
+
+    fn unpacked(word: u64) -> Self {
+        Self {
+            capture: (word >> 32) as u32,
+            playback: word as u32,
+        }
+    }
 }
 
 impl EngineStats {
@@ -174,6 +207,11 @@ impl EngineStats {
         self.audio_thread_id.load(Ordering::Relaxed)
     }
 
+    /// The device's latencies, as the backend last published them. Real-time safe: one atomic load.
+    pub fn device_latency(&self) -> DeviceLatency {
+        DeviceLatency::unpacked(self.device_latency.load(Ordering::Acquire))
+    }
+
     /// Where the last play started, once a play has; the controller numbers plays from 1.
     pub fn play_start(&self) -> Option<PlayStart> {
         let [sequence, audible_at] = self.play_start.read();
@@ -196,6 +234,13 @@ impl EngineStats {
     /// Counts one xrun reported by the audio server. Real-time safe.
     pub fn record_server_xrun(&self) {
         self.server_xruns.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Publishes the device's latencies, as the audio server reports them. The backend calls it
+    /// whenever they change; both reach a reader together. Real-time safe.
+    pub fn publish_device_latency(&self, latency: DeviceLatency) {
+        self.device_latency
+            .store(latency.packed(), Ordering::Release);
     }
 
     /// Records the kernel's id of the audio thread. Real-time safe.
@@ -226,6 +271,7 @@ impl EngineStats {
             &stats.own_overruns,
             &stats.frame_time_gaps,
             &stats.server_xruns,
+            &stats.device_latency,
         ];
         for counter in counters {
             counter.store(zero, Ordering::Relaxed);
@@ -318,5 +364,42 @@ impl EngineStats {
 
     pub(crate) fn set_poisoned(&self) {
         self.poisoned.store(true, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DeviceLatency, EngineStats};
+
+    #[test]
+    fn the_device_latency_reads_back_as_published_whole() {
+        let stats = EngineStats::new_written();
+        assert_eq!(stats.device_latency(), DeviceLatency::default());
+        for latency in [
+            DeviceLatency {
+                capture: 64,
+                playback: 128,
+            },
+            DeviceLatency {
+                capture: u32::MAX,
+                playback: 0,
+            },
+            DeviceLatency {
+                capture: 0,
+                playback: u32::MAX,
+            },
+        ] {
+            stats.publish_device_latency(latency);
+            assert_eq!(stats.device_latency(), latency);
+        }
+    }
+
+    #[test]
+    fn the_round_trip_sums_both_sides_without_overflow() {
+        let latency = DeviceLatency {
+            capture: u32::MAX,
+            playback: u32::MAX,
+        };
+        assert_eq!(latency.round_trip(), 2 * u64::from(u32::MAX));
     }
 }
