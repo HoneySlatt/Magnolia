@@ -43,6 +43,62 @@ pub fn wait_for(what: &str, timeout: Duration, condition: impl Fn() -> bool) {
     }
 }
 
+/// The server's freewheel, turned on and off by a client of its own (`jack_set_freewheel`): the
+/// server runs its cycles one after another, as fast as its clients go, with no deadline and
+/// without skipping any, for the tests that need JACK's processing path and not its timing. On
+/// JACK2's dummy driver it ran 80 to 240 times real time, measured. It disconnects the server's
+/// own `system:` ports while it lasts.
+///
+/// JACK2 1.9.22 stalls for its freewheel driver's timeout, 10 s, when a client closes while it
+/// freewheels, measured: so the client that turns freewheel on stays open until it turns it off,
+/// and a test opens its other clients before [`start`](Self::start) and closes them after
+/// [`stop`](Self::stop). Dropped, it turns freewheel off, on a panic too: declared after the
+/// test's other clients, it is dropped before them.
+pub struct Freewheel {
+    /// `None` once freewheel is off.
+    client: Option<Client>,
+}
+
+impl Freewheel {
+    /// Turns freewheel on, through a client of its own on `server`.
+    pub fn start(server: &Server) -> Self {
+        let (client, _) =
+            Client::new_with_server_name("freewheel", &server.name, ClientOptions::NO_START_SERVER)
+                .expect("the freewheel's client opens on the test's server");
+        assert!(set_freewheel(&client, true), "the server freewheels");
+        Self {
+            client: Some(client),
+        }
+    }
+
+    /// Turns freewheel off, then closes its client.
+    pub fn stop(mut self) {
+        assert!(self.turn_off(), "the server stopped freewheeling");
+    }
+
+    /// Turns freewheel off, once; returns whether the server agreed.
+    fn turn_off(&mut self) -> bool {
+        self.client
+            .take()
+            .is_none_or(|client| set_freewheel(&client, false))
+    }
+}
+
+impl Drop for Freewheel {
+    fn drop(&mut self) {
+        if !self.turn_off() {
+            eprintln!("the server did not stop freewheeling");
+        }
+    }
+}
+
+/// Asks the server of `client` to freewheel, or to stop; returns whether it agreed.
+fn set_freewheel(client: &Client, on: bool) -> bool {
+    // SAFETY: the client is open, held by the caller; libjack is loaded since it opened. The call
+    // takes no pointer but the client's.
+    unsafe { jack::jack_sys::jack_set_freewheel(client.raw(), i32::from(on)) == 0 }
+}
+
 /// Takes the lock that runs the JACK tests one at a time: each starts a server of its own, and
 /// several at once would load the machine into xruns that the tests do not provoke themselves.
 #[expect(
@@ -129,12 +185,33 @@ pub fn ramp(sample: u64) -> f32 {
 
 /// A plain JACK client, apart from Magnolia: it plays a signal on its output port and records its
 /// input port, from its first period, up to a set length.
+///
+/// In freewheel, the server runs the graph as fast as its clients go, so a test's thread cannot
+/// act at a point of the recording by waiting for it: the probe would be far past it. So the probe
+/// **holds** once it has recorded as many samples as [`hold_at`](Self::hold_at) said: it waits in
+/// its own period, and a freewheeling server, which waits for every client, waits with it, until
+/// the test moves the hold further. It holds at most [`HOLD_LIMIT`], under JACK2's freewheel
+/// timeout of 10 s, so that a test that fails while it holds never stalls the server.
 pub struct Probe {
     client: AsyncClient<(), Recorder>,
     recorded: Arc<AtomicUsize>,
     gaps: Arc<AtomicU64>,
+    hold: Arc<Hold>,
     pub output: String,
     pub input: String,
+}
+
+/// The longest a probe holds.
+const HOLD_LIMIT: Duration = Duration::from_secs(5);
+
+/// Where a probe holds, shared by the test's thread and the probe's.
+struct Hold {
+    /// The count of samples recorded at which the probe holds; `usize::MAX` for never.
+    at: AtomicUsize,
+    /// Whether the probe holds now.
+    holding: AtomicBool,
+    /// Whether a hold outlasted [`HOLD_LIMIT`].
+    expired: AtomicBool,
 }
 
 struct Recorder {
@@ -146,10 +223,33 @@ struct Recorder {
     recording: Vec<f32>,
     recorded: Arc<AtomicUsize>,
     gaps: Gaps,
+    hold: Arc<Hold>,
+}
+
+impl Recorder {
+    /// Waits, at the start of a period, while the samples recorded reach the hold, up to
+    /// [`HOLD_LIMIT`]. A test's client, never Magnolia's: it may wait.
+    fn hold_if_asked(&self) {
+        let recorded = self.recording.len();
+        if self.hold.at.load(Ordering::Acquire) > recorded {
+            return;
+        }
+        self.hold.holding.store(true, Ordering::Release);
+        let start = Instant::now();
+        while self.hold.at.load(Ordering::Acquire) <= recorded {
+            if start.elapsed() > HOLD_LIMIT {
+                self.hold.expired.store(true, Ordering::Release);
+                break;
+            }
+            pause(Duration::from_micros(50));
+        }
+        self.hold.holding.store(false, Ordering::Release);
+    }
 }
 
 impl ProcessHandler for Recorder {
     fn process(&mut self, _: &Client, scope: &ProcessScope) -> Control {
+        self.hold_if_asked();
         self.gaps.note(scope);
         for sample in self.output.as_mut_slice(scope) {
             *sample = (self.signal)(self.played);
@@ -175,6 +275,11 @@ impl Probe {
         let (output_name, input_name) = (output.name().unwrap(), input.name().unwrap());
         let recorded = Arc::new(AtomicUsize::new(0));
         let gaps = Arc::new(AtomicU64::new(0));
+        let hold = Arc::new(Hold {
+            at: AtomicUsize::new(usize::MAX),
+            holding: AtomicBool::new(false),
+            expired: AtomicBool::new(false),
+        });
         let recorder = Recorder {
             output,
             input,
@@ -183,15 +288,35 @@ impl Probe {
             recording: Vec::with_capacity(length),
             recorded: Arc::clone(&recorded),
             gaps: Gaps::new(Arc::clone(&gaps)),
+            hold: Arc::clone(&hold),
         };
         let client = client.activate_async((), recorder).unwrap();
         Self {
             client,
             recorded,
             gaps,
+            hold,
             output: output_name,
             input: input_name,
         }
+    }
+
+    /// Makes the probe hold, at the start of a period, once it has recorded `samples`: a whole
+    /// number of periods later, as it records whole periods. Moving the hold past what it has
+    /// recorded lets a holding probe go on; `usize::MAX` never holds.
+    pub fn hold_at(&self, samples: usize) {
+        self.hold.at.store(samples, Ordering::Release);
+    }
+
+    /// Waits until the probe holds where [`hold_at`](Self::hold_at) last said, up to ten seconds,
+    /// and returns how many samples it has recorded.
+    pub fn wait_until_held(&self) -> usize {
+        let at = self.hold.at.load(Ordering::Acquire);
+        // A probe still in its last hold has recorded less than the new one asks.
+        wait_for("the probe's hold", Duration::from_secs(10), || {
+            self.hold.holding.load(Ordering::Acquire) && self.recorded() >= at
+        });
+        self.recorded()
     }
 
     pub fn client(&self) -> &Client {
@@ -224,7 +349,12 @@ impl Probe {
 
     /// Deactivates the probe and returns what it recorded.
     pub fn finish(self) -> Vec<f32> {
+        self.hold_at(usize::MAX);
         let (_, _, recorder) = self.client.deactivate().unwrap();
+        assert!(
+            !self.hold.expired.load(Ordering::Acquire),
+            "the probe held longer than {HOLD_LIMIT:?}"
+        );
         recorder.recording
     }
 }

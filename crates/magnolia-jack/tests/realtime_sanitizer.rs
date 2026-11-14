@@ -1,7 +1,9 @@
 //! Proves that RealtimeSanitizer finds nothing in the JACK backend's process callback while it
 //! plays the engine on a JACK2 server: periods, a crossfade, a dip, events, capture, a processor
-//! replaced in place. A first case proves the sanitizer active in this build: an allocation in a
-//! function marked real-time is stopped. Another shows that it does not intercept `gettid`, which
+//! replaced in place, the device's latencies published as connections and the monitoring latency
+//! change. The latency callback is not checked: JACK2 runs it on its notification thread, which is
+//! not real-time, and its own range calls may sleep there (`src/latency.rs`). A first case proves
+//! the sanitizer active in this build: an allocation in a function marked real-time is stopped. Another shows that it does not intercept `gettid`, which
 //! the thread-init callback calls once on the audio thread, outside any real-time context: the
 //! call needs no suppression.
 //!
@@ -134,11 +136,23 @@ fn play_the_backend(server: &str) {
     let (patchbay, _) =
         Client::new_with_server_name("patchbay", server, ClientOptions::NO_START_SERVER)
             .expect("a second client opens");
+    let capture = backend.capture_ports()[0].clone();
     patchbay
-        .connect_ports_by_name("system:capture_1", &backend.capture_ports()[0])
+        .connect_ports_by_name("system:capture_1", &capture)
         .unwrap();
+    let latency = backend
+        .wait_for_latency(&[("system:capture_1", &capture)], Duration::from_secs(5))
+        .expect("the latency callback ran");
+    assert_eq!(latency.capture, 64);
     assert_eq!(backend.connect_to_physical_playback().unwrap(), 2);
+    backend
+        .set_monitoring_latency(100)
+        .expect("the latency callback ran");
     play(&mut controller, 20);
+    assert_eq!(
+        controller.stats().device_latency(),
+        backend.device_latency()
+    );
 
     let start = controller.stats().block_start().0;
     for (index, offset) in [0, 10, 700, 701, 701, 1_500, 4_000].into_iter().enumerate() {

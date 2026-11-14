@@ -2,6 +2,7 @@
 //! from then on while the client stays active and connected, and the engine reports itself
 //! poisoned. A new processor handed to the running backend brings the sound back without
 //! reconnecting, and the old one is dropped on the handle's thread, never on the audio thread.
+//! The server freewheels once the probe is connected; the probe holds at each step of the test.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -11,12 +12,22 @@ use magnolia_engine::engine::{Destination, Source};
 
 use crate::common::Server;
 use crate::support::{
-    Constant, DropWitness, Panicking, Probe, Rig, new_engine, one_at_a_time, silence,
-    this_thread_id, wait_for,
+    Constant, DropWitness, Freewheel, Panicking, Probe, Rig, new_engine, one_at_a_time, silence,
+    this_thread_id,
 };
 
 /// Four seconds at 48 kHz, room for every phase of the test.
 const LENGTH: usize = 192_000;
+
+/// The ones recorded before the panic: half a second, which the probe records in real time while
+/// the server is put in freewheel.
+const ONES: usize = 24_000;
+
+/// Ten periods of 256 frames: time enough for the processor to run the node that panics.
+const TEN_PERIODS: usize = 2_560;
+
+/// Half a second: the silence after the panic, then the new processor's sound, at the least.
+const HALF_A_SECOND: usize = 24_000;
 
 #[test]
 fn a_panic_gives_silence_and_a_new_processor_brings_the_sound_back_in_place() {
@@ -38,18 +49,21 @@ fn a_panic_gives_silence_and_a_new_processor_brings_the_sound_back_in_place() {
     rig.controller.commit().unwrap();
     rig.wait_until_steady();
     let probe = Probe::open(&server, silence, LENGTH);
+    probe.hold_at(ONES);
     let playback = rig.backend.playback_ports()[0].clone();
     probe.connect(&playback, &probe.input);
-    wait_for("the ones", Duration::from_secs(10), || {
-        probe.recorded() > 4_800
-    });
+    let freewheel = Freewheel::start(&server);
+    let ones_recorded = probe.wait_until_held();
 
     let stats = Arc::clone(rig.controller.stats());
     armed.store(true, Ordering::Relaxed);
-    wait_for("the panic", Duration::from_secs(10), || stats.poisoned());
+    probe.hold_at(ones_recorded + TEN_PERIODS);
+    probe.wait_until_held();
+    assert!(stats.poisoned(), "the node panicked within ten periods");
     let periods = stats.periods();
     let poisoned_at = probe.recorded();
-    probe.wait_for_samples(poisoned_at + 24_000, Duration::from_secs(10));
+    probe.hold_at(poisoned_at + 2 * HALF_A_SECOND);
+    probe.wait_until_held();
     // The heartbeat goes on, the client stays active, and the connection stays.
     assert!(stats.periods() > periods + 50);
     assert!(!rig.backend.server_shut_down());
@@ -62,11 +76,12 @@ fn a_panic_gives_silence_and_a_new_processor_brings_the_sound_back_in_place() {
     controller.connect(Source::Node(quarter, 0), Destination::Playback(0));
     controller.commit().unwrap();
     assert!(rig.backend.replace_processor(processor).is_ok());
+    let replaced_at = probe.recorded();
+    probe.hold_at(replaced_at + 2 * HALF_A_SECOND);
     controller
         .wait_until_steady(Duration::from_secs(5))
         .expect("the new processor applies its graph");
-    let replaced_at = probe.recorded();
-    probe.wait_for_samples(replaced_at + 24_000, Duration::from_secs(10));
+    probe.wait_until_held();
 
     // The old processor came back to the handle, which drops it here.
     rig.backend.poll();
@@ -79,6 +94,8 @@ fn a_panic_gives_silence_and_a_new_processor_brings_the_sound_back_in_place() {
     );
     assert!(port.is_connected_to(&playback).unwrap());
     assert!(!controller.stats().poisoned());
+    probe.hold_at(usize::MAX);
+    freewheel.stop();
     let recorded = probe.finish();
 
     // Silence until the probe was connected, ones until the panic, silence until the new
@@ -102,7 +119,10 @@ fn a_panic_gives_silence_and_a_new_processor_brings_the_sound_back_in_place() {
             .all(|&sample| sample == 0.0),
         "silence from the panic until the new processor"
     );
-    assert!(quarter_start - ones_end > 24_000, "the silence lasted");
+    assert!(
+        quarter_start - ones_end > HALF_A_SECOND,
+        "the silence lasted"
+    );
     assert!(
         recorded[quarter_start..]
             .iter()

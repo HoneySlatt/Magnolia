@@ -1,6 +1,7 @@
 //! A swap makes no click through JACK: a plain JACK client records Magnolia's playback across a
 //! crossfade between two sines, and no step between two samples exceeds the crossfade's bound, as
-//! the engine's own swap tests compute it.
+//! the engine's own swap tests compute it. The server freewheels once the probe is connected; the
+//! probe holds while the test commits each change, so that each lands where the test means it to.
 
 use std::time::Duration;
 
@@ -9,8 +10,8 @@ use magnolia_engine::nodes::Sine;
 
 use crate::common::Server;
 use crate::support::{
-    Probe, Rig, Take, crossfade_step_bound, first_unbroken_take, largest_step, one_at_a_time, rate,
-    silence,
+    Freewheel, Probe, Rig, Take, crossfade_step_bound, first_unbroken_take, largest_step,
+    one_at_a_time, rate, silence,
 };
 
 const FIRST: (f64, f64) = (440.0, 0.5);
@@ -18,6 +19,10 @@ const SECOND: (f64, f64) = (660.0, 0.4);
 
 /// One and a half seconds at 48 kHz.
 const LENGTH: usize = 72_000;
+
+/// The silence recorded before the first sine: half a second, which the probe records in real
+/// time while the server is put in freewheel.
+const SILENCE: usize = 24_000;
 
 /// Records Magnolia's playback from silence, through the first sine's start, then across the
 /// crossfade to the second sine.
@@ -27,16 +32,19 @@ fn record_a_crossfade() -> Take<Vec<f32>> {
     let first = rig.add(Sine::new(rate(), FIRST.0, FIRST.1 as f32));
     let second = rig.add(Sine::new(rate(), SECOND.0, SECOND.1 as f32));
     let probe = Probe::open(&server, silence, LENGTH);
+    probe.hold_at(SILENCE);
     probe.connect(&rig.backend.playback_ports()[0], &probe.input);
-    probe.wait_for_samples(4_800, Duration::from_secs(10));
     let gaps = rig.controller.stats().frame_time_gaps();
+    let freewheel = Freewheel::start(&server);
+    probe.wait_until_held();
 
     // The first sine starts at its phase 0, from silence: no step beyond its own.
     rig.controller
         .connect(Source::Node(first, 0), Destination::Playback(0));
     rig.controller.commit().unwrap();
+    probe.hold_at(LENGTH / 2);
     rig.wait_until_steady();
-    probe.wait_for_samples(LENGTH / 2, Duration::from_secs(10));
+    probe.wait_until_held();
 
     rig.controller
         .disconnect(Source::Node(first, 0), Destination::Playback(0))
@@ -47,12 +55,15 @@ fn record_a_crossfade() -> Take<Vec<f32>> {
         rig.controller.commit().unwrap(),
         Commit::Sent { sequence: 2 }
     );
+    probe.hold_at(usize::MAX);
     rig.wait_until_steady();
     probe.wait_for_samples(LENGTH, Duration::from_secs(10));
     let stats = rig.controller.stats();
     assert_eq!(stats.last_swap_steady(), 2);
     assert_eq!(stats.non_finite_samples(), 0);
+    // Read before the server leaves freewheel, which may count a gap of its own.
     let skipped_cycles = stats.frame_time_gaps() - gaps + probe.gaps();
+    freewheel.stop();
     Take {
         result: probe.finish(),
         skipped_cycles,

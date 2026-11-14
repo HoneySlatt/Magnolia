@@ -1,5 +1,6 @@
-//! What JACK tells the backend outside its process callback, and what the backend's three parts
-//! share: the handle on the caller's thread, the notification handler, and the process callback.
+//! What JACK tells the backend outside its process callback, and what the backend's parts share:
+//! the handle on the caller's thread, the notification handler, the latency callback
+//! (`latency.rs`), and the process callback.
 //!
 //! JACK calls the notification handler on threads of its own: JACK2 on its notification thread,
 //! PipeWire on its real-time thread for an xrun, and the thread-init callback on the audio thread
@@ -22,7 +23,10 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 use jack::{Client, ClientStatus, Control, Frames, NotificationHandler};
 
-/// What the handle, the notification handler and the process callback share: atomics only.
+use crate::latency::LatencyShared;
+
+/// What the handle, the notification handler, the latency callback and the process callback
+/// share: atomics only.
 #[derive(Debug)]
 pub(crate) struct Shared {
     /// The kernel's id of the thread that runs the process callback; 0 until its first period.
@@ -35,6 +39,12 @@ pub(crate) struct Shared {
     server_rate: AtomicU32,
     /// Whether the backend's own callback code panicked, outside the processor.
     callback_panicked: AtomicBool,
+    /// Whether the server freewheels: it runs its cycles one after another, as fast as its
+    /// clients go, with no deadline.
+    freewheeling: AtomicBool,
+    /// The device's latencies and the monitoring latency, which the latency callback reads and
+    /// sets.
+    latency: LatencyShared,
 }
 
 impl Shared {
@@ -46,6 +56,8 @@ impl Shared {
             shut_down: AtomicBool::new(false),
             server_rate: AtomicU32::new(server_rate),
             callback_panicked: AtomicBool::new(false),
+            freewheeling: AtomicBool::new(false),
+            latency: LatencyShared::default(),
         }
     }
 
@@ -76,6 +88,14 @@ impl Shared {
     pub(crate) fn set_callback_panicked(&self) {
         self.callback_panicked.store(true, Ordering::Relaxed);
     }
+
+    pub(crate) fn freewheeling(&self) -> bool {
+        self.freewheeling.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn latency(&self) -> &LatencyShared {
+        &self.latency
+    }
 }
 
 /// The backend's notification handler.
@@ -101,6 +121,16 @@ impl NotificationHandler for Notifications {
     /// Async-signal-safe: one atomic store.
     unsafe fn shutdown(&mut self, _: ClientStatus, _: &str) {
         self.shared.shut_down.store(true, Ordering::Release);
+    }
+
+    /// While the server freewheels, the process callback counts no overrun: there is no deadline.
+    /// JACK2 calls it before the first cycle in freewheel and after the last, as its server
+    /// notifies its clients and waits for them before it switches drivers (read in `JackServer.cpp`
+    /// and `JackEngine.cpp` of JACK2 1.9.22).
+    fn freewheel(&mut self, _: &Client, is_freewheel_enabled: bool) {
+        self.shared
+            .freewheeling
+            .store(is_freewheel_enabled, Ordering::Release);
     }
 
     /// While the rate differs from the engine's, the process callback writes silence.

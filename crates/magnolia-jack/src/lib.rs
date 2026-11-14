@@ -8,7 +8,9 @@
 //! backend counts its own overruns, gaps in the server's frame time and the server's xruns in the
 //! engine's statistics; [`JackBackend::realtime_status`] says whether the audio thread runs in real
 //! time, and how to grant it the rights when it does not; [`JackBackend::replace_processor`]
-//! rebuilds a poisoned engine without closing the client.
+//! rebuilds a poisoned engine without closing the client. A latency callback reads the device's
+//! latencies, [`JackBackend::device_latency`], and shows other clients the latency of Magnolia's
+//! monitoring path, [`JackBackend::set_monitoring_latency`].
 //!
 //! libjack is loaded when the first client opens, so a program that never opens one runs without
 //! it. Run through `pw-jack`, the backend plays on PipeWire; otherwise on whichever libjack the
@@ -41,8 +43,11 @@
 
 mod backend;
 mod callback;
+mod latency;
 mod notifications;
 mod realtime;
 
-pub use backend::{CloseError, ConnectError, JackBackend, JackOptions, OpenError, ReplaceError};
+pub use backend::{
+    CloseError, ConnectError, JackBackend, JackOptions, LatencyError, OpenError, ReplaceError,
+};
 pub use realtime::{AudioServer, RealtimePolicy, RealtimeStatus, ThreadScheduling};

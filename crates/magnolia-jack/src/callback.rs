@@ -1,10 +1,11 @@
 //! The process callback: what runs on the audio thread once a period.
 //!
 //! It wraps the client's ports in a [`DeviceBuffers`] and calls [`Processor::process`], and around
-//! it: swaps in a processor the handle sent, counts gaps in the server's frame time, its own
-//! overruns of the period's deadline, and the server's xruns, and writes silence while the server's
-//! rate differs from the engine's. It never allocates, frees, locks or blocks: what it lets go goes
-//! back to the handle, which drops it.
+//! it: swaps in a processor the handle sent, publishes the device's latencies that the latency
+//! callback read, counts gaps in the server's frame time, its own overruns of the period's
+//! deadline, and the server's xruns, and writes silence while the server's rate differs from the
+//! engine's. It never allocates, frees, locks or blocks: what it lets go goes back to the handle,
+//! which drops it.
 
 // The process callback runs this module's code in every period: nothing here may panic (ADR-0022).
 #![warn(
@@ -158,6 +159,10 @@ impl Callback {
         let cycle = scope.cycle_times().ok();
         self.swap_in_replacement();
         self.learn_audio_thread_id();
+        // Every period, so that a processor swapped in has it from its first.
+        self.processor
+            .stats()
+            .publish_device_latency(self.shared.latency().device());
         match cycle {
             Some(cycle) => {
                 if self
@@ -184,7 +189,9 @@ impl Callback {
                 port.as_mut_slice(scope).fill(0.0);
             }
         }
+        // A freewheeling server has no deadline: its cycles' times say nothing of one.
         if let Some(cycle) = cycle
+            && !self.shared.freewheeling()
             && is_own_overrun(entry, client.time(), cycle.next_usecs, cycle.period_usecs)
         {
             self.processor.stats().record_own_overrun();

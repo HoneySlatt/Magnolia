@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use magnolia_engine::engine::{self, Controller, Destination, EngineConfig, NodeId, Source};
 use magnolia_engine::nodes::{Gain, Sine};
 use magnolia_engine::time::SampleRate;
-use magnolia_jack::{JackBackend, JackOptions, OpenError};
+use magnolia_jack::{ConnectError, JackBackend, JackOptions, OpenError};
 
 /// The sine's amplitude: -20 dBFS, so that a listener is never surprised.
 const AMPLITUDE: f32 = 0.1;
@@ -213,8 +213,14 @@ fn play(options: &Options) -> Result<(), Box<dyn Error>> {
         options.seconds
     );
     if options.connect {
-        let connected = backend.connect_to_physical_playback()?;
-        println!("Connected {connected} playback ports to the physical ones.");
+        match backend.connect_to_physical_playback() {
+            Ok(connected) => println!("Connected {connected} playback ports to the physical ones."),
+            // The ports play all the same; only their latency is unknown.
+            Err(ConnectError::Latency(error)) => {
+                println!("Connected the playback ports to the physical ones, but {error}.");
+            }
+            Err(error) => return Err(error.into()),
+        }
     }
 
     let end = start + Duration::from_secs_f64(options.seconds);

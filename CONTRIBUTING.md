@@ -58,13 +58,25 @@ talk to the live PipeWire session instead of the test's own server. A JACK2 serv
 without stopping cleanly keeps its place in JACK2's registry of servers, which holds eight, and its
 shared memory in `/dev/shm`; once eight places are held so, no server starts. So after killing its
 server, a test starts one under the same name and stops it cleanly, which frees both, and removes
-the socket and semaphores named after that server (`tests/common/mod.rs`).
+the socket and semaphores named after that server (`tests/common/mod.rs`). JACK2's registry itself,
+`/dev/shm/jack-shm-registry`, shared by every JACK2 server of the user, stays.
 
-The null through JACK (`tests/jack/session.rs`) plays the small test session for nine seconds at 64
-and at 256 frames, on the same servers. Without real time at 64 frames, a server skips a client's
-cycle every few seconds; the test then plays the session again, until each sample has been
-compared in at least one take, five takes at most. With `-- --nocapture`, it prints each take's skipped cycles,
-the samples not yet heard and how long closing its clients took.
+The tests that need JACK's processing path and not its timing run their server in freewheel, as
+fast as the clients go (`support::Freewheel` in `tests/jack/support.rs`); the others run in real
+time ([ARCHITECTURE](docs/ARCHITECTURE.md#its-tests) says which, and why). A test that freewheels
+opens its clients first and closes them only once freewheel is off: JACK2 stalls for 10 s when a
+client closes while it freewheels.
+
+The null through JACK (`tests/jack/session.rs`) plays the small test session, nine seconds, at 64
+and at 256 frames, on the same servers: in real time until the disk reader holds the whole session,
+then in freewheel, in a few seconds each. A server without real time may skip a client's cycle
+while it plays in real time; the test then plays the session again, until each sample has been
+compared in at least one take, five takes at most. With `-- --nocapture`, it prints each take's
+skipped cycles, the samples not yet heard and how long closing its clients took.
+
+`tests/jack/latency.rs` and `tests/jack/round_trip.rs` check the device's latencies the backend
+reads and the monitoring path's round trip; with `-- --nocapture`, the round trip prints each
+impulse's delay by both paths.
 
 The command line's tests (`crates/magnolia-cli/tests/cli/`) start their servers the same way,
 through the same `tests/common/mod.rs`, and refuse PipeWire's libjack too.

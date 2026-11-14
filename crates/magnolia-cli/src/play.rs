@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use magnolia_engine::engine::Processor;
 use magnolia_engine::stats::{EngineStats, PlayStart};
 use magnolia_engine::time::{SamplePosition, SampleRate, TimeUnits, place};
-use magnolia_jack::{JackBackend, JackOptions, OpenError};
+use magnolia_jack::{ConnectError, JackBackend, JackOptions, OpenError};
 use magnolia_session::{Session, SessionPlayer};
 
 use crate::arguments::PlayOptions;
@@ -57,10 +57,17 @@ pub fn play(options: &PlayOptions) -> Result<(), Box<dyn Error>> {
         seconds(span.end, rate),
     ));
     if options.connect {
-        let connected = backend.connect_to_physical_playback()?;
-        say(format_args!(
-            "Connected {connected} playback ports to the server's physical ones."
-        ));
+        // Connected ports play whether or not the server reported their latency: a play only
+        // reports it, so its absence is a warning, not a failure.
+        match backend.connect_to_physical_playback() {
+            Ok(connected) => say(format_args!(
+                "Connected {connected} playback ports to the server's physical ones."
+            )),
+            Err(ConnectError::Latency(error)) => say(format_args!(
+                "Connected the playback ports to the server's physical ones, but {error}."
+            )),
+            Err(error) => return Err(error.into()),
+        }
     }
 
     let stats = Arc::clone(player.stats());

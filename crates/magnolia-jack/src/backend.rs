@@ -5,15 +5,25 @@ use std::error::Error;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
 
-use jack::{AsyncClient, AudioIn, AudioOut, Client, ClientOptions, ClientStatus, PortFlags};
+use jack::{AsyncClient, AudioIn, AudioOut, Client, ClientOptions, ClientStatus, Port, PortFlags};
 use magnolia_engine::engine::Processor;
+use magnolia_engine::stats::DeviceLatency;
 
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::callback::{Callback, CallbackParts};
+use crate::latency::{self, LatencyContext, LentContext};
 use crate::notifications::{Notifications, Shared};
 use crate::realtime::{self, AudioServer, RealtimeStatus, ThreadScheduling};
+
+/// How long [`JackBackend::connect_to_physical_playback`] and
+/// [`JackBackend::set_monitoring_latency`] wait for the latency callback. JACK2's dummy driver ran
+/// it within 2 ms of a connection, measured while designing ADR-0031; a server that has not run it
+/// in two seconds is stalled.
+const LATENCY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// What [`JackBackend::open`] opens.
 pub struct JackOptions {
@@ -39,7 +49,13 @@ pub struct JackOptions {
 /// [`EngineStats`](magnolia_engine::stats::EngineStats): its own overruns of the period's
 /// deadline, gaps in the server's frame time, and the xruns the server reports. It records the
 /// audio thread's id there too, which [`realtime_status`](Self::realtime_status) reads to say
-/// whether that thread runs in real time.
+/// whether that thread runs in real time, and publishes the device's latencies.
+///
+/// A latency callback reads the device's latencies from the server whenever its graph changes
+/// ([`device_latency`](Self::device_latency)), and sets the ranges Magnolia's ports report to other
+/// clients, with the latency of Magnolia's monitoring path added
+/// ([`set_monitoring_latency`](Self::set_monitoring_latency),
+/// [ADR-0031](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0031-the-round-trip-reported-and-takes-placed-by-it.md)).
 ///
 /// A poisoned processor is rebuilt in place: [`replace_processor`](Self::replace_processor) hands a
 /// new one to the audio thread, which swaps it in at a period's start; the client stays active and
@@ -47,6 +63,8 @@ pub struct JackOptions {
 pub struct JackBackend {
     /// `None` only while closing.
     client: Option<AsyncClient<Notifications, Callback>>,
+    /// The latency callback's context, lent to JACK; `None` once taken back or left to JACK.
+    latency: Option<LentContext>,
     replacements: Producer<Box<Processor>>,
     replaced: Consumer<Box<Processor>>,
     shared: Arc<Shared>,
@@ -112,6 +130,18 @@ impl JackBackend {
         let server = AudioServer::of_library(library.as_deref());
 
         let shared = Arc::new(Shared::new(server_rate));
+        let latency_context = LatencyContext::new(
+            capture.iter().map(Port::raw),
+            playback.iter().map(Port::raw),
+            Arc::clone(&shared),
+        );
+        // Set before activation, as libjack requires: the callback then runs from the first
+        // graph the client is part of.
+        let latency =
+            latency::lend(&client, latency_context).map_err(|code| OpenError::Refused {
+                step: "set the latency callback",
+                detail: format!("libjack's error {code}"),
+            })?;
         // One replacement in flight at most, and room to send back the one it replaces.
         let (replacements, replacements_in_callback) = RingBuffer::new(1);
         let (replaced_by_callback, replaced) = RingBuffer::new(1);
@@ -124,11 +154,20 @@ impl JackBackend {
             shared: Arc::clone(&shared),
             engine_rate,
         });
-        let client = client
-            .activate_async(Notifications::new(Arc::clone(&shared)), callback)
-            .map_err(OpenError::refused("activate the client"))?;
+        let client = match client.activate_async(Notifications::new(Arc::clone(&shared)), callback)
+        {
+            Ok(client) => client,
+            Err(error) => {
+                // The `jack` crate normally closes the client then, but may keep it open when it
+                // cannot detach its callbacks: the context is left allocated, a small leak on a path
+                // only a refused activation takes.
+                latency.leave_to_jack();
+                return Err(OpenError::refused("activate the client")(error));
+            }
+        };
         Ok(Self {
             client: Some(client),
+            latency: Some(latency),
             replacements,
             replaced,
             shared,
@@ -204,6 +243,11 @@ impl JackBackend {
 
     /// Connects each playback port to a physical playback port of the server, in order, as many
     /// as both have, and returns how many it connected. A connection that already exists counts.
+    ///
+    /// Then waits, up to two seconds, until the latency callback has run on the graph that holds
+    /// them, as [`wait_for_latency`](Self::wait_for_latency) does: once it returns,
+    /// [`device_latency`](Self::device_latency) gives their latency, and other clients read
+    /// Magnolia's ports' new ranges.
     pub fn connect_to_physical_playback(&self) -> Result<usize, ConnectError> {
         let Some(client) = self.client() else {
             return Ok(0);
@@ -213,12 +257,14 @@ impl JackBackend {
             Some(jack::jack_sys::FLOAT_MONO_AUDIO),
             PortFlags::IS_INPUT | PortFlags::IS_PHYSICAL,
         );
-        let mut connected = 0;
+        let mut connected = Vec::new();
         for (source, destination) in self.playback_ports.iter().zip(&physical) {
             match client.connect_ports_by_name(source, destination) {
-                Ok(()) | Err(jack::Error::PortAlreadyConnected(_, _)) => connected += 1,
+                Ok(()) | Err(jack::Error::PortAlreadyConnected(_, _)) => {
+                    connected.push((source.as_str(), destination.as_str()));
+                }
                 Err(error) => {
-                    return Err(ConnectError {
+                    return Err(ConnectError::Refused {
                         source: source.clone(),
                         destination: destination.clone(),
                         detail: error.to_string(),
@@ -226,7 +272,117 @@ impl JackBackend {
                 }
             }
         }
-        Ok(connected)
+        if !connected.is_empty() {
+            self.wait_for_latency(&connected, LATENCY_TIMEOUT)
+                .map_err(ConnectError::Latency)?;
+        }
+        Ok(connected.len())
+    }
+
+    /// The device's latencies, as the latency callback last read them from the server: how long a
+    /// frame captured took to reach Magnolia's input ports, and how long a frame Magnolia plays
+    /// takes to leave the system, in frames; the largest over its ports, 0 for ports connected to
+    /// nothing. The process callback publishes the same in the processor's
+    /// [`EngineStats::device_latency`](magnolia_engine::stats::EngineStats::device_latency) every
+    /// period. The server runs the callback after every change of the graph it runs, so the value
+    /// follows a connection a few milliseconds after `jack_connect` returns:
+    /// [`wait_for_latency`](Self::wait_for_latency) waits for it.
+    pub fn device_latency(&self) -> DeviceLatency {
+        self.shared.latency().device()
+    }
+
+    /// Sets the latency of Magnolia's monitoring path, in frames: how much later than it entered
+    /// a capture port a frame leaves a playback port. The latency callback adds it to the ranges
+    /// Magnolia's ports report to other clients, so that `jack_iodelay` and other programs see it:
+    /// each output port's capture range is the input ports' plus `frames`, each input port's
+    /// playback range the output ports' plus `frames`. It changes nothing of
+    /// [`device_latency`](Self::device_latency). 0 when the backend opens.
+    ///
+    /// Asks the server to recompute the latencies and waits, up to two seconds, until the callback
+    /// has run in both modes: once it returns, other clients read the new ranges.
+    pub fn set_monitoring_latency(&self, frames: u32) -> Result<(), LatencyError> {
+        self.shared.latency().set_monitoring(frames);
+        self.update_latency(Instant::now() + LATENCY_TIMEOUT)
+            .map(drop)
+    }
+
+    /// Waits, up to `timeout`, until the latency callback has run in both modes on a graph that
+    /// holds each of `connections`, pairs of a source port and a destination port by their full
+    /// names, and returns the device's latencies then: for a caller that has just connected
+    /// Magnolia's ports, through this backend or another client.
+    ///
+    /// `jack_connect` returns once the server has noted the connection for its next graph; the
+    /// graph it runs takes it at the start of a later period, and only then does the server run
+    /// the callback, a few milliseconds later. A latency read in between is the old one (stale in
+    /// up to 8 reads of 30 on JACK2's dummy driver, measured while designing ADR-0031). So this
+    /// waits until each connection is in the graph the server runs (`jack_port_connected_to`),
+    /// then asks the server to recompute the latencies, and waits until the callback has run in
+    /// both modes since.
+    ///
+    /// Fails with [`LatencyError::NotReported`] when the time runs out, as when a connection named
+    /// was never made, and at once when the server has shut the client down.
+    pub fn wait_for_latency(
+        &self,
+        connections: &[(&str, &str)],
+        timeout: Duration,
+    ) -> Result<DeviceLatency, LatencyError> {
+        let deadline = Instant::now() + timeout;
+        let Some(client) = self.client() else {
+            return Err(LatencyError::ServerShutDown);
+        };
+        for &(source, destination) in connections {
+            let port = client.port_by_name(source);
+            self.wait_until(deadline, || {
+                port.as_ref()
+                    .is_some_and(|port| port.is_connected_to(destination) == Ok(true))
+            })?;
+        }
+        self.update_latency(deadline)
+    }
+
+    /// Asks the server to recompute the latencies, and waits until the latency callback has run in
+    /// both modes since, up to `deadline`.
+    fn update_latency(&self, deadline: Instant) -> Result<DeviceLatency, LatencyError> {
+        if self.server_shut_down() {
+            return Err(LatencyError::ServerShutDown);
+        }
+        // `None` only while closing, when nothing waits for the latency.
+        let Some(client) = self.client() else {
+            return Err(LatencyError::ServerShutDown);
+        };
+        let request = self.shared.latency().new_request();
+        // SAFETY: the client is open and active, held by `self`; libjack is loaded since the
+        // client opened. Called from the handle's thread, never from one of JACK's callbacks,
+        // whose thread this call waits on with JACK2.
+        let refused = unsafe { jack::jack_sys::jack_recompute_total_latencies(client.raw()) } != 0;
+        if refused {
+            return Err(LatencyError::Refused);
+        }
+        self.wait_until(deadline, || self.shared.latency().served(request))?;
+        Ok(self.device_latency())
+    }
+
+    /// Waits until `condition` holds, looking every half millisecond, up to `deadline`; fails at
+    /// once when the server has shut the client down.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the handle's thread waits for JACK's threads; it never runs on the real-time path"
+    )]
+    fn wait_until(
+        &self,
+        deadline: Instant,
+        condition: impl Fn() -> bool,
+    ) -> Result<(), LatencyError> {
+        while !condition() {
+            if self.server_shut_down() {
+                return Err(LatencyError::ServerShutDown);
+            }
+            if Instant::now() >= deadline {
+                return Err(LatencyError::NotReported);
+            }
+            thread::sleep(Duration::from_micros(500));
+        }
+        Ok(())
     }
 
     /// Hands `processor` to the audio thread, which swaps it in at the start of its next period
@@ -266,17 +422,38 @@ impl JackBackend {
         self.deactivate()
     }
 
-    /// Deactivates the client, drops what the audio thread let go, and returns its processor.
+    /// Deactivates the client, drops what the audio thread let go, closes the client, and returns
+    /// its processor.
     fn deactivate(&mut self) -> Result<Processor, CloseError> {
         let Some(client) = self.client.take() else {
             return Err(CloseError::NotDeactivated);
         };
+        let latency = self.latency.take();
         let deactivated = client.deactivate();
         self.poll();
         match deactivated {
-            Ok((_client, _notifications, callback)) => Ok(callback.into_processor()),
-            Err(jack::Error::ClientPanicked) => Err(CloseError::CallbackPanicked),
-            Err(_) => Err(CloseError::NotDeactivated),
+            Ok((client, _notifications, callback)) => {
+                // Its ports' handles on the client go with it, so that `client` is the last.
+                let processor = callback.into_processor();
+                match latency {
+                    Some(latency) => latency.take_back(client),
+                    None => drop(client),
+                }
+                Ok(processor)
+            }
+            Err(error) => {
+                // The `jack` crate has closed the client after a panic, which a bug alone causes,
+                // or keeps it, which the server may still call: in either case the latency
+                // callback's context stays allocated, as the crate's own context does, rather
+                // than be freed while JACK might still point into it.
+                if let Some(latency) = latency {
+                    latency.leave_to_jack();
+                }
+                match error {
+                    jack::Error::ClientPanicked => Err(CloseError::CallbackPanicked),
+                    _ => Err(CloseError::NotDeactivated),
+                }
+            }
         }
     }
 
@@ -451,26 +628,64 @@ impl Error for CloseError {}
 
 /// Why [`JackBackend::connect_to_physical_playback`] failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ConnectError {
-    /// The port to connect from.
-    pub source: String,
-    /// The port to connect to.
-    pub destination: String,
-    /// What the JACK library said.
-    pub detail: String,
+pub enum ConnectError {
+    /// The server refused a connection.
+    Refused {
+        /// The port to connect from.
+        source: String,
+        /// The port to connect to.
+        destination: String,
+        /// What the JACK library said.
+        detail: String,
+    },
+    /// The ports were connected, but the server did not report their latency.
+    Latency(LatencyError),
 }
 
 impl fmt::Display for ConnectError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "the JACK server did not connect {} to {}: {}",
-            self.source, self.destination, self.detail
-        )
+        match self {
+            Self::Refused {
+                source,
+                destination,
+                detail,
+            } => write!(
+                formatter,
+                "the JACK server did not connect {source} to {destination}: {detail}"
+            ),
+            Self::Latency(error) => write!(formatter, "the ports were connected, but {error}"),
+        }
     }
 }
 
 impl Error for ConnectError {}
+
+/// Why the backend could not learn the device's latencies
+/// ([`JackBackend::wait_for_latency`], [`JackBackend::set_monitoring_latency`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LatencyError {
+    /// The server shut the client down, as when it stopped or died.
+    ServerShutDown,
+    /// The server refused to recompute the latencies.
+    Refused,
+    /// The server did not run the latency callback in the time given: it is stalled.
+    NotReported,
+}
+
+impl fmt::Display for LatencyError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::ServerShutDown => "the JACK server shut the client down",
+            Self::Refused => "the JACK server refused to recompute the latencies",
+            Self::NotReported => {
+                "the JACK server did not report the latencies in time: it may be stalled; try \
+                 again, or restart it"
+            }
+        })
+    }
+}
+
+impl Error for LatencyError {}
 
 #[cfg(test)]
 mod tests {

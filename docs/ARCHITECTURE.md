@@ -490,20 +490,25 @@ the process loads PipeWire's libjack; otherwise the first `libjack.so.0` on its 
 the engine's rate and channels from the processor. It fails with a plain error when libjack is
 missing, when no server runs, and when the server's rate differs from the engine's. It registers
 one port per engine channel, `capture_1` and on, `playback_1` and
-on, and activates the client: the server calls the processor from its next period, capture and
-playback in one callback.
+on, sets its latency callback, and activates the client: the server calls the processor from its
+next period, capture and playback in one callback.
 
 ### Its threads and callbacks
 
 | Part | Runs on | Does |
 |---|---|---|
-| the handle, `JackBackend` | the caller's thread | opens and closes the client, hands a replacement processor to the callback and drops the one it replaced, asks whether the audio thread runs in real time |
-| the process callback | JACK's audio thread, once a period | swaps in a replacement, counts gaps and its own overruns, counts the server's xruns into the engine's statistics, calls `Processor::process` on the ports, or writes silence while the server's rate differs from the engine's |
+| the handle, `JackBackend` | the caller's thread | opens and closes the client, hands a replacement processor to the callback and drops the one it replaced, asks whether the audio thread runs in real time, connects ports and waits for their latency, sets the monitoring latency |
+| the process callback | JACK's audio thread, once a period | swaps in a replacement, publishes the device's latencies, counts gaps and its own overruns, counts the server's xruns into the engine's statistics, calls `Processor::process` on the ports, or writes silence while the server's rate differs from the engine's |
 | the thread-init callback | each thread JACK starts for the client: with JACK2 the audio thread, then its notification thread; with PipeWire the audio thread, before its first period | reads the thread's kernel id with `gettid` into the thread's own storage |
-| the xrun, shutdown and sample-rate callbacks | JACK2's notification thread; PipeWire's audio thread for an xrun | count an xrun, note the shutdown, note the server's rate: atomics only |
+| the latency callback | JACK2's notification thread, once in each mode after every change of the graph and when the handle asks | reads the device's latencies from Magnolia's ports' ranges and sets the other side's ranges ([below](#the-devices-latencies)) |
+| the xrun, shutdown, sample-rate and freewheel callbacks | JACK2's notification thread; PipeWire's audio thread for an xrun | count an xrun, note the shutdown, note the server's rate, note whether the server freewheels: atomics only |
 
-Every callback but the process callback touches atomics only: PipeWire skips a process cycle while
-a notification handler runs, and the shutdown callback must be async-signal-safe.
+Every callback but the process callback touches atomics only, in its own code: PipeWire skips a
+process cycle while a notification handler runs, and the shutdown callback must be
+async-signal-safe. The latency callback also calls libjack's range functions, which on JACK2 sleep
+for 1.1 periods when called off the audio thread while a change of the graph is pending
+(`WaitGraphChange` in JACK2's `JackAPI.cpp`, seen by RealtimeSanitizer): on JACK2's notification
+thread, which is not real-time.
 
 ### What crosses the boundary
 
@@ -511,11 +516,14 @@ a notification handler runs, and the shutdown callback must be async-signal-safe
   and the processors they replaced, back. The callback swaps only when the queue back has room, so
   it never drops a processor; the handle drops it at its next `replace_processor`, `poll` or
   `close`.
-- **Atomics shared by the three parts**: the audio thread's id, the server's xruns, the shutdown,
-  the server's rate.
+- **Atomics shared by the parts**: the audio thread's id, the server's xruns, the shutdown, the
+  server's rate, whether it freewheels; the device's latencies, the monitoring latency, and the
+  handle's requests for the latency callback with the last each mode served.
+- **The latency callback's context**: Magnolia's ports, by libjack's handles, and those atomics,
+  lent to libjack as a raw pointer ([below](#closing-and-a-server-that-dies)).
 - **The engine's statistics**, `EngineStats`, of the processor being played: the callback fills its
-  own overruns, gaps, server xruns and the audio thread's id there, beside the processor's own
-  figures.
+  own overruns, gaps, server xruns, the audio thread's id and the device's latencies there, beside
+  the processor's own figures.
 
 ### What the callback counts
 
@@ -528,12 +536,56 @@ a notification handler runs, and the shutdown callback must be async-signal-safe
   period. A callback the server started after its deadline is late by the server's doing. On
   JACK2's dummy driver at 64 frames without real time, the server's clock estimate lags the wall
   clock by about 24 ms, measured, so every callback starts after its estimated deadline: there,
-  only callbacks longer than a period count.
+  only callbacks longer than a period count. None counts while the server freewheels: it has no
+  deadline, and its cycles' times made one period in 8 to 20 look overrun, measured on JACK2's
+  dummy driver. JACK2 tells its clients before its first cycle in freewheel and after its last
+  (read in its `JackServer.cpp`), so the flag the freewheel callback sets is exact there.
 - **A server xrun**: each xrun callback. JACK2 reports any xrun in its graph, whoever caused it;
   PipeWire reports several between two cycles as one, and never the first.
 
+In freewheel, measured on JACK2's dummy driver, the frame time follows on, so no gap is counted,
+and the server reports no xrun: it waits for every client, up to 10 s, rather than skip one.
+
 While the server's rate differs from the engine's, the callback writes silence without calling the
 processor, whose heartbeat then stops, until the rate is back.
+
+### The device's latencies
+
+The backend reads the device's latencies in a latency callback, as JACK means a client to
+([ADR-0031](adr/0031-the-round-trip-reported-and-takes-placed-by-it.md)). JACK gives each port a
+capture range, how long ago what it carries entered the system, and a playback range, how long
+until it leaves it, in frames. Before it calls the callback, JACK recomputes Magnolia's input ports'
+capture ranges, in capture mode, or its output ports' playback ranges, in playback mode, from what
+they connect to. The callback (`src/latency.rs`):
+
+- in capture mode, takes the largest maximum of its input ports' capture ranges as the device's
+  capture latency, and sets every output port's capture range to the inputs' widest plus the
+  **monitoring latency**, the delay of Magnolia's path from a capture port to a playback port;
+- in playback mode, takes the largest maximum of its output ports' playback ranges as the device's
+  playback latency, and sets every input port's playback range to the outputs' widest plus the
+  monitoring latency.
+
+So `jack_iodelay` and other clients see Magnolia's monitoring path. A client that sets no latency
+callback gets JACK's default instead, which copies the ranges across with nothing added. The
+callback stores the device's latencies in atomics; `JackBackend::device_latency` reads them, and
+the process callback publishes them each period to the processor it plays
+(`EngineStats::publish_device_latency`), so that a processor swapped in has them from its first.
+
+A range read right after `jack_connect` returns may be stale: the server notes a connection for its
+next graph, switches to that graph at a later period's start, and runs the callback only then
+(stale in up to 8 reads of 30 on JACK2's dummy driver at 64 frames, measured while designing
+ADR-0031). `JackBackend::wait_for_latency` takes the connections the caller made, waits until each
+is in the graph the server runs (`jack_port_connected_to`), then asks the server to recompute the
+latencies (`jack_recompute_total_latencies`) and waits until the callback has run in both modes
+since: a request counter the handle raises, and, for each mode, the request the callback saw when it
+began. `connect_to_physical_playback` waits so before it returns, and `set_monitoring_latency`
+waits for the recompute it asks; each gives up after 2 s with a plain error. JACK2 runs the callback
+of a client connected to nothing too, since it walks every active client.
+
+On JACK2's dummy driver, in its default, asynchronous mode, Magnolia's ports connected to the
+`system:` ports report one period of capture latency and two of playback, the second for the
+asynchronous mode's buffering. A hardware driver reports its buffering too, plus the extra given to
+`jackd -I/-O`, never the converters': the user measures those with a loopback cable.
 
 ### Real-time rights
 
@@ -571,6 +623,17 @@ then keeps the callback's state, the processor with it, for the process's life, 
 may still point into it. `close` returns an error that says so; the processor's memory and its
 collector thread are not freed. The tests show that nothing hangs or crashes.
 
+The latency callback is Magnolia's own, set through `jack_sys`, which the `jack` crate knows
+nothing of: its context lives in a box the backend lends to libjack (`latency::lend`). Once the
+client is deactivated, the backend clears the callback, drops the client's last handle, which
+closes the client and stops JACK2's notification thread, and only then frees the context. When the
+deactivation fails, as when the server died, the context is left allocated with the crate's own,
+for the same reason. When the activation fails, the crate normally closes the client, and the
+context is simply leaked: a few bytes, on a path only a refused activation takes. Waiting for the
+latency rests on JACK2 recomputing latencies synchronously; PipeWire's behaviour is not yet
+checked. `magnolia play --connect` and the example warn, and play on, when the latency is not
+reported.
+
 ### The `jack` crate on the real-time path
 
 Read in its code, not measured: around each process callback it takes a `std::sync::Mutex` with
@@ -599,6 +662,29 @@ reach a live PipeWire. A server without real time on a busy machine may skip a c
 which breaks a recording; the tests that compare a recording sample by sample take it again when
 the gap counters show a skipped cycle, five times at most.
 
+The tests that need JACK's processing path and not its timing run their server in **freewheel**
+(`support::Freewheel`, `jack_set_freewheel`): it runs its cycles one after another, as fast as its
+clients go, never skipping one; 80 to 240 times real time on JACK2's dummy driver, measured. They
+are the null below, the duplex, the swap, the panic, the round trip, and the counters' freewheel
+case. A test's thread cannot act at a point of a recording by waiting for it there, so the probe
+that records **holds** where the test asks: it waits in its own period, and the freewheeling server
+with it, until the test moves the hold on, 5 s at most. JACK2 1.9.22 stalls for its freewheel
+driver's timeout, 10 s, when a client closes while it freewheels, measured, so a test opens its
+clients first, turns freewheel on through a client it keeps open, and closes nothing until that
+client has turned it off. Freewheel disconnects the server's `system:` ports, and connections made
+during it are undone when it ends (read in `JackServer.cpp`). The others run in real time: the
+counters, which need deadlines, and whose overrunning node is the suite's short real-time play; the
+latencies, which need the `system:` ports; the rights, the shutdowns and the errors on open. The
+null's start, before its freewheel, is real time too.
+
+`tests/jack/round_trip.rs` shows that Magnolia's monitoring path adds nothing to a direct
+connection: a source client's impulse reaches a sink client directly and through Magnolia's
+capture port, the engine and its playback port, on the same sample with capture straight to
+playback or through a `TestLatency` of 0, exactly 100 samples later through one of 100. It proves
+that nothing is added within a cycle, not the hardware's round trip, which only a loopback cable
+measures. `tests/jack/latency.rs` checks the latencies above on the dummy driver at 64 and 256
+frames, a processor swapped in included, and that other clients see the monitoring latency.
+
 `tests/jack/session.rs` is the null through JACK: the small test session, played by a
 `SessionPlayer` through the backend at 64 and at 256 frames, equals its offline render to the bit
 from the play's first audible sample, and is silent before it. Its recorder keeps, with each
@@ -607,9 +693,10 @@ runs it after Magnolia, whose outputs it reads, so each period is compared with 
 the engine says it lies, and the first audible sample is where `EngineStats::play_start` says. A
 period Magnolia was playing while the recorder copied it, seen by the engine's count of periods
 and its block start, is set aside. A cycle the server skips leaves a hole or a repeat, never a
-period out of place; without real time at 64 frames, the server skips cycles every few seconds, and
-a take lasts nine. So takes are played until each sample of the render has been heard in at least
-one, five takes at most.
+period out of place. So takes are played until each sample of the render has been heard in at least
+one, five takes at most. The play starts in real time; once the disk reader is idle, holding every
+frame of the session, which its 10 s read-ahead covers, the server freewheels for the rest of the
+take: the processor cannot outrun the reader, so no frame is missing, and no cycle is skipped.
 
 ## The test session
 

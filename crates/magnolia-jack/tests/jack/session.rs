@@ -7,9 +7,13 @@
 //! the period it copied: JACK runs the recorder after Magnolia in each cycle, since it reads
 //! Magnolia's outputs. So every period recorded is compared with the render where the engine says
 //! it lies, not where the signal seems to start. A cycle the server skips, for Magnolia or for the
-//! recorder, leaves a hole or a repeat in the recording, never a period out of place: without real
-//! time at 64 frames, the server skips a cycle every few seconds, and a take lasts nine. So takes
-//! are played until each sample of the render has been heard in at least one, five takes at most.
+//! recorder, leaves a hole or a repeat in the recording, never a period out of place. So takes are
+//! played until each sample of the render has been heard in at least one, five takes at most.
+//!
+//! The play starts in real time; once the disk reader holds the whole session in memory, the
+//! server freewheels (`Freewheel`): it runs the rest of the take as fast as the clients go,
+//! without skipping a cycle, and the processor cannot outrun the reader. A server without real
+//! time skips cycles only in the part played in real time, before the freewheel.
 
 use std::fs;
 use std::io::Cursor;
@@ -21,6 +25,7 @@ use std::time::{Duration, Instant};
 use jack::{
     AsyncClient, AudioIn, Client, ClientOptions, Control, Port, ProcessHandler, ProcessScope,
 };
+use magnolia_engine::disk::DiskConfig;
 use magnolia_engine::stats::EngineStats;
 use magnolia_engine::time::SamplePosition;
 use magnolia_engine::wav::{decode, read_info};
@@ -29,7 +34,7 @@ use magnolia_session::generate::{Kind, generate};
 use magnolia_session::{Session, SessionPlayer, render};
 
 use crate::common::Server;
-use crate::support::{Gaps, one_at_a_time, wait_for};
+use crate::support::{Freewheel, Gaps, one_at_a_time, wait_for};
 
 /// What the recorder may record before the play's first audible sample: the disk reader's
 /// priming and the pre-roll, far below 10 seconds at 48 kHz.
@@ -55,6 +60,11 @@ fn plays_through_jack_what_it_renders(period: u32) {
     let session = Session::open(dir.path().join("session.json")).unwrap();
     let rendered = render_channels(&session);
     let frames = rendered[0].len();
+    // The reader then fills, before the freewheel, every frame the play reads.
+    assert!(
+        frames as u64 <= DiskConfig::new(session.sample_rate()).read_ahead,
+        "the small session outlasts the disk reader's read-ahead"
+    );
     assert!(
         rendered
             .iter()
@@ -182,6 +192,12 @@ fn play_through_jack(session: &Session, period: u32, frames: usize) -> Played {
     });
     let audible_at = stats.play_start().unwrap().audible_at.0;
     let end = audible_at + frames as i64;
+    // Once idle after the play's start, the reader holds every frame up to the last clip's end.
+    assert!(
+        player.reader().wait_idle(Duration::from_secs(10)),
+        "the disk reader filled the play's frames"
+    );
+    let freewheel = Freewheel::start(&server);
     wait_for("the recording", Duration::from_secs(30), || {
         let through = recorder.last_period_end();
         assert!(
@@ -192,6 +208,8 @@ fn play_through_jack(session: &Session, period: u32, frames: usize) -> Played {
     });
     let disk_underruns = player.report().disk_underruns;
     let skipped_cycles = stats.frame_time_gaps() - gaps + recorder.gaps();
+    // Before any client closes, which would stall a freewheeling server.
+    freewheel.stop();
     let tearing_down = Instant::now();
     let (channels, period_starts) = recorder.finish();
     player.stop().unwrap();

@@ -1,6 +1,7 @@
 //! Duplex: a plain JACK client plays a ramp into Magnolia's capture port; the engine routes capture
 //! to playback through a gain of one half; the client records Magnolia's playback. Every sample
-//! comes back halved, at one latency from the first to the last.
+//! comes back halved, at one latency from the first to the last. Once connected, the server
+//! freewheels: the test needs JACK's processing path, not its timing.
 
 use std::time::Duration;
 
@@ -8,7 +9,7 @@ use magnolia_engine::engine::{Destination, Source};
 use magnolia_engine::nodes::Gain;
 
 use crate::common::Server;
-use crate::support::{Probe, Rig, Take, first_unbroken_take, one_at_a_time, ramp};
+use crate::support::{Freewheel, Probe, Rig, Take, first_unbroken_take, one_at_a_time, ramp};
 
 /// Two seconds at 48 kHz.
 const LENGTH: usize = 96_000;
@@ -29,10 +30,13 @@ fn record_the_ramp() -> Take<Vec<f32>> {
     let probe = Probe::open(&server, ramp, LENGTH);
     probe.connect(&probe.output, &rig.backend.capture_ports()[0]);
     probe.connect(&rig.backend.playback_ports()[0], &probe.input);
+    let freewheel = Freewheel::start(&server);
     probe.wait_for_samples(LENGTH, Duration::from_secs(20));
+    // Read before the server leaves freewheel, which may count a gap of its own.
     let stats = rig.controller.stats();
-    assert!(!stats.poisoned());
     let skipped_cycles = stats.frame_time_gaps() - gaps + probe.gaps();
+    freewheel.stop();
+    assert!(!stats.poisoned());
     Take {
         result: probe.finish(),
         skipped_cycles,
