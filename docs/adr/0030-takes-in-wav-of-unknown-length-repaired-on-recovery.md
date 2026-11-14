@@ -1,6 +1,7 @@
 # 0030. Takes in WAV files of unknown length, repaired on recovery
 
-- Status: Accepted; amends 0029 (what the WAV writer writes and the reader reads)
+- Status: Accepted; amends 0029 (what the WAV writer writes and the reader reads); amended by 0033
+  (the takes' samples)
 - Date: 2026-11-12
 
 ## Context
