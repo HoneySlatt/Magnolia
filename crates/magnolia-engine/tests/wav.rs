@@ -1,11 +1,18 @@
-//! The WAV reader and writer through their public interface: a round trip of every format, files
-//! built by hand for the cases fuzzing finds only by luck (pad bytes, sizes a writer that died
-//! left, chunks after the data, WAVE_FORMAT_EXTENSIBLE, RF64 and BW64), and the plain errors of
-//! malformed headers. The writer's RF64 path is tested inside the module (`src/wav/tests.rs`).
+//! The WAV reader, writer and repair through their public interface: a round trip of every
+//! format, files built by hand for the cases fuzzing finds only by luck (pad bytes, sizes a writer
+//! that died left, chunks after the data, WAVE_FORMAT_EXTENSIBLE, RF64 and BW64, `bext`), the plain
+//! errors of malformed headers, and the repair of every way a writer that died leaves a file,
+//! killed in turn after each of its own steps. The paths from RIFF to RF64 of the writer and of the
+//! repair are tested inside the module (`src/wav/tests.rs`).
 
-use std::io::{self, BufReader, Cursor, Seek, SeekFrom, Write};
+use std::cell::RefCell;
+use std::fs::{self, File};
+use std::io::{self, BufReader, Cursor, Read, Seek, SeekFrom, Write};
+use std::rc::Rc;
 
-use magnolia_engine::wav::{self, SampleFormat, WavError, WavInfo, WavWriter};
+use magnolia_engine::wav::{
+    self, Bext, Repair, RepairableFile, SampleFormat, WavError, WavInfo, WavWriter,
+};
 
 const FORMATS: [SampleFormat; 4] = [
     SampleFormat::Int16,
@@ -214,6 +221,7 @@ fn every_format_and_channel_count_round_trips_bit_for_bit() {
                     frames: frames as u64,
                     data_offset,
                     length_repaired: false,
+                    bext: None,
                 },
                 "{case}"
             );
@@ -306,12 +314,74 @@ fn a_writer_that_died_leaves_a_file_read_to_its_end() {
         // Dropped without `finish`, as a crash would leave it.
     }
     let file = file.into_inner();
-    assert_eq!(u32_at(&file, 4), 0, "the RIFF size, left at 0");
-    assert_eq!(u32_at(&file, 76), 0, "the data size, left at 0");
+    assert_eq!(u32_at(&file, 4), u32::MAX, "the RIFF size, left unknown");
+    assert_eq!(u32_at(&file, 76), u32::MAX, "the data size, left unknown");
     let info = read(&file).expect("read");
     assert_eq!(info.frames, 5);
     assert!(info.length_repaired);
     assert_eq!(decoded(&file, &info), signal);
+}
+
+/// A file in memory that a writer and a test share, so that the test reads what the writer wrote
+/// before it finishes.
+#[derive(Clone, Default)]
+struct SharedFile(Rc<RefCell<Cursor<Vec<u8>>>>);
+
+impl SharedFile {
+    fn bytes(&self) -> Vec<u8> {
+        self.0.borrow().get_ref().clone()
+    }
+}
+
+impl Write for SharedFile {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.borrow_mut().write(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Seek for SharedFile {
+    fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
+        self.0.borrow_mut().seek(to)
+    }
+}
+
+#[test]
+fn a_writer_says_its_sizes_are_unknown_until_it_finishes() {
+    for format in FORMATS {
+        let case = format!("{format:?}");
+        let signal = exact_signal(format, 2 * 7);
+        let file = SharedFile::default();
+        let mut writer = WavWriter::new(file.clone(), format, 2, 48_000).expect("a writer");
+        writer.write_frames(&signal).expect("written");
+
+        let before = file.bytes();
+        let data_offset = before.len() - signal.len() * format.bytes_per_sample();
+        assert_eq!(u32_at(&before, 4), u32::MAX, "{case}: the RIFF size");
+        assert_eq!(
+            u32_at(&before, data_offset - 4),
+            u32::MAX,
+            "{case}: the data size"
+        );
+        let info = read(&before).expect(&case);
+        assert_eq!((info.frames, info.length_repaired), (7, true), "{case}");
+        assert_eq!(info.data_offset as usize, data_offset, "{case}");
+
+        writer.finish().expect("finished");
+        let after = file.bytes();
+        assert_eq!(after.len(), before.len(), "{case}: even data, no pad byte");
+        assert_eq!(u32_at(&after, 4) as usize, after.len() - 8, "{case}");
+        assert_eq!(
+            u32_at(&after, data_offset - 4) as usize,
+            after.len() - data_offset,
+            "{case}"
+        );
+        let info = read(&after).expect(&case);
+        assert_eq!((info.frames, info.length_repaired), (7, false), "{case}");
+    }
 }
 
 #[test]
@@ -663,6 +733,773 @@ fn rf64_sizes_beyond_the_file_or_unknown_read_to_its_end() {
     let info = read(&file_riff).expect("read");
     assert_eq!(info.frames, 6);
     assert!(info.length_repaired);
+}
+
+// Broadcast WAV's bext chunk.
+
+/// The offsets of a `bext` chunk's fields from its body, as EBU Tech 3285 v2 gives them.
+const ORIGINATOR_AT: usize = 256;
+const ORIGINATOR_REFERENCE_AT: usize = 288;
+const ORIGINATION_DATE_AT: usize = 320;
+const ORIGINATION_TIME_AT: usize = 330;
+const TIME_REFERENCE_AT: usize = 338;
+const VERSION_AT: usize = 346;
+const UMID_AT: usize = 348;
+const LOUDNESS_AT: usize = 412;
+const RESERVED_AT: usize = 422;
+const BEXT_BYTES: usize = 602;
+
+/// The bext chunk of a take, as ADR-0030 has Magnolia write it.
+fn take_bext(time_reference: u64) -> Bext<'static> {
+    Bext {
+        description: "Lead vocal, take 3",
+        originator: "Magnolia",
+        originator_reference: "take-2026-11-12-0003",
+        origination_date: "2026-11-12",
+        origination_time: "14:03:59",
+        time_reference,
+    }
+}
+
+/// A file a writer finished, with `bext`, of three stereo 16-bit frames.
+fn written_with_bext(bext: &Bext<'_>) -> Result<Vec<u8>, WavError> {
+    let mut writer = WavWriter::with_bext(
+        Cursor::new(Vec::new()),
+        SampleFormat::Int16,
+        2,
+        48_000,
+        bext,
+    )?;
+    writer.write_frames(&int16_as_f32(&int16_ramp(6)))?;
+    Ok(writer.finish()?.into_inner())
+}
+
+/// A `bext` chunk's body built by hand, as Tech 3285 lays it out, the rest of its fields zero.
+fn bext_body(time_reference: u64, originator: &[u8], reference: &[u8]) -> Vec<u8> {
+    let mut body = vec![0; BEXT_BYTES];
+    body[ORIGINATOR_AT..ORIGINATOR_AT + originator.len()].copy_from_slice(originator);
+    body[ORIGINATOR_REFERENCE_AT..ORIGINATOR_REFERENCE_AT + reference.len()]
+        .copy_from_slice(reference);
+    body[TIME_REFERENCE_AT..TIME_REFERENCE_AT + 8].copy_from_slice(&time_reference.to_le_bytes());
+    body
+}
+
+#[test]
+fn a_bext_chunk_written_reads_back_its_marks() {
+    for time_reference in [0, 1, (1 << 32) + 5, u64::MAX] {
+        let file = written_with_bext(&take_bext(time_reference)).expect("written");
+        let info = read(&file).expect("read");
+        let bext = info.bext.expect("a bext chunk");
+        assert_eq!(bext.time_reference, time_reference);
+        assert_eq!(bext.originator(), b"Magnolia");
+        assert_eq!(bext.originator_reference(), b"take-2026-11-12-0003");
+        // After the JUNK and fmt chunks, the bext chunk's 610 bytes, then data's header.
+        assert_eq!(info.data_offset, 72 + 610 + 8);
+        assert_eq!((info.frames, info.length_repaired), (3, false));
+        assert_eq!(decoded(&file, &info), int16_as_f32(&int16_ramp(6)));
+    }
+}
+
+#[test]
+fn a_bext_chunk_is_laid_out_as_tech_3285_says() {
+    let time_reference = (7 << 32) + 0x0102_0304;
+    let file = written_with_bext(&take_bext(time_reference)).expect("written");
+    // RIFF, JUNK and fmt, then bext: between fmt and data, the JUNK chunk still right after WAVE.
+    assert_eq!(&file[12..16], b"JUNK");
+    assert_eq!(&file[48..52], b"fmt ");
+    assert_eq!(&file[72..76], b"bext");
+    assert_eq!(u32_at(&file, 76), 602);
+    assert_eq!(&file[682..686], b"data");
+    let body = &file[80..80 + BEXT_BYTES];
+
+    let text = |at: usize, len: usize, value: &[u8]| {
+        assert_eq!(&body[at..at + value.len()], value);
+        assert!(
+            body[at + value.len()..at + len]
+                .iter()
+                .all(|&byte| byte == 0),
+            "padded with NULs"
+        );
+    };
+    text(0, 256, b"Lead vocal, take 3");
+    text(ORIGINATOR_AT, 32, b"Magnolia");
+    text(ORIGINATOR_REFERENCE_AT, 32, b"take-2026-11-12-0003");
+    text(ORIGINATION_DATE_AT, 10, b"2026-11-12");
+    text(ORIGINATION_TIME_AT, 8, b"14:03:59");
+    assert_eq!(u32_at(body, TIME_REFERENCE_AT), 0x0102_0304, "the low word");
+    assert_eq!(u32_at(body, TIME_REFERENCE_AT + 4), 7, "the high word");
+    assert_eq!(&body[VERSION_AT..VERSION_AT + 2], &2_u16.to_le_bytes());
+    assert!(body[UMID_AT..LOUDNESS_AT].iter().all(|&byte| byte == 0));
+    // LoudnessValue, LoudnessRange, MaxTruePeakLevel, MaxMomentaryLoudness, MaxShortTermLoudness.
+    for field in 0..5 {
+        let at = LOUDNESS_AT + 2 * field;
+        assert_eq!(
+            &body[at..at + 2],
+            &0x7FFF_u16.to_le_bytes(),
+            "loudness {field}"
+        );
+    }
+    assert!(body[RESERVED_AT..].iter().all(|&byte| byte == 0));
+}
+
+#[test]
+fn bext_texts_as_long_as_their_fields_read_back_whole() {
+    let description = "d".repeat(256);
+    let originator = "o".repeat(32);
+    let reference = "r".repeat(32);
+    let bext = Bext {
+        description: &description,
+        originator: &originator,
+        originator_reference: &reference,
+        origination_date: "2026-11-12",
+        origination_time: "14:03:59",
+        time_reference: 9,
+    };
+    let file = written_with_bext(&bext).expect("written");
+    let info = read(&file).expect("read").bext.expect("a bext chunk");
+    assert_eq!(info.originator(), originator.as_bytes());
+    assert_eq!(info.originator_reference(), reference.as_bytes());
+    assert_eq!(info.time_reference, 9);
+}
+
+/// Sets one text field of a `bext` chunk.
+type SetText = for<'a> fn(&mut Bext<'a>, &'a str);
+
+#[test]
+fn a_bext_text_too_long_or_not_ascii_is_refused_and_nothing_written() {
+    let long = "x".repeat(257);
+    let cases: [(&str, SetText, usize); 5] = [
+        ("Description", |bext, text| bext.description = text, 256),
+        ("Originator", |bext, text| bext.originator = text, 32),
+        (
+            "OriginatorReference",
+            |bext, text| bext.originator_reference = text,
+            32,
+        ),
+        (
+            "OriginationDate",
+            |bext, text| bext.origination_date = text,
+            10,
+        ),
+        (
+            "OriginationTime",
+            |bext, text| bext.origination_time = text,
+            8,
+        ),
+    ];
+    for (name, set, max) in cases {
+        let mut file = Cursor::new(Vec::new());
+        let mut bext = Bext::default();
+        set(&mut bext, &long[..max + 1]);
+        let error = WavWriter::with_bext(&mut file, SampleFormat::Int16, 1, 48_000, &bext)
+            .err()
+            .expect("too long");
+        assert!(
+            matches!(error, WavError::BextFieldTooLong { field, len, max: found }
+                if field == name && len == max + 1 && found == max),
+            "{error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "the bext chunk's {name} holds {} characters, more than its {max}",
+                max + 1
+            )
+        );
+
+        for text in ["Magnólia", "Mag\0nolia"] {
+            let mut bext = Bext::default();
+            set(&mut bext, text);
+            let error = WavWriter::with_bext(&mut file, SampleFormat::Int16, 1, 48_000, &bext)
+                .err()
+                .expect("not ASCII");
+            assert!(
+                matches!(error, WavError::BextFieldNotAscii { field } if field == name),
+                "{text:?}: {error:?}"
+            );
+        }
+        assert!(file.get_ref().is_empty(), "{name}: nothing written");
+
+        // At its length, the text is taken.
+        let mut bext = Bext::default();
+        set(&mut bext, &long[..max]);
+        WavWriter::with_bext(
+            Cursor::new(Vec::new()),
+            SampleFormat::Int16,
+            1,
+            48_000,
+            &bext,
+        )
+        .expect("as long as its field");
+    }
+}
+
+#[test]
+fn the_reader_takes_a_bext_chunk_before_the_data_whole_and_first() {
+    let samples = int16_ramp(4);
+    let data = chunk(b"data", &int16_bytes(&samples));
+    let format = simple_format(1, 2, 16);
+    let marks = |file: &[u8]| {
+        let info = read(file).expect("read");
+        assert_eq!(decoded(file, &info), int16_as_f32(&samples));
+        info.bext
+            .map(|bext| (bext.time_reference, bext.originator().to_vec()))
+    };
+
+    // First of all, as Tech 3285 places it; with a coding history after its fixed part, of odd
+    // size, so that a pad byte follows.
+    let with_history = [
+        bext_body(5, b"BWF tool", b"ref"),
+        b"A=PCM,F=48000\r\n".to_vec(),
+    ]
+    .concat();
+    assert_eq!(with_history.len() % 2, 1);
+    let first = file(
+        b"RIFF",
+        &[chunk(b"bext", &with_history), format.clone(), data.clone()],
+    );
+    assert_eq!(marks(&first), Some((5, b"BWF tool".to_vec())));
+
+    // A second one is not read.
+    let second = file(
+        b"RIFF",
+        &[
+            chunk(b"bext", &bext_body(5, b"first", b"")),
+            format.clone(),
+            chunk(b"bext", &bext_body(6, b"second", b"")),
+            data.clone(),
+        ],
+    );
+    assert_eq!(marks(&second), Some((5, b"first".to_vec())));
+
+    // Shorter than its fixed part: skipped as an unknown chunk, not an error.
+    let short = file(
+        b"RIFF",
+        &[
+            chunk(b"bext", &bext_body(5, b"short", b"")[..601]),
+            format.clone(),
+            data.clone(),
+        ],
+    );
+    assert_eq!(marks(&short), None);
+
+    // After the data: not read.
+    let after = file(
+        b"RIFF",
+        &[
+            format.clone(),
+            data.clone(),
+            chunk(b"bext", &bext_body(5, b"after", b"")),
+        ],
+    );
+    assert_eq!(marks(&after), None);
+
+    // In a file whose writer died, read all the same.
+    let mut unfinished = file(
+        b"RIFF",
+        &[format.clone(), chunk(b"bext", &bext_body(8, b"died", b""))],
+    );
+    unfinished.extend(chunk_with_size(b"data", u32::MAX, &int16_bytes(&samples)));
+    assert_eq!(marks(&unfinished), Some((8, b"died".to_vec())));
+
+    // Cut short by the end of the file, as any chunk before the data.
+    let cut = file(
+        b"RIFF",
+        &[format, chunk(b"bext", &bext_body(5, b"cut", b""))],
+    );
+    assert!(matches!(
+        read(&cut[..cut.len() - 1]),
+        Err(WavError::Truncated)
+    ));
+}
+
+// Repairing what a writer that died left.
+
+/// The file a writer leaves after `signal`: finished, or as a writer that died leaves it.
+fn written(format: SampleFormat, channels: u16, signal: &[f32], finished: bool) -> Vec<u8> {
+    let mut file = Cursor::new(Vec::new());
+    {
+        let mut writer = WavWriter::new(&mut file, format, channels, 48_000).expect("a writer");
+        writer.write_frames(signal).expect("written");
+        if finished {
+            writer.finish().expect("finished");
+        }
+        // Otherwise dropped without `finish`, as a crash leaves it.
+    }
+    file.into_inner()
+}
+
+/// The file with the 32-bit field at `at` set to `value`.
+fn with_u32(at: usize, value: u32, mut file: Vec<u8>) -> Vec<u8> {
+    file[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    file
+}
+
+/// A file in memory that takes so many writes, cuts and syncs, then fails every one, as the file
+/// of a process killed then.
+struct MemoryFile {
+    file: Cursor<Vec<u8>>,
+    operations_left: usize,
+}
+
+impl MemoryFile {
+    fn new(bytes: &[u8]) -> Self {
+        Self::killed_after(bytes, usize::MAX)
+    }
+
+    fn killed_after(bytes: &[u8], operations: usize) -> Self {
+        Self {
+            file: Cursor::new(bytes.to_vec()),
+            operations_left: operations,
+        }
+    }
+
+    fn contents(&self) -> &[u8] {
+        self.file.get_ref()
+    }
+
+    fn operation(&mut self) -> io::Result<()> {
+        self.operations_left = self
+            .operations_left
+            .checked_sub(1)
+            .ok_or_else(|| io::Error::other("killed"))?;
+        Ok(())
+    }
+}
+
+impl Read for MemoryFile {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        self.file.read(bytes)
+    }
+}
+
+impl Write for MemoryFile {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.operation()?;
+        self.file.write(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Seek for MemoryFile {
+    fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
+        self.file.seek(to)
+    }
+}
+
+impl RepairableFile for MemoryFile {
+    fn set_len(&mut self, len: u64) -> io::Result<()> {
+        self.operation()?;
+        self.file.get_mut().resize(len as usize, 0);
+        Ok(())
+    }
+
+    fn sync(&mut self) -> io::Result<()> {
+        self.operation()
+    }
+}
+
+/// Repairs `file`, which must become `expected`, read as finished, and stay so when repaired
+/// again, nothing written; then repairs it killed after each of its writes, cuts and syncs in turn,
+/// and repairs what that left, which must become `expected` too. Returns what the repair said.
+fn check_repairs_to(file: &[u8], expected: &[u8]) -> Repair {
+    let mut whole = MemoryFile::new(file);
+    let outcome = wav::repair(&mut whole).expect("repaired");
+    assert_eq!(whole.contents(), expected);
+    let info = read(expected).expect("a repaired file reads");
+    assert!(!info.length_repaired);
+    assert!(matches!(outcome, Repair::Repaired { frames, .. } if frames == info.frames));
+
+    let mut again = MemoryFile::killed_after(expected, 0);
+    assert_eq!(wav::repair(&mut again).expect("read"), Repair::Untouched);
+
+    let operations = usize::MAX - whole.operations_left;
+    for allowed in 0..operations {
+        let mut killed = MemoryFile::killed_after(file, allowed);
+        let error = wav::repair(&mut killed).expect_err("killed");
+        assert!(matches!(error, WavError::Io(_)), "{error:?}");
+        let mut taken_up = MemoryFile::new(killed.contents());
+        wav::repair(&mut taken_up).expect("taken up");
+        assert_eq!(
+            taken_up.contents(),
+            expected,
+            "killed after {allowed} operations"
+        );
+    }
+    outcome
+}
+
+#[test]
+fn repair_keeps_every_whole_frame_of_a_file_cut_in_its_last_two_frames() {
+    let frames = 5;
+    for format in [
+        SampleFormat::Int16,
+        SampleFormat::Int24,
+        SampleFormat::Float32,
+    ] {
+        for channels in [1_u16, 3] {
+            let channel_count = usize::from(channels);
+            let signal = exact_signal(format, frames * channel_count);
+            let unfinished = written(format, channels, &signal, false);
+            let frame_bytes = channel_count * format.bytes_per_sample();
+            let data_offset = unfinished.len() - frames * frame_bytes;
+            for len in unfinished.len() - 2 * frame_bytes..=unfinished.len() {
+                let case = format!("{format:?}, {channels} channels, cut to {len} bytes");
+                let whole = (len - data_offset) / frame_bytes;
+                let kept = &signal[..whole * channel_count];
+                let expected = written(format, channels, kept, true);
+                let outcome = check_repairs_to(&unfinished[..len], &expected);
+                assert_eq!(
+                    outcome,
+                    Repair::Repaired {
+                        frames: whole as u64,
+                        bytes_cut: len.saturating_sub(expected.len()) as u64,
+                    },
+                    "{case}"
+                );
+                let info = read(&expected).expect(&case);
+                let bits =
+                    |samples: &[f32]| samples.iter().map(|s| s.to_bits()).collect::<Vec<_>>();
+                assert_eq!(bits(&decoded(&expected, &info)), bits(kept), "{case}");
+            }
+        }
+    }
+}
+
+#[test]
+fn repair_finishes_a_file_whose_riff_size_alone_was_written() {
+    // A crash inside `finish`, between its two sizes.
+    let signal = int16_as_f32(&int16_ramp(10));
+    let finished = written(SampleFormat::Int16, 2, &signal, true);
+    let riff_size_only = with_u32(76, u32::MAX, finished.clone());
+    let outcome = check_repairs_to(&riff_size_only, &finished);
+    assert_eq!(
+        outcome,
+        Repair::Repaired {
+            frames: 5,
+            bytes_cut: 0
+        }
+    );
+}
+
+#[test]
+fn repair_finishes_a_file_whose_sizes_were_left_at_0() {
+    // As Magnolia's writer left a file before its sizes said unknown, cut inside its sixth frame.
+    let signal = int16_as_f32(&int16_ramp(12));
+    let finished = written(SampleFormat::Int16, 2, &signal[..10], true);
+    let mut sizes_0 = with_u32(
+        4,
+        0,
+        with_u32(76, 0, written(SampleFormat::Int16, 2, &signal, true)),
+    );
+    sizes_0.truncate(80 + 5 * 4 + 3);
+    let outcome = check_repairs_to(&sizes_0, &finished);
+    assert_eq!(
+        outcome,
+        Repair::Repaired {
+            frames: 5,
+            bytes_cut: 3
+        }
+    );
+}
+
+#[test]
+fn repair_cuts_a_file_whose_data_runs_past_its_end() {
+    // Its sizes written, then the end of its data lost, as a power cut may leave it.
+    let signal = int16_as_f32(&int16_ramp(14));
+    let mut torn = written(SampleFormat::Int16, 2, &signal, true);
+    torn.truncate(80 + 4 * 4 + 2);
+    let finished = written(SampleFormat::Int16, 2, &signal[..8], true);
+    let outcome = check_repairs_to(&torn, &finished);
+    assert_eq!(
+        outcome,
+        Repair::Repaired {
+            frames: 4,
+            bytes_cut: 2
+        }
+    );
+}
+
+#[test]
+fn repair_writes_the_pad_byte_after_odd_data() {
+    // Five mono 24-bit frames, 15 bytes, then two bytes of a sixth: the first becomes the pad byte,
+    // zero.
+    let signal = exact_signal(SampleFormat::Int24, 6);
+    let mut unfinished = written(SampleFormat::Int24, 1, &signal, false);
+    unfinished.truncate(80 + 15 + 2);
+    unfinished[95] = 0xAB;
+    let finished = written(SampleFormat::Int24, 1, &signal[..5], true);
+    assert_eq!(finished.len(), 80 + 15 + 1);
+    assert_eq!(finished.last(), Some(&0));
+    assert_eq!(u32_at(&finished, 4), 8 + 72 + 15 + 1 - 8);
+    let outcome = check_repairs_to(&unfinished, &finished);
+    assert_eq!(
+        outcome,
+        Repair::Repaired {
+            frames: 5,
+            bytes_cut: 1
+        }
+    );
+
+    // Without a byte of a sixth frame, the pad byte lengthens the file.
+    let unfinished = written(SampleFormat::Int24, 1, &signal[..5], false);
+    let outcome = check_repairs_to(&unfinished, &finished);
+    assert_eq!(
+        outcome,
+        Repair::Repaired {
+            frames: 5,
+            bytes_cut: 0
+        }
+    );
+}
+
+#[test]
+fn repair_keeps_a_takes_bext_chunk() {
+    let bext = take_bext(96_000 * 60);
+    let signal = exact_signal(SampleFormat::Float32, 2 * 9);
+    let take = |frames: usize, finished: bool| {
+        let mut file = Cursor::new(Vec::new());
+        {
+            let mut writer =
+                WavWriter::with_bext(&mut file, SampleFormat::Float32, 2, 96_000, &bext)
+                    .expect("a writer");
+            writer.write_frames(&signal[..2 * frames]).expect("written");
+            if finished {
+                writer.finish().expect("finished");
+            }
+        }
+        file.into_inner()
+    };
+    let mut killed = take(9, false);
+    killed.truncate(killed.len() - 5);
+    let outcome = check_repairs_to(&killed, &take(8, true));
+    assert_eq!(
+        outcome,
+        Repair::Repaired {
+            frames: 8,
+            bytes_cut: 3
+        }
+    );
+    let info = read(&take(8, true)).expect("read");
+    assert_eq!(info.bext.expect("a bext chunk").time_reference, 96_000 * 60);
+}
+
+/// A finished RIFF file of Magnolia's writer turned into `magic` (RF64 or BW64), as the writer
+/// turns a file past 4 GiB: its JUNK chunk becomes ds64, which holds its sizes.
+fn as_rf64(magic: &[u8; 4], riff: &[u8]) -> Vec<u8> {
+    let info = read(riff).expect("read");
+    let data_size_at = info.data_offset as usize - 4;
+    let data_size = u64::from(u32_at(riff, data_size_at));
+    let header = [
+        magic.as_slice(),
+        &u32::MAX.to_le_bytes(),
+        b"WAVE",
+        b"ds64",
+        &28_u32.to_le_bytes(),
+        &u64::from(u32_at(riff, 4)).to_le_bytes(),
+        &data_size.to_le_bytes(),
+        &info.frames.to_le_bytes(),
+        &0_u32.to_le_bytes(),
+    ]
+    .concat();
+    let mut file = with_u32(data_size_at, u32::MAX, riff.to_vec());
+    file[..48].copy_from_slice(&header);
+    file
+}
+
+#[test]
+fn repair_writes_the_sizes_of_rf64_and_bw64_in_ds64() {
+    let signal = int16_as_f32(&int16_ramp(14));
+    let riff_of = |samples: usize| written(SampleFormat::Int16, 2, &signal[..samples], true);
+    for magic in [b"RF64", b"BW64"] {
+        let case = String::from_utf8_lossy(magic).into_owned();
+        let finished = as_rf64(magic, &riff_of(10));
+
+        // Its data's end lost: cut to the frames it holds, still RF64 or BW64.
+        let mut torn = as_rf64(magic, &riff_of(14));
+        torn.truncate(80 + 5 * 4 + 1);
+        let outcome = check_repairs_to(&torn, &finished);
+        assert_eq!(
+            outcome,
+            Repair::Repaired {
+                frames: 5,
+                bytes_cut: 1
+            },
+            "{case}"
+        );
+
+        // ds64 sizes of 0, as a recorder that died before writing them leaves them.
+        let mut zeros = as_rf64(magic, &riff_of(10));
+        zeros[20..36].fill(0);
+        zeros.extend([1, 2]);
+        let outcome = check_repairs_to(&zeros, &finished);
+        assert_eq!(
+            outcome,
+            Repair::Repaired {
+                frames: 5,
+                bytes_cut: 2
+            },
+            "{case}"
+        );
+
+        // The JUNK chunk still in the place of ds64: its sizes are unknown.
+        let mut junk = with_u32(76, u32::MAX, riff_of(10));
+        junk[..4].copy_from_slice(magic);
+        junk[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        let outcome = check_repairs_to(&junk, &finished);
+        assert_eq!(
+            outcome,
+            Repair::Repaired {
+                frames: 5,
+                bytes_cut: 0
+            },
+            "{case}"
+        );
+    }
+}
+
+#[test]
+fn repair_refuses_rf64_whose_sizes_lie_elsewhere_and_leaves_it() {
+    let signal = int16_as_f32(&int16_ramp(10));
+    let mut unfinished = as_rf64(b"RF64", &written(SampleFormat::Int16, 2, &signal, true));
+    unfinished[20..36].fill(0);
+    let riff_size_0 = with_u32(4, 0, unfinished.clone());
+    let data_size_0 = with_u32(76, 0, unfinished.clone());
+    // ds64 after fmt rather than right after the RF64 header, where nothing reserved room.
+    let mut ds64_after_fmt = with_riff_size(
+        u32::MAX,
+        file(b"RF64", &[simple_format(1, 2, 16), ds64(0, 0, 0)]),
+    );
+    ds64_after_fmt.extend(chunk_with_size(
+        b"data",
+        u32::MAX,
+        &int16_bytes(&int16_ramp(10)),
+    ));
+    for (case, file) in [
+        ("a RIFF size of 0", riff_size_0),
+        ("a data size of 0", data_size_0),
+        ("ds64 after fmt", ds64_after_fmt),
+    ] {
+        assert!(read(&file).expect(case).length_repaired, "{case}");
+        let mut memory = MemoryFile::killed_after(&file, 0);
+        let error = wav::repair(&mut memory).expect_err(case);
+        assert!(matches!(error, WavError::Unrepairable), "{case}: {error:?}");
+        assert_eq!(memory.contents(), file, "{case}: left as it was");
+    }
+}
+
+#[test]
+fn repair_leaves_every_other_file_as_it_was() {
+    let signal = int16_as_f32(&int16_ramp(10));
+    let finished = written(SampleFormat::Int16, 2, &signal, true);
+    let empty_data = written(SampleFormat::Float32, 1, &[], true);
+    let with_bext = written_with_bext(&take_bext(1)).expect("written");
+    let rf64 = as_rf64(b"RF64", &finished);
+    // Another program's: odd chunks before and after the data, the data's own size odd.
+    let third_party = file(
+        b"RIFF",
+        &[
+            chunk(b"odd ", b"abc"),
+            simple_format(1, 1, 24),
+            chunk(b"data", &[1, 2, 3, 4, 5, 6, 7, 8, 9]),
+            chunk(b"LIST", b"INFOISFT\x05\x00\x00\x00test\x00"),
+        ],
+    );
+    let finished_cases = [
+        ("finished", finished.clone()),
+        ("finished without frames", empty_data),
+        ("finished with bext", with_bext),
+        ("finished RF64", rf64),
+        ("another program's, chunks after its data", third_party),
+    ];
+    for (case, file) in finished_cases {
+        let mut memory = MemoryFile::killed_after(&file, 0);
+        assert_eq!(
+            wav::repair(&mut memory).expect(case),
+            Repair::Untouched,
+            "{case}"
+        );
+        assert_eq!(memory.contents(), file, "{case}");
+    }
+
+    let refused_cases = [
+        ("empty", Vec::new()),
+        (
+            "not a WAV file",
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR".to_vec(),
+        ),
+        ("its header cut short", finished[..60].to_vec()),
+    ];
+    for (case, file) in refused_cases {
+        let mut memory = MemoryFile::killed_after(&file, 0);
+        let error = wav::repair(&mut memory).expect_err(case);
+        assert!(!matches!(error, WavError::Io(_)), "{case}: {error:?}");
+        assert_eq!(memory.contents(), file, "{case}");
+    }
+}
+
+#[test]
+fn repair_works_on_a_file_on_disk() {
+    let path = std::env::temp_dir().join(format!("magnolia-wav-repair-{}.wav", std::process::id()));
+    let signal = exact_signal(SampleFormat::Float32, 2 * 100);
+    let mut file = File::options()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .expect("a new file");
+    {
+        let mut writer =
+            WavWriter::new(&mut file, SampleFormat::Float32, 2, 48_000).expect("a writer");
+        writer.write_frames(&signal).expect("written");
+    }
+    // Half a frame more, as a writer killed inside a write leaves it.
+    file.write_all(&[1, 2, 3, 4]).expect("written");
+
+    let outcome = wav::repair(&mut file);
+    let repaired = fs::read(&path);
+    fs::remove_file(&path).expect("removed");
+    assert_eq!(
+        outcome.expect("repaired"),
+        Repair::Repaired {
+            frames: 100,
+            bytes_cut: 4
+        }
+    );
+    assert_eq!(
+        repaired.expect("read"),
+        written(SampleFormat::Float32, 2, &signal, true)
+    );
+}
+
+#[test]
+fn repair_refuses_to_report_a_file_open_for_appending_as_repaired() {
+    let path = std::env::temp_dir().join(format!(
+        "magnolia-wav-repair-append-{}.wav",
+        std::process::id()
+    ));
+    let signal = exact_signal(SampleFormat::Float32, 5);
+    {
+        let mut file = File::create_new(&path).expect("a new file");
+        let mut writer =
+            WavWriter::new(&mut file, SampleFormat::Float32, 1, 48_000).expect("a writer");
+        writer.write_frames(&signal).expect("written");
+    }
+    // Every write of a file open for appending lands at its end, wherever it was sought.
+    let mut file = File::options()
+        .read(true)
+        .append(true)
+        .open(&path)
+        .expect("opened");
+    let outcome = wav::repair(&mut file);
+    fs::remove_file(&path).expect("removed");
+    assert!(
+        matches!(outcome, Err(WavError::RepairNotKept)),
+        "{outcome:?}"
+    );
 }
 
 // Plain errors.

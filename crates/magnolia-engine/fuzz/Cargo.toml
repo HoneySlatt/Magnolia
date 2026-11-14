@@ -47,3 +47,10 @@ path = "fuzz_targets/wav_reader.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "wav_repair"
+path = "fuzz_targets/wav_repair.rs"
+test = false
+doc = false
+bench = false

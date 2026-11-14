@@ -1,19 +1,19 @@
 //! Fuzzes the WAV reader with arbitrary bytes, read as a file. A header that reads must name
 //! frames that lie within the file and leave the reader at them; its frames must all decode, and
 //! the samples decoded must write back through the writer to the same bytes, or for 32-bit
-//! integers to the same samples. Nothing may panic.
+//! integers to the same samples, its `bext` marks with them. Nothing may panic.
 //!
-//! From an empty corpus, as in CI, raw bytes seldom grow a `fmt ` chunk within seconds. So most
-//! inputs build a file shaped like a WAV file, whose every id, size and field may still be
-//! arbitrary, cut short or lying; the rest are read as they are.
+//! Most inputs build a file shaped like a WAV file (`wav_file`); the rest are read as they are.
 
 #![no_main]
 
+mod wav_file;
+
 use std::io::Cursor;
 
-use libfuzzer_sys::arbitrary::{Result, Unstructured};
+use libfuzzer_sys::arbitrary::Unstructured;
 use libfuzzer_sys::fuzz_target;
-use magnolia_engine::wav::{self, SampleFormat, WavInfo, WavWriter};
+use magnolia_engine::wav::{self, Bext, BextInfo, SampleFormat, WavInfo, WavWriter};
 
 fuzz_target!(|input: &[u8]| {
     match input.split_first() {
@@ -22,118 +22,11 @@ fuzz_target!(|input: &[u8]| {
         _ => {
             let mut file = Vec::new();
             // An input that runs out ends its file early; that is not a failure.
-            let _ = build_file(&mut Unstructured::new(input), &mut file);
+            let _ = wav_file::build_file(&mut Unstructured::new(input), &mut file);
             check(&file);
         }
     }
 });
-
-/// Builds a file of up to eight chunks: mostly the ids, sizes and fields of a WAV file, rarely
-/// arbitrary ones; a pad byte sometimes missing; the whole sometimes cut short.
-fn build_file(input: &mut Unstructured<'_>, file: &mut Vec<u8>) -> Result<()> {
-    file.extend(pick(input, &[*b"RIFF", *b"RF64", *b"BW64"])?);
-    file.extend(input.arbitrary::<u32>()?.to_le_bytes());
-    file.extend(pick(input, &[*b"WAVE"])?);
-    for _ in 0..input.int_in_range(0..=8)? {
-        let id = pick(input, &[*b"fmt ", *b"data", *b"ds64", *b"LIST", *b"JUNK"])?;
-        let body = match &id {
-            b"fmt " => format_body(input)?,
-            b"ds64" => ds64_body(input)?,
-            _ => {
-                let len = input.int_in_range(0..=512)?.min(input.len());
-                input.bytes(len)?.to_vec()
-            }
-        };
-        let size = match input.int_in_range(0..=7)? {
-            0 => 0,
-            1 => u32::MAX,
-            2 => input.arbitrary()?,
-            _ => u32::try_from(body.len()).expect("a body of at most 512 bytes"),
-        };
-        file.extend(id);
-        file.extend(size.to_le_bytes());
-        file.extend(&body);
-        if body.len() % 2 == 1 && input.ratio(7, 8)? {
-            file.push(0);
-        }
-    }
-    if input.ratio(1, 8)? {
-        file.truncate(input.int_in_range(0..=file.len())?);
-    }
-    Ok(())
-}
-
-/// One of `choices`, or rarely four arbitrary bytes.
-fn pick(input: &mut Unstructured<'_>, choices: &[[u8; 4]]) -> Result<[u8; 4]> {
-    if input.ratio(1, 16)? {
-        input.arbitrary()
-    } else {
-        input.choose(choices).copied()
-    }
-}
-
-/// A `fmt ` chunk's body, mostly valid, WAVE_FORMAT_EXTENSIBLE's extension included.
-fn format_body(input: &mut Unstructured<'_>) -> Result<Vec<u8>> {
-    let format_tag: u16 = often(input, |input| input.choose(&[1, 3, 0xFFFE]).copied())?;
-    let channels: u16 = often(input, |input| input.int_in_range(1..=8))?;
-    let sample_rate: u32 = often(input, |input| input.choose(&[44_100, 48_000]).copied())?;
-    let bits: u16 = often(input, |input| input.choose(&[16, 24, 32]).copied())?;
-    let block_align: u16 = often(input, |_| Ok(channels.wrapping_mul(bits / 8)))?;
-    let mut body = [
-        format_tag.to_le_bytes().as_slice(),
-        &channels.to_le_bytes(),
-        &sample_rate.to_le_bytes(),
-        &input.arbitrary::<u32>()?.to_le_bytes(),
-        &block_align.to_le_bytes(),
-        &bits.to_le_bytes(),
-    ]
-    .concat();
-    if format_tag == 0xFFFE || input.ratio(1, 8)? {
-        let sub_format_tag: u16 = often(input, |input| input.choose(&[1, 3]).copied())?;
-        body.extend(22_u16.to_le_bytes());
-        body.extend(input.arbitrary::<[u8; 6]>()?);
-        body.extend(sub_format_tag.to_le_bytes());
-        body.extend([
-            0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71,
-        ]);
-    }
-    cut_sometimes(input, &mut body)?;
-    Ok(body)
-}
-
-/// A `ds64` chunk's body: the RIFF's size, a data size mostly within a fuzzer's input, a sample
-/// count and a table's length.
-fn ds64_body(input: &mut Unstructured<'_>) -> Result<Vec<u8>> {
-    let data_size: u64 = often(input, |input| input.int_in_range(0..=4_096))?;
-    let mut body = [
-        input.arbitrary::<u64>()?.to_le_bytes().as_slice(),
-        &data_size.to_le_bytes(),
-        &input.arbitrary::<u64>()?.to_le_bytes(),
-        &input.arbitrary::<u32>()?.to_le_bytes(),
-    ]
-    .concat();
-    cut_sometimes(input, &mut body)?;
-    Ok(body)
-}
-
-/// What `likely` gives, fifteen times in sixteen; an arbitrary value otherwise.
-fn often<'a, T: libfuzzer_sys::arbitrary::Arbitrary<'a>>(
-    input: &mut Unstructured<'a>,
-    likely: impl FnOnce(&mut Unstructured<'a>) -> Result<T>,
-) -> Result<T> {
-    if input.ratio(1, 16)? {
-        input.arbitrary()
-    } else {
-        likely(input)
-    }
-}
-
-fn cut_sometimes(input: &mut Unstructured<'_>, body: &mut Vec<u8>) -> Result<()> {
-    if input.ratio(1, 16)? {
-        body.truncate(input.int_in_range(0..=body.len())?);
-    }
-    Ok(())
-}
 
 fn check(file: &[u8]) {
     let mut reader = Cursor::new(file);
@@ -147,6 +40,11 @@ fn check(file: &[u8]) {
     );
     assert!((1..=1_024).contains(&info.channels), "{info:?}");
     assert!(info.sample_rate > 0, "{info:?}");
+    if let Some(bext) = &info.bext {
+        for text in [bext.originator(), bext.originator_reference()] {
+            assert!(text.len() <= 32 && !text.contains(&0), "{bext:?}");
+        }
+    }
 
     let channels = usize::from(info.channels);
     let frame_bytes = channels * info.sample_format.bytes_per_sample();
@@ -202,16 +100,18 @@ fn check(file: &[u8]) {
 
 /// Writes the decoded samples through the writer: the 16- and 24-bit integers and the floats come
 /// back as the same bytes, and the 32-bit integers, which decoding rounds to f32, as the same
-/// samples.
+/// samples. A `bext` chunk whose marks are ASCII comes back with the same marks.
 fn check_writes_back(info: &WavInfo, data: &[u8], samples: &[f32]) {
+    let bext = info.bext.as_ref().and_then(ascii_marks);
+    let file = Cursor::new(Vec::new());
+    let (format, channels, rate) = (info.sample_format, info.channels, info.sample_rate);
     // The writer refuses a rate whose bytes per second overflow their 32-bit field; the reader
     // does not read that field.
-    let Ok(mut writer) = WavWriter::new(
-        Cursor::new(Vec::new()),
-        info.sample_format,
-        info.channels,
-        info.sample_rate,
-    ) else {
+    let writer = match &bext {
+        Some(bext) => WavWriter::with_bext(file, format, channels, rate, bext),
+        None => WavWriter::new(file, format, channels, rate),
+    };
+    let Ok(mut writer) = writer else {
         return;
     };
     writer.write_frames(samples).expect("whole frames");
@@ -223,6 +123,19 @@ fn check_writes_back(info: &WavInfo, data: &[u8], samples: &[f32]) {
         !written_info.length_repaired,
         "a finished file reads as finished"
     );
+    if bext.is_some() {
+        let marks = |bext: &BextInfo| {
+            (
+                bext.time_reference,
+                bext.originator().to_vec(),
+                bext.originator_reference().to_vec(),
+            )
+        };
+        assert_eq!(
+            written_info.bext.as_ref().map(marks),
+            info.bext.as_ref().map(marks)
+        );
+    }
     let start = usize::try_from(written_info.data_offset).expect("a small offset");
     let written_data = &written[start..start + data.len()];
     if info.sample_format == SampleFormat::Int32 {
@@ -232,4 +145,19 @@ fn check_writes_back(info: &WavInfo, data: &[u8], samples: &[f32]) {
     } else {
         assert_eq!(written_data, data);
     }
+}
+
+/// The marks of `bext` as a `bext` chunk to write, when its texts are ASCII, as a writer takes
+/// them.
+fn ascii_marks(bext: &BextInfo) -> Option<Bext<'_>> {
+    Some(Bext {
+        originator: std::str::from_utf8(bext.originator())
+            .ok()
+            .filter(|text| text.is_ascii())?,
+        originator_reference: std::str::from_utf8(bext.originator_reference())
+            .ok()
+            .filter(|text| text.is_ascii())?,
+        time_reference: bext.time_reference,
+        ..Bext::default()
+    })
 }
