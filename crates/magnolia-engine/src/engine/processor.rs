@@ -71,8 +71,8 @@ pub struct Processor {
     position: i64,
     /// The frames of the period under way that the transport's clock has moved over.
     period_played: usize,
-    /// The graph's largest compensation, as the last period's start that completed left it: the
-    /// pre-roll of a play that the transport starts after the graph's panic.
+    /// The graph's largest compensation, as the last period's start that completed left it: where
+    /// a stop asked after the graph's panic ends the play under way.
     compensation: u64,
     poison: Poison,
 }
@@ -85,7 +85,8 @@ enum Poison {
     /// No panic.
     None,
     /// The graph panicked: it runs no more, nor do swaps and events, but the transport still takes
-    /// its commands and its clock moves, so that a stop still ends the takes under way.
+    /// its stops and its clock moves, so that a stop still ends the takes under way; a play is
+    /// refused (ADR-0034).
     Graph,
     /// The period's start panicked, in a swap, the transport or the events: the processor touches
     /// none of them again.
@@ -260,12 +261,12 @@ impl Processor {
         self.events.pop();
     }
 
-    /// The period's start after the graph's panic: the transport's commands alone, a play
-    /// pre-rolled by the compensation of the last graph that played.
+    /// The period's start after the graph's panic: the transport's stops alone, each placed by the
+    /// compensation of the last graph that played; a play is refused.
     fn follow_transport(&mut self) {
         self.garbage.flush_overflow();
         self.transport
-            .apply_commands(self.position, self.compensation, &self.stats);
+            .apply_stops_only(self.compensation, &self.stats);
     }
 
     /// Moves the transport's clock over `frames` frames of a period the graph does not play, in a

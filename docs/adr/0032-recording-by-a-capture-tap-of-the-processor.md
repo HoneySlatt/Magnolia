@@ -1,7 +1,7 @@
 # 0032. Recording by a capture tap of the processor
 
 - Status: Accepted; amends 0007 (where recording is taken), 0022 (a take goes on after the graph's
-  panic), 0023 (the recorder's wake) and 0025 (live nodes in the pre-roll)
+  panic), 0023 (the recorder's wake) and 0025 (live nodes in the pre-roll); amended by 0034
 - Date: 2026-11-12
 
 ## Context

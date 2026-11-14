@@ -39,6 +39,7 @@ pub struct EngineStats {
     disk_underruns: AtomicU64,
     capture_overruns: AtomicU64,
     missed_takes: AtomicU64,
+    plays_refused: AtomicU64,
     tap_stopped: AtomicBool,
     /// The last generation of disk streams handed out, by any disk reader of this engine.
     generations: AtomicU64,
@@ -189,6 +190,13 @@ impl EngineStats {
         self.missed_takes.load(Ordering::Relaxed)
     }
 
+    /// How many plays the transport refused because the graph had panicked: after that panic a
+    /// stop still ends the play under way and its takes, but no play starts on a silent output
+    /// ([ADR-0034](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0034-no-play-after-the-graphs-panic.md)).
+    pub fn plays_refused(&self) -> u64 {
+        self.plays_refused.load(Ordering::Relaxed)
+    }
+
     /// Whether a panic stopped the capture tap: it records nothing more, while the graph plays on
     /// ([ADR-0032](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0032-recording-by-a-capture-tap-of-the-processor.md)).
     /// A recorder that reads it ends its open takes at what they hold.
@@ -294,6 +302,7 @@ impl EngineStats {
             &stats.disk_underruns,
             &stats.capture_overruns,
             &stats.missed_takes,
+            &stats.plays_refused,
             &stats.generations,
             &stats.primed_generation,
             &stats.own_overruns,
@@ -381,6 +390,10 @@ impl EngineStats {
 
     pub(crate) fn count_missed_take(&self) {
         self.missed_takes.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn count_play_refused(&self) {
+        self.plays_refused.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Release: a recorder that reads it set then finds in its rings everything the tap pushed.

@@ -30,7 +30,7 @@ New ADRs copy [`0000-template.md`](0000-template.md) and take the next free numb
 | [0019](0019-the-sanitizers-nightly-code-behind-a-cfg.md) | The sanitizer's nightly code behind a cfg | Accepted; amends 0013 |
 | [0020](0020-clippy-forbids-the-locks-the-sanitizer-cannot-see.md) | Clippy forbids the locks the sanitizer cannot see | Accepted |
 | [0021](0021-the-node-contract.md) | The node contract | Accepted; amended by 0025 and 0027 |
-| [0022](0022-a-panic-on-the-real-time-path-gives-silence.md) | A panic on the real-time path gives silence, and is reported | Accepted; amended by 0032 |
+| [0022](0022-a-panic-on-the-real-time-path-gives-silence.md) | A panic on the real-time path gives silence, and is reported | Accepted; amended by 0032 and 0034 |
 | [0023](0023-the-real-time-allowlist.md) | The real-time allowlist | Accepted; amends 0007; amended by 0026 and 0032 |
 | [0024](0024-how-a-swap-avoids-a-click.md) | How a swap avoids a click | Accepted; amends 0007 |
 | [0025](0025-delay-compensation-by-reading-ahead.md) | Delay compensation by reading ahead | Accepted; amends 0007 and 0021; amended by 0032 |
@@ -38,6 +38,8 @@ New ADRs copy [`0000-template.md`](0000-template.md) and take the next free numb
 | [0027](0027-timeline-events-from-sources-on-nodes.md) | Timeline events from sources attached to nodes | Accepted; amends 0021 |
 | [0028](0028-the-test-session-in-json.md) | The test session in JSON | Accepted |
 | [0029](0029-magnolias-own-wav-and-midi-file-readers.md) | Magnolia's own WAV and MIDI file readers | Accepted; amended by 0030 |
-| [0030](0030-takes-in-wav-of-unknown-length-repaired-on-recovery.md) | Takes in WAV files of unknown length, repaired on recovery | Accepted; amends 0029 |
+| [0030](0030-takes-in-wav-of-unknown-length-repaired-on-recovery.md) | Takes in WAV files of unknown length, repaired on recovery | Accepted; amends 0029; amended by 0033 |
 | [0031](0031-the-round-trip-reported-and-takes-placed-by-it.md) | The round trip reported, and takes placed by it | Accepted |
-| [0032](0032-recording-by-a-capture-tap-of-the-processor.md) | Recording by a capture tap of the processor | Accepted; amends 0007, 0022, 0023 and 0025 |
+| [0032](0032-recording-by-a-capture-tap-of-the-processor.md) | Recording by a capture tap of the processor | Accepted; amends 0007, 0022, 0023 and 0025; amended by 0034 |
+| [0033](0033-takes-in-24-bit-integers-as-an-option.md) | Takes in 24-bit integers, as an option | Accepted; amends 0030 |
+| [0034](0034-no-play-after-the-graphs-panic.md) | After the graph's panic, stops are kept and plays refused | Accepted; amends 0022 and 0032 |

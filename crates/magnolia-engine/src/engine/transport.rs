@@ -215,6 +215,25 @@ impl TransportClock {
         }
     }
 
+    /// At a period's start after the graph's panic: applies every queued command as a stop. A stop
+    /// ends the play under way, and its takes, as it would have; a play ends it too, as a play
+    /// while rolling does, but never starts, nor does a play that was waiting: no take begins on a
+    /// silent output (ADR-0034). Each play refused is counted.
+    pub(crate) fn apply_stops_only(&mut self, compensation: u64, stats: &EngineStats) {
+        let compensation = i64::try_from(compensation).unwrap_or(i64::MAX);
+        if self.waiting.take().is_some() {
+            stats.count_play_refused();
+        }
+        while let Ok(command) = self.commands.pop() {
+            if matches!(command, TransportCommand::Play(_)) {
+                stats.count_play_refused();
+            }
+            if self.rolling {
+                self.ask_to_stop(compensation);
+            }
+        }
+    }
+
     /// Starts a play: the clock pre-rolls by the compensation, and the engine sample at which the
     /// output reaches `from` is published.
     fn start(&mut self, play: Play, period_start: i64, compensation: i64, stats: &EngineStats) {

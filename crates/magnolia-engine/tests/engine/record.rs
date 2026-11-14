@@ -1125,6 +1125,58 @@ fn a_stop_after_the_graphs_panic_still_ends_the_take_whole() {
     assert_capture(&samples, &[0], first + 2_000, &[]);
 }
 
+/// After the graph's panic, a play is refused and counted, and makes no take (ADR-0034): played
+/// while rolling, it still ends the play under way, as a stop does, whose take ends whole.
+#[test]
+fn a_play_after_the_graphs_panic_is_refused_and_ends_the_play_under_way() {
+    let mut rig = RecordRig::new("panic-then-play", 1, |_| {});
+    let armed = Arc::new(AtomicBool::new(false));
+    let panicking = rig.rig.add(Panicking {
+        armed: Arc::clone(&armed),
+    });
+    rig.rig
+        .controller
+        .connect(Source::Node(panicking, 0), Destination::Playback(0));
+    rig.arm(1, "voice", &[0]);
+    rig.rig.controller.commit().unwrap();
+    rig.period(PERIOD, &capture);
+    rig.rig.controller.play(SamplePosition(0)).unwrap();
+    for _ in 0..10 {
+        rig.period(PERIOD, &capture);
+    }
+    let first = audible_at(&rig);
+    armed.store(true, Ordering::Relaxed);
+    rig.period(PERIOD, &capture);
+    assert!(rig.rig.controller.stats().poisoned());
+
+    // A play while rolling: the play under way stops there, and no new one starts.
+    rig.rig.controller.play(SamplePosition(48_000)).unwrap();
+    let stop_at = rig.position;
+    for _ in 0..20 {
+        rig.period(PERIOD, &capture);
+    }
+    // A play while stopped: refused too.
+    rig.rig.controller.play(SamplePosition(0)).unwrap();
+    for _ in 0..20 {
+        rig.period(PERIOD, &capture);
+    }
+    let stats = std::sync::Arc::clone(rig.rig.controller.stats());
+    assert_eq!(stats.plays_refused(), 2);
+    assert_eq!(
+        stats.play_start().unwrap().sequence,
+        1,
+        "no play started after the panic"
+    );
+    let takes = rig.finish();
+    assert_eq!(takes.len(), 1, "{takes:?}");
+    let take = &takes[0];
+    assert_eq!(take.ended, TakeEnd::Stopped);
+    assert_eq!(take.frames, (stop_at - first) as u64 + FADE as u64);
+    let (info, samples) = read_take(&take_path(take));
+    assert!(!info.length_repaired);
+    assert_capture(&samples, &[0], first, &[]);
+}
+
 /// A graph that panics, then the processor dropped, as ADR-0022's rebuild replaces it: its taps go
 /// with it, and the take under way ends at what it holds.
 #[test]

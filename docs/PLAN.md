@@ -21,7 +21,7 @@ tier, into [`measurements.md`](measurements.md).
 - **M1.2, the time model: done, 2026-11-11** ([ADR-0018](adr/0018-the-time-model.md)).
 - **M1.3 to M1.5: built, 2026-11-11 to 14; waiting for the owner's measures by hand**, on the
   owner's decisions ([ADR-0019](adr/0019-the-sanitizers-nightly-code-behind-a-cfg.md) to
-  [ADR-0032](adr/0032-recording-by-a-capture-tap-of-the-processor.md); `jack`, `rtrb`, `libc`,
+  [ADR-0034](adr/0034-no-play-after-the-graphs-panic.md); `jack`, `rtrb`, `libc`,
   `serde` and `serde_json` taken; the [reference projects](reference-projects.md) adopted). What
   only the owner's hardware can measure is listed in each milestone below.
 
@@ -121,7 +121,7 @@ Done, 2026-11-11: exact positions over a film's length ([ADR-0018](adr/0018-the-
 - **How to test.** `cargo test` for recovery; the loopback by hand.
 - **Measured.** The round trip with a loopback cable and `jack_iodelay`, by the owner on the
   Focusrite.
-- **Delivered**, on ADR-0030 to ADR-0032: in `magnolia-engine`, WAV takes of unknown length with
+- **Delivered**, on ADR-0030 to ADR-0034: in `magnolia-engine`, WAV takes of unknown length with
   `bext` and their repair, the capture tap, the recorder and recovery (`record`); in
   `magnolia-jack`, the device's latencies from JACK's latency callback, physical capture connected,
   its tests in freewheel; version 2 of the test session with input tracks; `magnolia record` and

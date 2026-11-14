@@ -491,7 +491,8 @@ folder: the name sanitized, its letters and digits of any script, `-` and `_` ke
 character `_`, at most 64 characters; `n` continues past the files of that track and name already
 there. A track armed again numbers its takes past its old tap's file made ahead, which the old track
 removes as it leaves: a gap in the numbers. 32-bit floats by default, the device's samples bit for
-bit, or 24-bit integers (`RecordConfig::format`). The next take's file of each armed track exists,
+bit, or 24-bit integers (`RecordConfig::format`,
+[ADR-0033](adr/0033-takes-in-24-bit-integers-as-an-option.md)). The next take's file of each armed track exists,
 empty, so that a take never waits for its file; the recorder removes the files made ahead when it
 ends. `Recorder::takes` lists every take that ended: its file, frames, padding, how it ended, and
 the error that ended it, if one did.
@@ -509,7 +510,10 @@ dropped, its file is left as a crash leaves it, its sizes unknown, the error cou
 ends its take so too, at the recorder's next pass: what it wrote may not be on the disk.
 
 **A panic.** The graph's panic silences the output ([below](#a-period)), but the capture tap goes
-on, and so does the transport: a stop still sets the takes' lengths, and they end whole. A panic in
+on, and so does the transport, for its stops alone: a stop still sets the takes' lengths, and they
+end whole; a play ends the play under way as a stop does, but never starts, nor does a play that
+waited, so that no take begins on a silent output; each is counted in `EngineStats::plays_refused`
+([ADR-0034](adr/0034-no-play-after-the-graphs-panic.md)). A panic in
 a period's start, a swap's, the transport's or the events', freezes the transport: a take whose stop
 was unknown records on until the processor is replaced, as ADR-0022's rebuild does. Dropping the
 processor drops its taps, which ends their takes at what they hold.
@@ -554,8 +558,8 @@ the recorder ([ADR-0023](adr/0023-the-real-time-allowlist.md),
 1. Poisoned, it writes silence on every playback channel, the flag set, every period returning
    normally ([ADR-0022](adr/0022-a-panic-on-the-real-time-path-gives-silence.md)). After a panic
    of the graph, it skips the graph, swaps and events, but still applies the transport's commands
-   at step 2 and moves the transport's clock over the period, cut at its stop, in place of step 4:
-   a stop still ends the takes under way. After a panic of step 2, it skips steps 2 and 4 whole.
+   at step 2, each as a stop, a play refused, and moves the transport's clock over the period, cut
+   at its stop, in place of step 4: a stop still ends the takes under way. After a panic of step 2, it skips steps 2 and 4 whole.
 2. Otherwise it starts the period inside `catch_unwind`: it applies at most one swap, then the
    transport's commands, then pops every queued event into its pending buffer, which has room for
    them all, whether a swap waits or not: the controller never sends an event before its node, nor
