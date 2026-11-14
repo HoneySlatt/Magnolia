@@ -237,7 +237,8 @@ impl EngineStats {
     }
 
     /// Publishes the device's latencies, as the audio server reports them. The backend calls it
-    /// whenever they change; both reach a reader together. Real-time safe.
+    /// every period, so that a processor swapped in has them; both reach a reader together.
+    /// Real-time safe.
     pub fn publish_device_latency(&self, latency: DeviceLatency) {
         self.device_latency
             .store(latency.packed(), Ordering::Release);
