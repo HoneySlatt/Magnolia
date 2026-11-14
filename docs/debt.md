@@ -73,5 +73,8 @@ stage's audit triages the whole list.
 - **The facts read in PipeWire's and JACK2's code** (in ADR-0022 and the JACK backend's section of
   `ARCHITECTURE.md`) name no file or version; their sources are in the M1.3 design challenge's notes,
   not yet in [`survey.md`](survey.md).
+- **A WAV size torn by a power cut can hide frames**: `wav::repair` assumes storage writes a
+  sector whole. A 4-byte size torn mid-write, as when a repair marks a file of sizes 0 unfinished,
+  can leave a file that reads as finished but short, which no repair then takes up.
 - **The test server's command line is written in three places** (`ARCHITECTURE.md`,
   `CONTRIBUTING.md`, the tests' `common/mod.rs`): to keep in the code and link from the documents.
