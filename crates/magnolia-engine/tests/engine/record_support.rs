@@ -8,7 +8,7 @@ use std::time::Duration;
 use magnolia_engine::engine::{Destination, NodeId, Source};
 use magnolia_engine::node::{Node, ProcessContext, ProcessStatus};
 use magnolia_engine::nodes::TestLatency;
-use magnolia_engine::record::{RecordConfig, RecordTrack, Recorder, TakeSummary};
+use magnolia_engine::record::{RecordConfig, RecordTrack, Recorder, TakeSummary, Tap};
 use magnolia_engine::stats::DeviceLatency;
 use magnolia_engine::wav::{WavInfo, read_info};
 
@@ -100,10 +100,9 @@ impl RecordRig {
         self.recorder.as_ref().unwrap()
     }
 
-    /// Arms track `number`, named `name`, on the capture channels given; the next commit sends it.
-    pub fn arm(&mut self, number: u32, name: &str, channels: &[usize]) {
-        let tap = self
-            .recorder
+    /// Makes the tap of track `number`, named `name`, on the capture channels given.
+    pub fn tap(&mut self, number: u32, name: &str, channels: &[usize]) -> Tap {
+        self.recorder
             .as_mut()
             .unwrap()
             .tap(RecordTrack {
@@ -111,7 +110,12 @@ impl RecordRig {
                 name: name.to_owned(),
                 capture_channels: channels.to_vec(),
             })
-            .unwrap();
+            .unwrap()
+    }
+
+    /// Arms track `number`, named `name`, on the capture channels given; the next commit sends it.
+    pub fn arm(&mut self, number: u32, name: &str, channels: &[usize]) {
+        let tap = self.tap(number, name, channels);
         self.rig.controller.arm(tap).unwrap();
     }
 

@@ -1,8 +1,8 @@
 //! A swap takes no page fault on the processing thread: every page the processor will touch was
 //! written by the controller first; nor do audio players, whose streams' slots are written when
-//! they are made, nor capture taps, whose rings are written when they are made. RealtimeSanitizer
-//! cannot see a page fault, which is not a call; the kernel counts them per thread, in field 10 of
-//! `/proc/thread-self/stat`.
+//! they are made, nor capture taps, whose rings are written when they are made, through swaps that
+//! keep, arm and disarm taps. RealtimeSanitizer cannot see a page fault, which is not a call; the
+//! kernel counts them per thread, in field 10 of `/proc/thread-self/stat`.
 
 use std::fs::File;
 use std::io::Read;
@@ -211,7 +211,7 @@ fn audio_players_take_no_page_fault_on_the_processing_thread_after_warm_up() {
 }
 
 #[test]
-fn capture_taps_take_no_page_fault_on_the_processing_thread_while_the_recorder_drains() {
+fn capture_taps_take_no_page_fault_on_the_processing_thread_through_recording_and_swaps() {
     // Rings of 8,192 frames: each round goes three times round them.
     let mut rig = RecordRig::new("page-faults", 3, |config| config.ring_frames = 8_192);
     rig.arm(1, "voice", &[0, 1]);
@@ -229,11 +229,21 @@ fn capture_taps_take_no_page_fault_on_the_processing_thread_while_the_recorder_d
     rig.rig.controller.poll();
     rig.rig.controller.play(SamplePosition(0)).unwrap();
     // Each round plays 400 periods of 64 frames while the recorder drains the rings and writes the
-    // takes. The first round warms the code and the stack.
+    // takes; in its first and second hundred a swap arms a third track, keeping both taps, which the
+    // processor moves into the swap's list, then disarms it. The first round warms the code and the
+    // stack.
     let mut rounds = Vec::new();
     for _ in 0..4 {
         let mut faults = 0;
-        for _ in 0..400 {
+        for period in 0..400 {
+            if period == 100 {
+                rig.arm(3, "keys", &[2]);
+                rig.rig.controller.commit().unwrap();
+            }
+            if period == 200 {
+                rig.rig.controller.disarm(3).unwrap();
+                rig.rig.controller.commit().unwrap();
+            }
             rig.wait_idle();
             let before = minor_faults();
             rig.rig.backend.play_period(PERIOD, &capture);

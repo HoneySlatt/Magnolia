@@ -14,6 +14,7 @@ mod events;
 mod nodes;
 mod page_faults;
 mod record;
+mod record_arming;
 mod record_support;
 mod sources;
 mod stats;

@@ -283,6 +283,21 @@ impl TransportClock {
         }
     }
 
+    /// Moves the clock on by `frames` frames, cut where the transport stops as the processor's
+    /// sub-blocks are, for a processor whose graph no longer runs (ADR-0022): a stop asked after the
+    /// graph's panic still ends the takes under way, the clock never jumps past the stop.
+    pub(crate) fn advance_over(&mut self, frames: usize) {
+        let mut left = frames;
+        while left > 0 && self.rolling {
+            let step = self
+                .frames_until_stop()
+                .map_or(left, |until| until.min(left))
+                .max(1);
+            self.advance(step);
+            left = left.saturating_sub(step);
+        }
+    }
+
     /// Moves the clock on by a sub-block of `frames` frames, and stops once it has played the stop.
     pub(crate) fn advance(&mut self, frames: usize) {
         if !self.rolling {

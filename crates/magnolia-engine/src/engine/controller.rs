@@ -27,7 +27,7 @@ use crate::node::{MAX_LATENCY, Node};
 use crate::record::Tap;
 use crate::record::tap::{TapChange, TapId, TrackTap};
 use crate::stats::EngineStats;
-use crate::time::TempoMap;
+use crate::time::{SampleRate, TempoMap};
 
 /// The engine's non-real-time half, made with its [`Processor`](super::Processor) by
 /// [`engine::new`](super::new).
@@ -59,6 +59,8 @@ use crate::time::TempoMap;
 /// ([ADR-0032](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0032-recording-by-a-capture-tap-of-the-processor.md)).
 pub struct Controller {
     stats: Arc<EngineStats>,
+    /// The engine's rate, which an armed tap's recorder must write at.
+    sample_rate: SampleRate,
     context: CompileContext,
     stride: usize,
     messages: Producer<Box<SwapMessage>>,
@@ -189,6 +191,14 @@ pub enum ArmError {
         /// The engine's capture channels.
         capture_channels: usize,
     },
+    /// The tap's recorder writes takes at another rate than the engine's: they would play at the
+    /// wrong speed, and be synced at the wrong times. The tap is given back.
+    RateMismatch {
+        /// The tap, unarmed.
+        tap: Tap,
+        /// The engine's rate, in hertz.
+        engine_rate: u32,
+    },
     /// A tap of that track is armed already: disarm it first. The tap is given back.
     AlreadyArmed(Tap),
     /// No tap of that track is armed.
@@ -205,6 +215,7 @@ const WAIT_STEP: Duration = Duration::from_millis(1);
 /// The parts the engine builds a controller from.
 pub(crate) struct ControllerParts {
     pub(crate) stats: Arc<EngineStats>,
+    pub(crate) sample_rate: SampleRate,
     pub(crate) context: CompileContext,
     pub(crate) stride: usize,
     pub(crate) messages: Producer<Box<SwapMessage>>,
@@ -219,6 +230,7 @@ impl Controller {
     pub(crate) fn new(parts: ControllerParts) -> Self {
         Self {
             stats: parts.stats,
+            sample_rate: parts.sample_rate,
             context: parts.context,
             stride: parts.stride,
             messages: parts.messages,
@@ -360,7 +372,8 @@ impl Controller {
     /// # Errors
     ///
     /// [`ArmError::ChannelOutOfRange`] for a capture channel the engine lacks;
-    /// [`ArmError::AlreadyArmed`] while a tap of that track is armed. Either gives the tap back.
+    /// [`ArmError::RateMismatch`] for a tap whose recorder writes at another rate than the engine;
+    /// [`ArmError::AlreadyArmed`] while a tap of that track is armed. Each gives the tap back.
     pub fn arm(&mut self, tap: Tap) -> Result<(), ArmError> {
         let capture_channels = self.context.capture_channels;
         if let Some(&channel) = tap
@@ -372,6 +385,12 @@ impl Controller {
                 tap,
                 channel,
                 capture_channels,
+            });
+        }
+        if tap.sample_rate() != self.sample_rate {
+            return Err(ArmError::RateMismatch {
+                tap,
+                engine_rate: self.sample_rate.hertz(),
             });
         }
         if self.armed.contains_key(&tap.track()) {
@@ -862,6 +881,12 @@ impl fmt::Display for ArmError {
                 formatter,
                 "track {} records capture channel {channel}, but the engine has {capture_channels}",
                 tap.track()
+            ),
+            Self::RateMismatch { tap, engine_rate } => write!(
+                formatter,
+                "track {}'s recorder writes takes at {} Hz, but the engine runs at {engine_rate} Hz",
+                tap.track(),
+                tap.sample_rate().hertz()
             ),
             Self::AlreadyArmed(tap) => {
                 write!(formatter, "track {} is armed already", tap.track())

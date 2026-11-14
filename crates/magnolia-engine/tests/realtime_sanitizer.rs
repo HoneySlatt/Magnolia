@@ -41,7 +41,8 @@ use magnolia_engine::engine::{
 use magnolia_engine::node::{EventKind, Node, Note, ProcessContext, ProcessStatus};
 use magnolia_engine::nodes::{Gain, Sine, TestLatency, TestSynth};
 use magnolia_engine::offline::OfflineBackend;
-use magnolia_engine::record::{RecordConfig, RecordTrack, Recorder};
+use magnolia_engine::record::{RecordConfig, RecordTrack, Recorder, TakeEnd};
+use magnolia_engine::stats::DeviceLatency;
 use magnolia_engine::time::{
     Meter, MusicalPosition, SamplePosition, SampleRate, TICKS_PER_QUARTER, Tempo, TempoMap,
     TimePosition, place,
@@ -565,10 +566,14 @@ fn play_audio() {
     assert!(!stats.poisoned());
 }
 
-/// Records two armed tracks, a stereo and a mono one, through a play, a stop, a play and a play
-/// while rolling, the recorder on its own thread, woken by the capture tap. Only the processor runs
-/// in a real-time context; between periods the test waits until the recorder has done what it was
-/// asked, so that it sleeps, and each wake is a system call.
+/// Records armed tracks, the recorder on its own thread, woken by the capture tap, through what the
+/// tap does on the real-time thread: a play; a swap that keeps two taps and arms a third, which the
+/// processor moves into the swap's list; a change of the device's latency, which ends the takes;
+/// a stop; a play during which the recorder pauses, so that the rings overflow and frames are
+/// dropped, then gaps marked; a disarm mid-take, which retires a tap to the collector; a play while
+/// rolling, and a stop. Only the processor runs in a real-time context; between periods the test
+/// waits until the recorder has done what it was asked, so that it sleeps and each wake is a
+/// system call, but while it is paused.
 fn play_record() {
     let dir = PathBuf::from(env::var_os(FOLDER_VARIABLE).expect("the parent names a folder"))
         .join("takes");
@@ -579,8 +584,13 @@ fn play_record() {
         .add_node(Box::new(Sine::new(rate, 440.0, 0.5)))
         .unwrap();
     controller.connect(Source::Node(sine, 0), Destination::Playback(0));
-    let mut recorder = Recorder::start(RecordConfig::new(&dir, rate), controller.stats()).unwrap();
-    for (number, channels) in [(1, vec![0, 1]), (2, vec![2])] {
+    let mut config = RecordConfig::new(&dir, rate);
+    config.ring_frames = RecordConfig::MIN_RING_FRAMES;
+    let mut recorder = Recorder::start(config, controller.stats()).unwrap();
+    let arm = |controller: &mut engine::Controller,
+               recorder: &mut Recorder,
+               number: u32,
+               channels: Vec<usize>| {
         let tap = recorder
             .tap(RecordTrack {
                 number,
@@ -589,7 +599,9 @@ fn play_record() {
             })
             .unwrap();
         controller.arm(tap).unwrap();
-    }
+    };
+    arm(&mut controller, &mut recorder, 1, vec![0, 1]);
+    arm(&mut controller, &mut recorder, 2, vec![2]);
     controller.commit().unwrap();
     let mut backend = OfflineBackend::new(processor);
     let capture: Vec<Vec<f32>> = (0..3)
@@ -599,37 +611,61 @@ fn play_record() {
                 .collect()
         })
         .collect();
-    let mut play = |controller: &mut engine::Controller, recorder: &Recorder, periods: usize| {
-        for period in 0..periods {
-            assert!(recorder.wait_idle(Duration::from_secs(10)));
-            let frames = [64, 1_000, 100, 256][period % 4];
-            let buffers: Vec<&[f32]> = capture.iter().map(|channel| &channel[..frames]).collect();
-            backend.play_period(frames, &buffers);
-            controller.poll();
-        }
-    };
-    play(&mut controller, &recorder, 4);
+    let mut play =
+        |controller: &mut engine::Controller, recorder: &Recorder, periods: usize, wait: bool| {
+            for period in 0..periods {
+                if wait {
+                    assert!(recorder.wait_idle(Duration::from_secs(10)));
+                }
+                let frames = [64, 1_000, 100, 256][period % 4];
+                let buffers: Vec<&[f32]> =
+                    capture.iter().map(|channel| &channel[..frames]).collect();
+                backend.play_period(frames, &buffers);
+                controller.poll();
+            }
+        };
+    play(&mut controller, &recorder, 4, true);
     controller.play(SamplePosition(0)).unwrap();
-    play(&mut controller, &recorder, 60);
+    play(&mut controller, &recorder, 30, true);
+    // A swap that keeps both taps and arms a third.
+    arm(&mut controller, &mut recorder, 3, vec![0]);
+    controller.commit().unwrap();
+    play(&mut controller, &recorder, 20, true);
+    // The device's latency changes: the takes under way end.
+    controller.stats().publish_device_latency(DeviceLatency {
+        capture: 32,
+        playback: 64,
+    });
+    play(&mut controller, &recorder, 10, true);
     controller.stop().unwrap();
-    play(&mut controller, &recorder, 8);
+    play(&mut controller, &recorder, 8, true);
     controller.play(SamplePosition(2_000)).unwrap();
-    play(&mut controller, &recorder, 30);
+    play(&mut controller, &recorder, 4, true);
+    // The recorder stalls: the rings of 4,096 frames overflow.
+    recorder.pause(true);
+    play(&mut controller, &recorder, 30, false);
+    recorder.pause(false);
+    play(&mut controller, &recorder, 10, true);
+    // A disarm mid-take.
+    controller.disarm(2).unwrap();
+    controller.commit().unwrap();
+    play(&mut controller, &recorder, 10, true);
     // A play while rolling: the old takes' tails, then the new takes.
     controller.play(SamplePosition(40_000)).unwrap();
-    play(&mut controller, &recorder, 40);
+    play(&mut controller, &recorder, 30, true);
     controller.stop().unwrap();
-    play(&mut controller, &recorder, 8);
+    play(&mut controller, &recorder, 8, true);
     assert!(recorder.wait_idle(Duration::from_secs(10)));
     let stats = controller.stats();
-    assert_eq!(
-        recorder.stats().takes_started(),
-        6,
-        "three plays, two tracks"
-    );
-    assert_eq!(recorder.takes().len(), 6);
+    let takes = recorder.takes();
+    let ended = |end: TakeEnd| takes.iter().filter(|take| take.ended == end).count();
+    assert_eq!(takes.len(), 7, "two, three, then two takes: {takes:?}");
+    assert_eq!(ended(TakeEnd::LatencyChanged), 2);
+    assert_eq!(ended(TakeEnd::Disarmed), 1);
+    assert_eq!(ended(TakeEnd::Stopped), 4);
+    assert!(stats.capture_overruns() > 0, "the rings overflowed");
+    assert_eq!(recorder.stats().frames_padded(), stats.capture_overruns());
     assert!(recorder.stats().frames_written() > 3 * 10_000);
-    assert_eq!(stats.capture_overruns(), 0);
     assert!(!stats.poisoned() && !stats.tap_stopped());
 }
 

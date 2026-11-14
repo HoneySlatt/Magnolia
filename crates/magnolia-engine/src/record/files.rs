@@ -257,17 +257,20 @@ pub(crate) struct SyncFile {
     pub(crate) in_flight: AtomicBool,
     /// Set when a sync failed: what was written may not be on the disk.
     pub(crate) failed: AtomicBool,
+    /// A test's hook: every sync fails while it is set.
+    fail: Arc<AtomicBool>,
     #[cfg(test)]
     log: Option<OpLog>,
 }
 
 impl SyncFile {
-    /// A handle on the file of `file`.
-    pub(crate) fn of(file: &File) -> io::Result<Self> {
+    /// A handle on the file of `file`, whose syncs fail while `fail` is set.
+    pub(crate) fn of(file: &File, fail: Arc<AtomicBool>) -> io::Result<Self> {
         Ok(Self {
             file: file.try_clone()?,
             in_flight: AtomicBool::new(false),
             failed: AtomicBool::new(false),
+            fail,
             #[cfg(test)]
             log: None,
         })
@@ -284,6 +287,9 @@ impl SyncFile {
         #[cfg(test)]
         if let Some(log) = &self.log {
             log_op(log, FileOp::Sync);
+        }
+        if self.fail.load(Ordering::Relaxed) {
+            return Err(io::Error::other("a test's hook failed this sync"));
         }
         self.file.sync_data()
     }

@@ -138,6 +138,8 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
   Wine.
 - **Poisoned**: the processor's state after a panic on the real-time path: it writes silence to every
   output from then on, and says so ([ADR-0022](adr/0022-a-panic-on-the-real-time-path-gives-silence.md)).
+  After the graph's panic alone, its transport still follows its commands, so that a stop still
+  ends the takes under way ([`ARCHITECTURE.md`](ARCHITECTURE.md#a-period)).
 - **Pre-roll**: the samples the transport runs before the position a play asked for, as many as the
   graph's largest compensation, so that every path reaches the output on that position together
   ([ADR-0025](adr/0025-delay-compensation-by-reading-ahead.md)).

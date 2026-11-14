@@ -9,6 +9,8 @@
 //! starts at the timeline's zero at the earliest: a play from before it skips the frames before
 //! it. Windows never overlap, since a play starts only after the last one's stop has played; a
 //! track's tap holds up to [`MAX_WINDOWS`] at once, the old take's tail and the plays that follow.
+//! A play stopped at once, nothing audible read, in the period that starts the next play, has its
+//! window settled when the next one opens, as the tap never sees that stop.
 //!
 //! Each period, for each window that the period's frames reach, the tap pushes the window's frames
 //! into the track's frames ring, interleaved by the take's channels, and its marks into the marks
@@ -48,6 +50,7 @@ use super::marks::{EndReason, Mark, MarkKind};
 use crate::device::DeviceBuffers;
 use crate::engine::PlayInfo;
 use crate::stats::{DeviceLatency, EngineStats};
+use crate::time::SampleRate;
 
 /// The most takes a track's tap holds at once: the one whose frames come in, and the plays after
 /// it whose frames have not started, as when plays and stops come faster than the round trip.
@@ -158,6 +161,11 @@ impl Tap {
     pub fn capture_channels(&self) -> &[usize] {
         &self.track.channels
     }
+
+    /// The rate its recorder writes takes at, which must be the engine's.
+    pub fn sample_rate(&self) -> SampleRate {
+        self.track.sample_rate
+    }
 }
 
 impl fmt::Debug for Tap {
@@ -175,6 +183,9 @@ pub(crate) struct TapRings {
     pub(crate) frames: Consumer<f32>,
     pub(crate) marks: Consumer<Mark>,
     pub(crate) fills: Arc<RingFills>,
+    /// Frames taken from the frames ring since the tap was made: where the next one lies in the
+    /// tap's stream, which the marks' positions count in.
+    pub(crate) consumed: u64,
 }
 
 /// One take, from its play's start until its end is pushed.
@@ -241,6 +252,8 @@ pub(crate) struct TrackTap {
     pub(crate) track: u32,
     /// The engine's capture channel of each channel of the take.
     pub(crate) channels: Box<[usize]>,
+    /// The rate its recorder writes takes at.
+    sample_rate: SampleRate,
     frames: Producer<f32>,
     marks: Producer<Mark>,
     link: Arc<RecorderLink>,
@@ -258,13 +271,14 @@ pub(crate) struct TrackTap {
 }
 
 impl TrackTap {
-    /// A tap for `track` that records `channels` into rings of `ring_frames` frames, and the ends
-    /// the recorder keeps. Off the real-time thread: every page of both rings is written here, by
+    /// A tap for `track` that records `channels` into rings of `ring_frames` frames for a recorder
+    /// at `sample_rate`, and the ends the recorder keeps. Off the real-time thread: every page of both rings is written here, by
     /// pushing through every slot and popping it again.
     pub(crate) fn new(
         track: u32,
         channels: Box<[usize]>,
         ring_frames: usize,
+        sample_rate: SampleRate,
         link: Arc<RecorderLink>,
     ) -> (Self, TapRings) {
         let samples = ring_frames.saturating_mul(channels.len());
@@ -290,6 +304,7 @@ impl TrackTap {
             id: TapId::next(),
             track,
             channels,
+            sample_rate,
             frames,
             marks,
             link,
@@ -304,6 +319,7 @@ impl TrackTap {
             frames: frames_out,
             marks: marks_out,
             fills,
+            consumed: 0,
         };
         (tap, rings)
     }
@@ -355,6 +371,7 @@ impl TrackTap {
         let Some(play) = view.play else { return };
         if play.sequence > self.last_play {
             self.last_play = play.sequence;
+            self.settle_older_windows(play.sequence);
             self.open(play, view.latency, stats);
         }
         let Some(stop) = play.stop else { return };
@@ -376,8 +393,41 @@ impl TrackTap {
         }
     }
 
+    /// Settles, before the window of play `sequence` opens, every window of an older play whose
+    /// length is still unknown. The transport starts a play only once the last one has stopped, so
+    /// such a play's stop came in the period that started the new one, at once, nothing audible
+    /// read: as when a swap lowered the pre-roll before a play while rolling, or a period of no
+    /// frame came between two plays. The tap never saw that stop. Its window is dropped when it
+    /// reached no frame, as it always has; one that did would end at what it reached.
+    fn settle_older_windows(&mut self, sequence: u64) {
+        let mut settled = false;
+        for slot in &mut self.windows {
+            let Some(window) =
+                slot.take_if(|window| window.play < sequence && window.length.is_none())
+            else {
+                continue;
+            };
+            if window.reached > 0 {
+                push_end(
+                    &mut self.marks,
+                    &self.fills,
+                    self.pushed,
+                    &window,
+                    EndReason::Stopped,
+                );
+                self.marked = true;
+            }
+            settled = true;
+        }
+        if settled {
+            self.compact();
+        }
+    }
+
     /// Opens the window of `play`, placed by the round trip it reads now; none for an audible
-    /// region known empty, or wholly before the timeline's zero.
+    /// region known empty, or wholly before the timeline's zero. A window never starts before the
+    /// period that opens it: the tap sees a play in the period that starts it, and the output plays
+    /// its first sample a pre-roll later, the round trip later still.
     fn open(&mut self, play: PlayInfo, latency: DeviceLatency, stats: &EngineStats) {
         let first_sample = play.from.max(0);
         if play.stop.is_some_and(|stop| stop <= first_sample) {
@@ -437,17 +487,9 @@ impl TrackTap {
             let Some(mut window) = self.windows.get(index).copied().flatten() else {
                 continue;
             };
+            // A window starts no earlier than the period that opened it, and every period since
+            // has reached all it needed: what it still needs starts in this period or later.
             let (from, to) = window.remaining();
-            // Frames of the window before this period were never offered: the tap runs every period
-            // from the window's opening, so none are. Were any, they would be a gap, so that what
-            // follows stays in place.
-            let missed = to.min(view.start).saturating_sub(from);
-            if missed > 0 {
-                let missed = as_frames(missed);
-                window.gap = window.gap.saturating_add(missed);
-                window.reached = window.reached.saturating_add(missed);
-                dropped = dropped.saturating_add(missed);
-            }
             let first = from.max(view.start);
             let last = to.min(period_end);
             if first < last {
@@ -568,6 +610,16 @@ impl TrackTap {
             *slot = Some(*window);
         }
         self.windows = kept;
+    }
+}
+
+impl Drop for TrackTap {
+    /// Asks the recorder for a pass, which finds the rings abandoned and ends the take this tap
+    /// left under way: a tap is dropped off the real-time thread, by the collector after a disarm,
+    /// with the processor, or unarmed.
+    fn drop(&mut self) {
+        self.link.flag.asked.swap(true, Ordering::AcqRel);
+        self.link.thread.unpark();
     }
 }
 

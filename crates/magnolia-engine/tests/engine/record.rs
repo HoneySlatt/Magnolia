@@ -13,15 +13,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use magnolia_engine::engine::{Destination, Source};
+use magnolia_engine::nodes::TestLatency;
 use magnolia_engine::record::{
-    RecordConfig, RecordError, Recorder, TakeEnd, TakeFormat, TakeName, recover,
+    RecordConfig, RecordError, Recorder, TakeEnd, TakeFormat, TakeName, TakeSummary, recover,
 };
 use magnolia_engine::time::SamplePosition;
 use magnolia_engine::wav::{Bext, SampleFormat, WavWriter, read_info};
 
 use crate::disk_support::TempDir;
 use crate::record_support::{
-    PRE_ROLL, RecordRig, files_in, read_take, signal, take_path, timeline_value,
+    PRE_ROLL, RecordRig, TimelinePlayer, files_in, read_take, signal, take_path, timeline_value,
 };
 use crate::support::{Constant, FADE, Panicking, rate};
 use crate::timeline_support::Random;
@@ -971,4 +972,249 @@ fn a_take_starts_at_the_timelines_zero_at_the_earliest() {
     assert_eq!(info.bext.unwrap().time_reference, 0);
     // Timeline sample 0 played at `audible + 1,000`, captured a round trip later.
     assert_capture(&samples, &[0], audible + 1_000 + 200, &[]);
+}
+
+/// Checks that a take of `play` ended at its stop and holds the capture of channel 0 from engine
+/// sample `first` on.
+fn assert_take_of(take: &TakeSummary, play: u64, first: i64) {
+    assert_eq!(
+        (take.play, take.ended),
+        (play, TakeEnd::Stopped),
+        "{take:?}"
+    );
+    assert!(take.error.is_none() && take.frames > 0, "{take:?}");
+    let (info, samples) = read_take(&take_path(take));
+    assert_eq!(info.frames, take.frames);
+    assert_capture(&samples, &[0], first, &[]);
+}
+
+/// A play during a long pre-roll, then a swap that removes the latent path, then a play while
+/// rolling: the transport stops the first play at once, nothing audible read under the new
+/// pre-roll, and starts the second in the same period. The tap never sees the first play's stop;
+/// it drops the first play's window, which reached no frame, as the second opens. Each take is its
+/// own play's, whole and exact, a third play's too; no take of the first play.
+#[test]
+fn a_play_stopped_at_once_by_a_play_while_rolling_leaves_no_window_open() {
+    let mut rig = RecordRig::new("stopped-at-once", 1, |_| {});
+    let player = rig.rig.add(TimelinePlayer);
+    rig.rig
+        .controller
+        .connect(Source::Node(player, 0), Destination::Playback(0));
+    let silent = rig.rig.add(Constant::new(0.0));
+    let latent = rig.rig.add(TestLatency::new(1, 4_000));
+    rig.rig
+        .controller
+        .connect(Source::Node(silent, 0), Destination::Node(latent, 0));
+    rig.rig
+        .controller
+        .connect(Source::Node(latent, 0), Destination::Playback(0));
+    rig.arm(1, "voice", &[0]);
+    rig.rig.controller.commit().unwrap();
+    rig.period(PERIOD, &capture);
+    rig.rig.controller.play(SamplePosition(0)).unwrap();
+    rig.period(PERIOD, &capture);
+    rig.period(PERIOD, &capture);
+    rig.rig.controller.remove_node(latent).unwrap();
+    rig.rig.controller.commit().unwrap();
+    rig.period(PERIOD, &capture);
+    rig.rig.controller.play(SamplePosition(0)).unwrap();
+    for _ in 0..40 {
+        rig.period(PERIOD, &capture);
+    }
+    let second = audible_at(&rig);
+    rig.rig.controller.stop().unwrap();
+    for _ in 0..40 {
+        rig.period(PERIOD, &capture);
+    }
+    rig.rig.controller.play(SamplePosition(0)).unwrap();
+    for _ in 0..20 {
+        rig.period(PERIOD, &capture);
+    }
+    let third = audible_at(&rig);
+    rig.rig.controller.stop().unwrap();
+    for _ in 0..20 {
+        rig.period(PERIOD, &capture);
+    }
+    let overruns = rig.rig.controller.stats().capture_overruns();
+    let mut takes = rig.finish();
+    takes.sort_by_key(|take| take.play);
+    assert_eq!(overruns, 0);
+    assert_eq!(takes.len(), 2, "{takes:#?}");
+    assert_take_of(&takes[0], 2, second);
+    assert_take_of(&takes[1], 3, third);
+}
+
+/// The same with a period of no frame between a play and a play while rolling: the first play is
+/// stopped at once and the second starts on the same engine sample; one take, the second play's,
+/// then a third play's, each whole.
+#[test]
+fn a_period_of_no_frame_between_two_plays_leaves_no_window_open() {
+    let mut rig = RecordRig::new("zero-period", 1, |_| {});
+    rig.add_timeline_and_pre_roll();
+    rig.arm(1, "voice", &[0]);
+    rig.rig.controller.commit().unwrap();
+    rig.period(PERIOD, &capture);
+    rig.rig.controller.play(SamplePosition(0)).unwrap();
+    rig.period(0, &capture);
+    rig.rig.controller.play(SamplePosition(0)).unwrap();
+    for _ in 0..20 {
+        rig.period(PERIOD, &capture);
+    }
+    let second = audible_at(&rig);
+    rig.rig.controller.stop().unwrap();
+    for _ in 0..20 {
+        rig.period(PERIOD, &capture);
+    }
+    rig.rig.controller.play(SamplePosition(0)).unwrap();
+    for _ in 0..10 {
+        rig.period(PERIOD, &capture);
+    }
+    let third = audible_at(&rig);
+    rig.rig.controller.stop().unwrap();
+    for _ in 0..10 {
+        rig.period(PERIOD, &capture);
+    }
+    let mut takes = rig.finish();
+    takes.sort_by_key(|take| take.play);
+    assert_eq!(takes.len(), 2, "{takes:#?}");
+    assert_take_of(&takes[0], 2, second);
+    assert_take_of(&takes[1], 3, third);
+}
+
+/// A graph that panics before the stop: the transport still takes the stop, and the take ends at
+/// its window's end, whole, as if the graph had played on.
+#[test]
+fn a_stop_after_the_graphs_panic_still_ends_the_take_whole() {
+    let mut rig = RecordRig::new("panic-then-stop", 1, |_| {});
+    rig.publish_latency(1_000, 1_000);
+    let armed = Arc::new(AtomicBool::new(false));
+    let panicking = rig.rig.add(Panicking {
+        armed: Arc::clone(&armed),
+    });
+    rig.rig
+        .controller
+        .connect(Source::Node(panicking, 0), Destination::Playback(0));
+    rig.arm(1, "voice", &[0]);
+    rig.rig.controller.commit().unwrap();
+    rig.period(PERIOD, &capture);
+    rig.rig.controller.play(SamplePosition(0)).unwrap();
+    for _ in 0..10 {
+        rig.period(PERIOD, &capture);
+    }
+    let first = audible_at(&rig);
+    // The panic falls in the middle of a period: the clock moves over the rest of it all the same.
+    armed.store(true, Ordering::Relaxed);
+    rig.period(300, &capture);
+    assert!(rig.rig.controller.stats().poisoned());
+    for _ in 0..5 {
+        rig.period(PERIOD, &capture);
+    }
+    rig.rig.controller.stop().unwrap();
+    let stop_at = rig.position;
+    for _ in 0..20 {
+        rig.period(PERIOD, &capture);
+    }
+    let takes = rig.finish();
+    assert_eq!(takes.len(), 1, "{takes:?}");
+    let take = &takes[0];
+    assert_eq!(take.ended, TakeEnd::Stopped);
+    // The stop's timeline sample: the clock at the stop's period, plus the fade; no pre-roll.
+    assert_eq!(take.frames, (stop_at - first) as u64 + FADE as u64);
+    let (info, samples) = read_take(&take_path(take));
+    assert!(!info.length_repaired);
+    assert_capture(&samples, &[0], first + 2_000, &[]);
+}
+
+/// A graph that panics, then the processor dropped, as ADR-0022's rebuild replaces it: its taps go
+/// with it, and the take under way ends at what it holds.
+#[test]
+fn a_processor_dropped_after_the_graphs_panic_ends_the_take() {
+    let mut rig = RecordRig::new("panic-then-drop", 1, |_| {});
+    let armed = Arc::new(AtomicBool::new(false));
+    let panicking = rig.rig.add(Panicking {
+        armed: Arc::clone(&armed),
+    });
+    rig.rig
+        .controller
+        .connect(Source::Node(panicking, 0), Destination::Playback(0));
+    rig.arm(1, "voice", &[0]);
+    rig.rig.controller.commit().unwrap();
+    rig.period(PERIOD, &capture);
+    rig.rig.controller.play(SamplePosition(0)).unwrap();
+    for _ in 0..10 {
+        rig.period(PERIOD, &capture);
+    }
+    let first = audible_at(&rig);
+    armed.store(true, Ordering::Relaxed);
+    for _ in 0..5 {
+        rig.period(PERIOD, &capture);
+    }
+    let end = rig.position;
+    let RecordRig {
+        rig: engine,
+        recorder,
+        dir: _dir,
+        ..
+    } = rig;
+    let recorder = recorder.unwrap();
+    drop(engine.backend);
+    assert!(recorder.wait_idle(std::time::Duration::from_secs(20)));
+    let takes = recorder.takes();
+    drop(recorder);
+    assert_eq!(takes.len(), 1, "{takes:?}");
+    let take = &takes[0];
+    assert_eq!(take.ended, TakeEnd::TapDropped);
+    assert_eq!(
+        take.frames,
+        (end - first) as u64,
+        "every frame captured before the drop"
+    );
+    let (info, samples) = read_take(&take_path(take));
+    assert!(!info.length_repaired);
+    assert_capture(&samples, &[0], first, &[]);
+}
+
+/// A sync of a take's data that fails ends the take with the error, its later frames dropped, its
+/// sizes left unknown, as a crash leaves them.
+#[test]
+fn a_failed_sync_ends_the_take_with_its_error() {
+    let mut rig = RecordRig::new("sync-error", 1, |_| {});
+    rig.arm(1, "voice", &[0]);
+    rig.rig.controller.commit().unwrap();
+    rig.period(PERIOD, &capture);
+    rig.recorder().fail_syncs(true);
+    rig.rig.controller.play(SamplePosition(0)).unwrap();
+    // A second and a half of audio: the sync asked after the first second fails.
+    for _ in 0..280 {
+        rig.period(PERIOD, &capture);
+        rig.wait_idle();
+    }
+    rig.rig.controller.stop().unwrap();
+    for _ in 0..4 {
+        rig.period(PERIOD, &capture);
+    }
+    let first = audible_at(&rig);
+    rig.wait_idle();
+    let errors = rig.recorder().stats().write_errors();
+    rig.recorder().fail_syncs(false);
+    let takes = rig.finish();
+    assert!(errors >= 1);
+    assert_eq!(rig.rig.controller.stats().capture_overruns(), 0);
+    assert_eq!(takes.len(), 1);
+    let take = &takes[0];
+    let error = take
+        .error
+        .as_ref()
+        .expect("the take reports the failed sync");
+    assert!(error.to_string().contains("sync"), "{error}");
+    // Ended at the pass after the failed sync, well before the stop's 71,680 frames.
+    assert!(
+        (48_000..=48_000 + 2 * 4_096).contains(&take.frames),
+        "{}",
+        take.frames
+    );
+    let (info, samples) = read_take(&take_path(take));
+    assert!(info.length_repaired, "its sizes say unknown");
+    assert_eq!(info.frames, take.frames);
+    assert_capture(&samples, &[0], first, &[]);
 }

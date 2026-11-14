@@ -69,7 +69,27 @@ pub struct Processor {
     last_play: Option<PlayInfo>,
     /// The first sample of the next period, on the engine's clock.
     position: i64,
-    poisoned: bool,
+    /// The frames of the period under way that the transport's clock has moved over.
+    period_played: usize,
+    /// The graph's largest compensation, as the last period's start that completed left it: the
+    /// pre-roll of a play that the transport starts after the graph's panic.
+    compensation: u64,
+    poison: Poison,
+}
+
+/// How far a panic has poisoned the processor
+/// ([ADR-0022](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0022-a-panic-on-the-real-time-path-gives-silence.md)).
+/// Either way the output is silent and `EngineStats::poisoned` is set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Poison {
+    /// No panic.
+    None,
+    /// The graph panicked: it runs no more, nor do swaps and events, but the transport still takes
+    /// its commands and its clock moves, so that a stop still ends the takes under way.
+    Graph,
+    /// The period's start panicked, in a swap, the transport or the events: the processor touches
+    /// none of them again.
+    Whole,
 }
 
 /// What became of a step's node in a sub-block.
@@ -123,7 +143,9 @@ impl Processor {
             taps: CaptureTap::new(),
             last_play: None,
             position: 0,
-            poisoned: false,
+            period_played: 0,
+            compensation: 0,
+            poison: Poison::None,
         }
     }
 
@@ -171,6 +193,8 @@ impl Processor {
     /// poisons the processor: this period and every later one write silence to every playback
     /// channel and return normally
     /// ([ADR-0022](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0022-a-panic-on-the-real-time-path-gives-silence.md)).
+    /// After the graph's panic alone, the transport still takes its commands and its clock still
+    /// moves, so that a stop still ends the takes under way; swaps and events are taken no more.
     /// The capture tap runs between the two, in a `catch_unwind` of its own, so that a poisoned
     /// processor still records the takes under way, and a panic of the tap stops the tap alone
     /// ([ADR-0032](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0032-recording-by-a-capture-tap-of-the-processor.md)).
@@ -181,23 +205,33 @@ impl Processor {
         let frames = device.frames();
         self.stats
             .publish_block_start(SamplePosition(self.position));
-        // After a panic the processor touches its graph, pool, arena and transport no more, so a
-        // state left half-changed by the unwinding is never read.
-        if !self.poisoned {
-            let started = catch_unwind(AssertUnwindSafe(|| self.start_period()));
-            match started {
-                Ok(()) => self.last_play = self.transport.last_play(),
-                Err(payload) => self.poison(payload),
-            }
+        // After a panic the processor touches no more what the panic may have left half-changed:
+        // after the graph's, its graph, pool and arena; after the period's start's, its transport
+        // too. The taps read the last play as the last period's start that completed left it.
+        let started = match self.poison {
+            Poison::None => catch_unwind(AssertUnwindSafe(|| self.start_period())),
+            Poison::Graph => catch_unwind(AssertUnwindSafe(|| self.follow_transport())),
+            Poison::Whole => Ok(()),
+        };
+        match started {
+            Ok(()) if self.poison != Poison::Whole => self.last_play = self.transport.last_play(),
+            Ok(()) => {}
+            Err(payload) => self.poison(payload, Poison::Whole),
         }
         self.run_taps(device, frames);
-        if !self.poisoned {
-            let played = catch_unwind(AssertUnwindSafe(|| self.play_period(device)));
-            if let Err(payload) = played {
-                self.poison(payload);
+        match self.poison {
+            Poison::None => {
+                let played = catch_unwind(AssertUnwindSafe(|| self.play_period(device)));
+                if let Err(payload) = played {
+                    self.poison(payload, Poison::Graph);
+                    // The clock moves over what the graph did not play of this period.
+                    self.advance_transport(frames.saturating_sub(self.period_played));
+                }
             }
+            Poison::Graph => self.advance_transport(frames),
+            Poison::Whole => {}
         }
-        if self.poisoned {
+        if self.poison != Poison::None {
             write_silence(device);
         }
         self.garbage.wake_if_pushed();
@@ -206,9 +240,9 @@ impl Processor {
         self.stats.callback_times.record(entry.elapsed());
     }
 
-    /// From now on, the processor writes silence (ADR-0022).
-    fn poison(&mut self, payload: Box<dyn std::any::Any + Send>) {
-        self.poisoned = true;
+    /// From now on, the processor writes silence, poisoned to `level` (ADR-0022).
+    fn poison(&mut self, payload: Box<dyn std::any::Any + Send>, level: Poison) {
+        self.poison = level;
         self.stats.set_poisoned();
         self.garbage.release(Garbage::PanicPayload(payload));
     }
@@ -217,12 +251,30 @@ impl Processor {
     fn start_period(&mut self) {
         self.garbage.flush_overflow();
         self.apply_swap();
+        self.compensation = self.graph.largest_ahead_in;
         // After the swap, so that a play pre-rolls by the compensation of the graph about to play.
         self.transport
-            .apply_commands(self.position, self.graph.largest_ahead_in, &self.stats);
+            .apply_commands(self.position, self.compensation, &self.stats);
         // Every queued event may be taken, even while a swap waits: the controller sends an event
         // for a node a swap brings only once the processor has applied that swap.
         self.events.pop();
+    }
+
+    /// The period's start after the graph's panic: the transport's commands alone, a play
+    /// pre-rolled by the compensation of the last graph that played.
+    fn follow_transport(&mut self) {
+        self.garbage.flush_overflow();
+        self.transport
+            .apply_commands(self.position, self.compensation, &self.stats);
+    }
+
+    /// Moves the transport's clock over `frames` frames of a period the graph does not play, in a
+    /// `catch_unwind` whose panic poisons the whole processor.
+    fn advance_transport(&mut self, frames: usize) {
+        let advanced = catch_unwind(AssertUnwindSafe(|| self.transport.advance_over(frames)));
+        if let Err(payload) = advanced {
+            self.poison(payload, Poison::Whole);
+        }
     }
 
     /// Runs the capture tap over the period, unless a panic stopped it: it copies the armed tracks'
@@ -258,6 +310,7 @@ impl Processor {
     fn play_period(&mut self, device: &mut dyn DeviceBuffers) {
         let frames = device.frames();
         let mut done = 0;
+        self.period_played = 0;
         while done < frames {
             let length = self.sub_block_length(frames.saturating_sub(done));
             let start = self.position.saturating_add(as_samples(done));
@@ -267,6 +320,7 @@ impl Processor {
             done = done.saturating_add(length);
             self.advance_phase(length);
             self.transport.advance(length);
+            self.period_played = done;
         }
     }
 

@@ -18,6 +18,9 @@
 //! A mark whose position lies beyond the frames counted means that the count was read before the
 //! frames it follows were pushed: the recorder writes what it counted, then counts again, and the
 //! new count reaches the mark.
+//!
+//! [`drain`] is that order: the recorder's thread drains every track through it, and the unit tests
+//! drive its [`count`] and [`step`] with pushes in between.
 
 // The tap pushes marks on the real-time thread: nothing here may panic (ADR-0022).
 #![warn(
@@ -27,6 +30,8 @@
     clippy::panic,
     clippy::arithmetic_side_effects
 )]
+
+use super::tap::TapRings;
 
 /// What the tap tells the recorder beside a track's frames.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,6 +110,78 @@ pub(crate) fn next(consumed: u64, available: u64, mark: Option<&Mark>) -> Next {
             } else {
                 Next::CountAgain
             }
+        }
+    }
+}
+
+/// What the recorder takes out of a track's rings, in the order they hold it.
+pub(crate) enum Drained<'a> {
+    /// Interleaved samples of whole frames.
+    Frames(&'a [f32]),
+    Mark(Mark),
+}
+
+/// How many whole frames of `channels` channels the frames ring holds: read first.
+pub(crate) fn count(rings: &TapRings, channels: usize) -> u64 {
+    rings.frames.slots().checked_div(channels).unwrap_or(0) as u64
+}
+
+/// One step of the drain, `available` the frames [`count`] read before: looks at the next mark, then
+/// hands `receive` either the frames that come before it, or the mark, which it then pops.
+pub(crate) fn step(
+    rings: &mut TapRings,
+    channels: usize,
+    available: u64,
+    receive: &mut dyn FnMut(Drained<'_>),
+) -> Next {
+    let mark = rings.marks.peek().ok().copied();
+    let next = next(rings.consumed, available, mark.as_ref());
+    match next {
+        Next::Frames(frames) => {
+            let samples = usize::try_from(frames)
+                .unwrap_or(usize::MAX)
+                .saturating_mul(channels);
+            // Frames counted are always there to read.
+            let Ok(chunk) = rings.frames.read_chunk(samples) else {
+                return Next::Idle;
+            };
+            let (first, second) = chunk.as_slices();
+            receive(Drained::Frames(first));
+            receive(Drained::Frames(second));
+            chunk.commit_all();
+            rings.consumed = rings.consumed.saturating_add(frames);
+        }
+        Next::ApplyMark => {
+            if let Some(mark) = mark {
+                receive(Drained::Mark(mark));
+            }
+            let _ = rings.marks.pop();
+        }
+        Next::CountAgain | Next::Idle => {}
+    }
+    next
+}
+
+/// Drains a track's rings in order, handing `receive` frames up to each mark, then the mark.
+/// Returns whether it took anything.
+pub(crate) fn drain(
+    rings: &mut TapRings,
+    channels: usize,
+    receive: &mut dyn FnMut(Drained<'_>),
+) -> bool {
+    let mut took = false;
+    let mut counted_again = false;
+    loop {
+        let available = count(rings, channels);
+        match step(rings, channels, available, receive) {
+            Next::Frames(_) | Next::ApplyMark => {
+                took = true;
+                counted_again = false;
+            }
+            // Counting again always reaches the mark's frames; a mark that lies beyond every frame
+            // pushed would be a bug of the tap's, which must not spin the thread.
+            Next::CountAgain if !counted_again => counted_again = true,
+            Next::CountAgain | Next::Idle => return took,
         }
     }
 }

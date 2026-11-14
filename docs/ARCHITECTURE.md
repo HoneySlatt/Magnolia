@@ -102,7 +102,8 @@ device's capture and playback latencies, in one word).
 ### A swap
 
 1. The controller's edits (`add_node`, `remove_node`, `connect`, `disconnect`) change a
-   description; `set_sequences` and `set_tempo_map` change the timeline sources it holds beside.
+   description; `set_sequences` and `set_tempo_map` change the timeline sources it holds beside,
+   `arm` and `disarm` the armed tracks' taps ([below](#recording)).
    `commit` checks the description whole: a node unknown, a channel out of range, an edge held
    twice and a cycle are each an error of their own, and the description stays as it was. Then it
    compensates the nodes' latencies ([below](#delay-compensation)): the graph it sends holds a
@@ -134,7 +135,11 @@ device's capture and playback latencies, in one word).
    at mid-fade, then meets silence at the junction like any dip.
 5. The processor applies the message whole at a period's start, and only when the collector's
    queue has room for everything it replaces: the old pool, the used message, the old graph.
-   Otherwise it leaves the message queued for a later period, while events go on.
+   Otherwise it leaves the message queued for a later period, while events go on. A message whose
+   commit armed or disarmed a track also carries the change of the armed taps: the taps it arms, in
+   a list with room for every tap it keeps, and those it keeps; the capture tap applies it in the
+   same period, after the transport's commands, and the taps it retires go to the collector
+   ([below](#recording)).
 6. It cuts each period into sub-blocks no longer than the largest block, and at each phase's last
    sample, so a phase ends at its exact sample at every period, and nothing separates a dip's two
    fades. A node is never given more frames than the largest block.
@@ -413,8 +418,10 @@ the next commit carries the change of the armed taps in its swap's message, with
 every tap the swap keeps, and the capture tap applies it in the period that applies the swap, after
 the transport's commands. A tap's state, its windows and its rings, survives every swap that keeps
 it. A tap armed during a play records from the next play; one disarmed during a take ends it at the
-frames it has reached, and goes to the collector, which drops it; the recorder then sees its rings
-abandoned and lets the track go.
+frames it has reached, and goes to the collector, which drops it; a tap dropped asks its recorder
+for a pass, which finds its rings abandoned and lets the track go. `Controller::arm` refuses a
+capture channel the engine lacks, a recorder at another rate than the engine's, and a track armed
+already, and gives the tap back each time.
 
 **The window.** A take's window is counted in engine samples. A play that starts publishes
 `audible_at`, the engine sample at which the output plays its first timeline sample `from`
@@ -424,18 +431,22 @@ capture and playback latencies read at the play's start plus the recorder's extr
 (`RecordConfig::extra_latency`), the take's first frame is the frame captured at `audible_at + R`.
 Its length, `stop - from`, is set once the stop is known; until then the window is open-ended. A
 take starts at the timeline's zero at the earliest: a play from before it skips the frames before
-it. An empty audible region, a play and its stop in one period, opens no window. Windows never
-overlap, since a play starts after the last one's stop has played, but a take's tail, `R` frames
-past the transport's stop, can still be captured while the next play starts: a tap holds up to 16
-windows, and a play past them makes no take, counted in `EngineStats::missed_takes`.
+it. An empty audible region, a play and its stop in one period, opens no window. A play while
+rolling can stop the last play at once, nothing audible read, in the very period that starts the new
+one: after a swap that lowered the pre-roll, or a period of no frame. The tap never sees that stop,
+so when a newer play opens, it settles every older play's window whose length is still unknown:
+dropped, as it reached no frame. Windows never overlap, since a play starts after the last one's
+stop has played, but a take's tail, `R` frames past the transport's stop, can still be captured
+while the next play starts: a tap holds up to 16 windows, and a play past them makes no take,
+counted in `EngineStats::missed_takes`.
 
 **A period of the tap.** It runs at each period's start, after the transport's commands and before
-the graph, in a `catch_unwind` of its own ([below](#a-period)). For each tap it opens a window for a
-play it has not seen and sets the length of the play's window once the stop is known; it ends every
-take placed by a latency other than the device's now, at the frames it has reached, counted by the
-recorder; then, window after window, it pushes the period's frames each window needs, interleaved by
-the take's channels, and ends the windows complete. A buffer shorter than the period is silence, as
-the graph takes it.
+the graph, in a `catch_unwind` of its own ([below](#a-period)). For each tap it settles the older
+windows and opens a window for a play it has not seen, and sets the length of the play's window once
+the stop is known; it ends every take placed by a latency other than the device's now, at the frames
+it has reached, counted by the recorder; then, window after window, it pushes the period's frames
+each window needs, interleaved by the take's channels, and ends the windows complete. A buffer
+shorter than the period is silence, as the graph takes it.
 
 **The rings, and the order of reading.** Each tap pushes frames into one ring, `ring_frames` frames
 long, and marks into another of 256: a take's start, with its play's number, its first timeline
@@ -453,10 +464,10 @@ seen before the frames that follow it are written. Read the other way, marks fir
 frames that the tap pushed after an end and a start it did not see, and write them into the old
 take. A mark beyond the frames counted means the count is older than the mark: it counts again.
 
-**The wake.** A tap asks its recorder to drain once its ring holds 2,048 frames it has not announced,
-or it has pushed a mark: one flag shared by every tap of the recorder, set by a read-modify-write,
-and one wake, `record::wake_recorder`, which calls `Thread::unpark` when the flag was clear: a
-futex wake when the recorder sleeps, on the real-time allowlist
+**The wake.** A tap asks its recorder to drain once its ring holds 2,048 frames it has not
+announced, or it has pushed a mark: one flag shared by every tap of the recorder, set by a
+read-modify-write, and one wake, `record::wake_recorder`, which calls `Thread::unpark` when the flag
+was clear: a futex wake when the recorder sleeps, on the real-time allowlist
 ([ADR-0023](adr/0023-the-real-time-allowlist.md), [below](#checking-the-real-time-path)). The
 capture tap asks once per period at most, after every push of the period. The recorder clears the
 flag as each pass begins.
@@ -476,38 +487,49 @@ that has written a second of audio since its last, unless one is in flight.
 **Takes' files.** A take is the file `<track number>-<track name>-take<n>.wav` in the recording
 folder: the name sanitized, its letters and digits of any script, `-` and `_` kept, every other
 character `_`, at most 64 characters; `n` continues past the files of that track and name already
-there. 32-bit floats by default, the device's samples bit for bit, or 24-bit integers
-(`RecordConfig::format`). The next take's file of each armed track exists, empty, so that a take
-never waits for its file; the recorder removes the files made ahead when it ends.
-`Recorder::takes` lists every take that ended: its file, frames, padding, how it ended, and the error
-that ended it, if one did.
+there. A track armed again numbers its takes past its old tap's file made ahead, which the old track
+removes as it leaves: a gap in the numbers. 32-bit floats by default, the device's samples bit for
+bit, or 24-bit integers (`RecordConfig::format`). The next take's file of each armed track exists,
+empty, so that a take never waits for its file; the recorder removes the files made ahead when it
+ends. `Recorder::takes` lists every take that ended: its file, frames, padding, how it ended, and
+the error that ended it, if one did.
 
 **Syncs never block the writer.** The sync threads take jobs from one queue, so that several files
-sync in parallel: a sync of a take's data (`fdatasync`), asked after each second of its audio, one in
-flight per take; a take's end, which syncs its data, writes its sizes (`WavWriter::finish`) and syncs
-them, so that the sizes never claim data that did not reach the disk; and a sync of the folder.
+sync in parallel: a sync of a take's data (`fdatasync`), asked after each second of its audio, one
+in flight per take; a take's end, which syncs its data, writes its sizes (`WavWriter::finish`) and
+syncs them, so that the sizes never claim data that did not reach the disk; and a sync of the
+folder.
 
 **A write error** ends its take: the take writes nothing more, its later frames are drained and
 dropped, its file is left as a crash leaves it, its sizes unknown, the error counted in
-`RecorderStats::write_errors` and given in the take's summary. A sync that fails ends its take so
-too.
+`RecorderStats::write_errors` and given in the take's summary. A sync of a take's data that fails
+ends its take so too, at the recorder's next pass: what it wrote may not be on the disk.
+
+**A panic.** The graph's panic silences the output ([below](#a-period)), but the capture tap goes
+on, and so does the transport: a stop still sets the takes' lengths, and they end whole. A panic in
+a period's start, a swap's, the transport's or the events', freezes the transport: a take whose stop
+was unknown records on until the processor is replaced, as ADR-0022's rebuild does. Dropping the
+processor drops its taps, which ends their takes at what they hold.
 
 **Recovery.** `record::recover(folder)` takes the folder's exclusive lock (`File::lock` on
 `.magnolia-recording.lock`, which a recorder holds for its life, so a recovery never cuts a take
 being written), repairs with `wav::repair` every file whose `bext` originator is `Magnolia`, removes
-those without frames and the empty files named as takes, leaves every other file untouched, syncs the
-folder if it removed one, and lists each take: its file, the track and take its name gives, its
+those without frames and the empty files named as takes, leaves every other file untouched, syncs
+the folder if it removed one, and lists each take: its file, the track and take its name gives, its
 first timeline sample, its frames, whether it was repaired. `Recorder::start` runs it on its folder.
 
-**What a crash loses.** A kill loses what had not yet left the tap's ring: at most 2,048 frames and
-a pass, about 50 ms at 48 kHz. A power cut loses at most the last second of each take, its data
-synced every second. A stall of the disk longer than the ring, 4 s by default, drops frames, which
-become zeros, so the rest of the take stays in place.
+**What a crash loses.** A kill loses what had not yet left the tap's ring: at most a period plus
+2,047 frames, the tap's wake coming once 2,048 frames wait, and a pass: about 50 ms at 48 kHz with
+periods of 256 frames. A power cut loses at most the last second of each take, its data synced every
+second. A stall of the disk longer than the ring, 4 s by default, drops frames, which become zeros,
+so the rest of the take stays in place.
 
 Its limits:
 
 - a tap whose panic stopped it records nothing more until the engine is rebuilt; its takes end at
   what they hold;
+- after a panic in a period's start, a take whose stop was unknown records until the processor is
+  replaced;
 - a recorder dropped while its tracks are armed ends their takes; its taps then fill their rings and
   drop what follows, counted as overruns;
 - the recorder reads the engine's statistics it was started with: a processor rebuilt on a new
@@ -526,13 +548,15 @@ the recorder ([ADR-0023](adr/0023-the-real-time-allowlist.md),
 [ADR-0026](adr/0026-one-stream-per-audio-track.md),
 [ADR-0032](adr/0032-recording-by-a-capture-tap-of-the-processor.md)).
 
-1. Poisoned, it skips steps 2 and 4, and writes silence on every playback channel.
+1. Poisoned, it writes silence on every playback channel, the flag set, every period returning
+   normally ([ADR-0022](adr/0022-a-panic-on-the-real-time-path-gives-silence.md)). After a panic
+   of the graph, it skips the graph, swaps and events, but still applies the transport's commands
+   at step 2 and moves the transport's clock over the period, cut at its stop, in place of step 4:
+   a stop still ends the takes under way. After a panic of step 2, it skips steps 2 and 4 whole.
 2. Otherwise it starts the period inside `catch_unwind`: it applies at most one swap, then the
    transport's commands, then pops every queued event into its pending buffer, which has room for
    them all, whether a swap waits or not: the controller never sends an event before its node, nor
-   more events than the buffer holds. A panic poisons it: silence from then on, the flag set, every
-   later period returning normally
-   ([ADR-0022](adr/0022-a-panic-on-the-real-time-path-gives-silence.md)).
+   more events than the buffer holds. A panic poisons it whole.
 3. The capture tap runs inside a `catch_unwind` of its own, poisoned or not, so that the takes under
    way go on recording after the graph's panic: it applies the change of the armed taps that the
    swap brought, then copies the capture of each take's window into the rings and wakes the
@@ -540,8 +564,9 @@ the recorder ([ADR-0023](adr/0023-the-real-time-allowlist.md),
    that completed left it, never by a transport a panic may have left half-changed. A panic of the
    tap stops it for good, flags it in
    `EngineStats::tap_stopped` and wakes the recorders, which end its takes; the graph plays on.
-4. The graph runs inside `catch_unwind`, whose panic poisons the processor as in step 2. For each
-   sub-block it copies the capture in, a buffer shorter than the period taken as
+4. The graph runs inside `catch_unwind`, whose panic poisons the processor, the graph alone: the
+   transport's clock moves over what the graph did not play of the period. For each sub-block it
+   copies the capture in, a buffer shorter than the period taken as
    silence. For each step it sums the edges into the node's inputs with their gains; an input
    with nothing sounding holds zeros and is flagged silent. It reads the node's timeline sources
    at the node's position. It skips a node that slept, whose inputs are still silent and which has
@@ -554,6 +579,10 @@ the recorder ([ADR-0023](adr/0023-the-real-time-allowlist.md),
 5. It hands what it replaced to the collector, the taps a swap disarmed included, and wakes it if it
    handed anything. Every period, poisoned or not, then advances the engine's clock, counts in the
    heartbeat and records its time.
+
+A poisoned processor goes back to the backend, which drops it off the real-time thread and puts a
+new one in its place (ADR-0022): its taps go with it, which ends the takes under way at what they
+hold ([above](#recording)); the new processor records once tracks are armed on it again.
 
 Every module the period runs, the time model included, denies itself panicking code:
 Clippy's `indexing_slicing`, `unwrap_used`, `expect_used`, `panic` and `arithmetic_side_effects`

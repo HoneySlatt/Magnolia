@@ -20,7 +20,7 @@ use super::files::{
     AheadFile, FolderLock, SyncFile, TakeFile, make_take_file, next_take_number, open_folder,
     sanitized,
 };
-use super::marks::{self, EndReason, Mark, MarkKind, Next};
+use super::marks::{self, Drained, EndReason, Mark, MarkKind};
 use super::recover::{Recovery, recover_locked};
 use super::syncer::{self, Ending, Job, SyncContext, SyncQueue};
 use super::tap::{RecorderLink, TapRings, TrackTap, WakeFlag};
@@ -249,6 +249,8 @@ struct Shared {
     passes_ended: AtomicU64,
     /// A test's hook: every write to a take's file fails while it is set.
     fail_writes: Arc<AtomicBool>,
+    /// A test's hook: every sync of a take's data fails while it is set.
+    fail_syncs: Arc<AtomicBool>,
     engine: Arc<EngineStats>,
     stats: Arc<RecorderStats>,
     takes: Arc<TakeList>,
@@ -364,6 +366,7 @@ impl Recorder {
             passes_begun: AtomicU64::new(0),
             passes_ended: AtomicU64::new(0),
             fail_writes: Arc::new(AtomicBool::new(false)),
+            fail_syncs: Arc::new(AtomicBool::new(false)),
             engine: Arc::clone(stats),
             stats: recorder_stats,
             takes,
@@ -419,7 +422,9 @@ impl Recorder {
     /// Makes the tap of `track`: its rings, written through, and its first take's file, made empty
     /// ahead, numbered past the track's takes already in the folder. Arm it with
     /// [`Controller::arm`](crate::engine::Controller::arm); a tap dropped unarmed, or disarmed,
-    /// leaves the recorder, which removes its track's file made ahead.
+    /// leaves the recorder, which removes its track's file made ahead. A track armed again with a
+    /// new tap numbers its takes past the old tap's file made ahead, still there when the new tap
+    /// is made: once the old track leaves, the numbers have a gap.
     ///
     /// # Errors
     ///
@@ -458,19 +463,24 @@ impl Recorder {
             track.number,
             track.capture_channels.into_boxed_slice(),
             ring_frames,
+            self.config.sample_rate,
             Arc::clone(&self.link),
         );
+        // A tap whose tap and track are both gone holds its fills alone here: forgotten.
+        self.fills.retain(|(_, fills)| Arc::strong_count(fills) > 1);
         self.fills.push((track.number, Arc::clone(&rings.fills)));
         let writer = TrackWriter {
-            track: track.number,
-            name,
-            channels,
             rings,
-            consumed: 0,
-            ahead: Some(ahead),
-            next_take,
-            take: None,
-            zeros: vec![0.0; ZERO_FRAMES.saturating_mul(usize::from(channels))].into_boxed_slice(),
+            state: TrackState {
+                track: track.number,
+                name,
+                channels,
+                ahead: Some(ahead),
+                next_take,
+                take: None,
+                zeros: vec![0.0; ZERO_FRAMES.saturating_mul(usize::from(channels))]
+                    .into_boxed_slice(),
+            },
             gone: false,
         };
         self.shared
@@ -507,7 +517,8 @@ impl Recorder {
     }
 
     /// How full the rings of `track`'s last tap have been at their fullest: their high-water marks.
-    /// `None` for a track the recorder made no tap for.
+    /// `None` for a track the recorder made no tap for, or whose tap is gone and was forgotten: the
+    /// recorder forgets a tap at the next [`tap`](Self::tap) once its tap and its track are gone.
     pub fn fullest_fill(&self, track: u32) -> Option<RingFill> {
         let (_, fills) = self
             .fills
@@ -541,6 +552,12 @@ impl Recorder {
     #[doc(hidden)]
     pub fn fail_writes(&self, fail: bool) {
         self.shared.fail_writes.store(fail, Ordering::SeqCst);
+    }
+
+    /// Makes every later sync of a take's data fail, or no longer. For tests.
+    #[doc(hidden)]
+    pub fn fail_syncs(&self, fail: bool) {
+        self.shared.fail_syncs.store(fail, Ordering::SeqCst);
     }
 
     /// Waits until the recorder has done all it was asked: no drain asked, no pass under way, no
@@ -654,7 +671,8 @@ impl Writer {
     }
 
     /// One pass: takes the new tracks, drains every track, ends the takes of taps gone or stopped,
-    /// makes the files ahead, queues the syncs due.
+    /// and of failed syncs, makes the files ahead, has the folder synced once if a file was made or
+    /// removed, queues the syncs due.
     fn pass(&mut self) {
         let start = Instant::now();
         let mut did = self.take_new_tracks();
@@ -665,14 +683,16 @@ impl Writer {
             // Read before draining: a tap dropped has pushed all it ever will, and rtrb's acquiring
             // read of it makes those pushes visible.
             track.gone = track.rings.frames.is_abandoned();
-            did |= track.drain(&self.context, &self.shared);
+            did |= track.drain(&self.context, &self.shared, &mut folder_changed);
+            let state = &mut track.state;
+            state.end_if_sync_failed();
             let ended = if track.gone {
                 Some(TakeEnd::TapDropped)
             } else {
                 tap_stopped.then_some(TakeEnd::TapStopped)
             };
             if let Some(ended) = ended {
-                did |= track.end_take(
+                did |= state.end_take(
                     None,
                     ended,
                     &self.context,
@@ -683,19 +703,21 @@ impl Writer {
         }
         for track in &mut self.tracks {
             if track.gone {
-                folder_changed |= track.remove_ahead(&self.shared.stats);
+                folder_changed |= track.state.remove_ahead(&self.shared.stats);
             }
         }
         self.tracks.retain(|track| !track.gone);
         for track in &mut self.tracks {
-            folder_changed |= track.make_ahead(&self.context, &self.shared.stats);
+            folder_changed |= track.state.make_ahead(&self.context, &self.shared.stats);
         }
         if folder_changed {
             self.shared.queue.sync_folder(&self.context.folder_file);
             did = true;
         }
         for track in &mut self.tracks {
-            did |= track.ask_sync_if_due(self.context.rate, &self.shared.queue);
+            did |= track
+                .state
+                .ask_sync_if_due(self.context.rate, &self.shared.queue);
         }
         if did {
             self.shared.stats.record_pass(start.elapsed());
@@ -720,14 +742,15 @@ impl Writer {
         self.pass();
         let mut folder_changed = false;
         for track in &mut self.tracks {
-            track.end_take(
+            let state = &mut track.state;
+            state.end_take(
                 None,
                 TakeEnd::RecorderClosed,
                 &self.context,
                 &self.shared,
                 &mut folder_changed,
             );
-            folder_changed |= track.remove_ahead(&self.shared.stats);
+            folder_changed |= state.remove_ahead(&self.shared.stats);
         }
         if folder_changed {
             self.shared.queue.sync_folder(&self.context.folder_file);
@@ -755,16 +778,33 @@ struct OpenTake {
     error: Option<Arc<WavError>>,
 }
 
-/// One track, as the recorder's thread drains and writes it.
+/// One track, as the recorder's thread drains and writes it: its rings, and what it writes.
 struct TrackWriter {
+    rings: TapRings,
+    state: TrackState,
+    /// Set when its tap was dropped: the track leaves after this pass.
+    gone: bool,
+}
+
+impl TrackWriter {
+    /// Drains the rings in the order `marks.rs` gives: frames up to the next mark, the mark, and so
+    /// on. Returns whether it took anything.
+    fn drain(&mut self, context: &TakeContext, shared: &Shared, folder_changed: &mut bool) -> bool {
+        let channels = usize::from(self.state.channels);
+        let state = &mut self.state;
+        marks::drain(&mut self.rings, channels, &mut |drained| match drained {
+            Drained::Frames(samples) => state.write(samples, context, shared),
+            Drained::Mark(mark) => state.apply(mark, context, shared, folder_changed),
+        })
+    }
+}
+
+/// What a track writes: its takes, their files, and the zeros of its gaps.
+struct TrackState {
     track: u32,
     /// Sanitized.
     name: String,
     channels: u16,
-    rings: TapRings,
-    /// Frames taken from the frames ring since the tap was made: where the next one lies in the
-    /// tap's stream, which the marks' positions count in.
-    consumed: u64,
     /// The next take's file, made ahead.
     ahead: Option<AheadFile>,
     /// The number of the next file made.
@@ -772,69 +812,24 @@ struct TrackWriter {
     take: Option<OpenTake>,
     /// Zeros, written for gaps: whole frames.
     zeros: Box<[f32]>,
-    /// Set when its tap was dropped: the track leaves after this pass.
-    gone: bool,
 }
 
-impl TrackWriter {
-    /// Drains the rings: frames up to the next mark, the mark, and so on. Returns whether it took
-    /// anything.
-    fn drain(&mut self, context: &TakeContext, shared: &Shared) -> bool {
-        let channels = usize::from(self.channels);
-        let mut took = false;
-        let mut counted_again = false;
-        loop {
-            // The frames' count first, then the marks: `marks.rs` says why.
-            let available = self.rings.frames.slots().checked_div(channels).unwrap_or(0) as u64;
-            let mark = self.rings.marks.peek().ok().copied();
-            match marks::next(self.consumed, available, mark.as_ref()) {
-                Next::Frames(count) => {
-                    if !self.take_frames(count, context, shared) {
-                        return took;
-                    }
-                }
-                Next::ApplyMark => {
-                    if let Some(mark) = mark {
-                        self.apply(mark, context, shared);
-                    }
-                    let _ = self.rings.marks.pop();
-                }
-                // Counting again always reaches the mark's frames; a mark that lies beyond every
-                // frame pushed would be a bug of the tap's, which must not spin the thread.
-                Next::CountAgain if !counted_again => {
-                    counted_again = true;
-                    continue;
-                }
-                Next::CountAgain | Next::Idle => return took,
-            }
-            took = true;
-            counted_again = false;
-        }
-    }
-
-    /// Takes `count` frames from the ring into the take under way; dropped when it has failed.
-    /// Returns whether the ring gave them, as it always does for frames counted.
-    fn take_frames(&mut self, count: u64, context: &TakeContext, shared: &Shared) -> bool {
-        let channels = usize::from(self.channels);
-        let samples = usize::try_from(count)
-            .unwrap_or(usize::MAX)
-            .saturating_mul(channels);
-        let Ok(chunk) = self.rings.frames.read_chunk(samples) else {
-            return false;
-        };
-        let (first, second) = chunk.as_slices();
+impl TrackState {
+    /// Writes frames of the device into the take under way; dropped when it has failed, or when no
+    /// take is open, which the tap never lets happen.
+    fn write(&mut self, samples: &[f32], context: &TakeContext, shared: &Shared) {
         if let Some(take) = &mut self.take {
-            for samples in [first, second] {
-                take.write(self.track, self.channels, samples, context, shared);
-            }
+            take.write(self.track, self.channels, samples, context, shared);
         }
-        chunk.commit_all();
-        self.consumed = self.consumed.saturating_add(count);
-        true
     }
 
-    fn apply(&mut self, mark: Mark, context: &TakeContext, shared: &Shared) {
-        let mut folder_changed = false;
+    fn apply(
+        &mut self,
+        mark: Mark,
+        context: &TakeContext,
+        shared: &Shared,
+        folder_changed: &mut bool,
+    ) {
         match mark.kind {
             MarkKind::Start {
                 play,
@@ -842,14 +837,15 @@ impl TrackWriter {
                 round_trip,
             } => {
                 // A take still open would be a bug of the tap's; it ends at what it holds.
-                self.end_take(
-                    None,
-                    TakeEnd::TapDropped,
+                self.end_take(None, TakeEnd::TapDropped, context, shared, folder_changed);
+                self.start_take(
+                    play,
+                    first_sample,
+                    round_trip,
                     context,
                     shared,
-                    &mut folder_changed,
+                    folder_changed,
                 );
-                self.start_take(play, first_sample, round_trip, context, shared);
             }
             MarkKind::Gap { at, length } => {
                 shared.stats.gaps.fetch_add(1, Ordering::Relaxed);
@@ -871,15 +867,12 @@ impl TrackWriter {
                     EndReason::Disarmed => TakeEnd::Disarmed,
                     EndReason::LatencyChanged => TakeEnd::LatencyChanged,
                 };
-                self.end_take(Some(length), ended, context, shared, &mut folder_changed);
+                self.end_take(Some(length), ended, context, shared, folder_changed);
             }
-        }
-        if folder_changed {
-            shared.queue.sync_folder(&context.folder_file);
         }
     }
 
-    /// Opens a take in the file made ahead, or in one made now.
+    /// Opens a take in the file made ahead, or in one made now, which changes the folder.
     fn start_take(
         &mut self,
         play: u64,
@@ -887,11 +880,17 @@ impl TrackWriter {
         round_trip: u64,
         context: &TakeContext,
         shared: &Shared,
+        folder_changed: &mut bool,
     ) {
         shared.stats.takes_started.fetch_add(1, Ordering::Relaxed);
         let ahead = match self.ahead.take() {
             Some(ahead) => Ok(ahead),
-            None => make_take_file(&context.folder, self.track, &self.name, &mut self.next_take),
+            None => {
+                let made =
+                    make_take_file(&context.folder, self.track, &self.name, &mut self.next_take);
+                *folder_changed |= made.is_ok();
+                made
+            }
         };
         let (number, path, file, error) = match ahead {
             Ok(ahead) => (Some(ahead.number), Some(ahead.path), Some(ahead.file), None),
@@ -997,6 +996,24 @@ impl TrackWriter {
         true
     }
 
+    /// Ends the take under way with an error when a sync of its data failed: what it wrote may not
+    /// be on the disk. Its later frames are dropped; its end keeps its sizes unknown. The sync
+    /// thread counted the failure.
+    fn end_if_sync_failed(&mut self) {
+        let Some(take) = self.take.as_mut().filter(|take| take.error.is_none()) else {
+            return;
+        };
+        if take
+            .sync
+            .as_ref()
+            .is_some_and(|sync| sync.failed.load(Ordering::Acquire))
+        {
+            take.error = Some(Arc::new(WavError::Io(std::io::Error::other(
+                "a sync of the take's data failed",
+            ))));
+        }
+    }
+
     /// Makes the next take's file if the track has none ahead. Returns whether it made one.
     fn make_ahead(&mut self, context: &TakeContext, stats: &RecorderStats) -> bool {
         if self.ahead.is_some() {
@@ -1067,7 +1084,7 @@ impl OpenTake {
             .file
             .take()
             .ok_or_else(|| WavError::Io(std::io::Error::other("the take's file was not made")))?;
-        let sync = SyncFile::of(&file).map_err(WavError::Io)?;
+        let sync = SyncFile::of(&file, Arc::clone(&shared.fail_syncs)).map_err(WavError::Io)?;
         let file = TakeFile::new(file, Arc::clone(&shared.fail_writes));
         #[cfg(test)]
         let (file, sync) = {

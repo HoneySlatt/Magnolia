@@ -9,10 +9,14 @@ use std::sync::PoisonError;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use rtrb::{Consumer, Producer, RingBuffer};
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+
+use rtrb::{Producer, RingBuffer};
 
 use super::files::FileOp;
-use super::marks::{EndReason, Mark, MarkKind, Next, next};
+use super::marks::{Drained, EndReason, Mark, MarkKind, Next, count, drain, next, step};
+use super::tap::{RingFills, TapRings};
 use super::{RecordConfig, RecordTrack, Recorder, TakeEnd};
 use crate::engine::{self, Destination, EngineConfig, Source};
 use crate::nodes::Sine;
@@ -24,17 +28,14 @@ type TestResult = Result<(), Box<dyn Error>>;
 
 // ---- The order of the rings (`marks.rs`) ----
 
-/// Two takes as a tap streams them, and what the recorder made of them.
+/// A tap's two rings as a test pushes into them, the recorder's ends of them, and what the
+/// recorder's drain made of them: each take it opened, with the frames it received.
 struct Rings {
     frames: Producer<f32>,
-    frames_out: Consumer<f32>,
     marks: Producer<Mark>,
-    marks_out: Consumer<Mark>,
-    /// Frames the recorder consumed.
-    consumed: u64,
+    rings: TapRings,
     /// Frames the tap pushed.
     pushed: u64,
-    /// Each take the recorder opened, with the frames it wrote into it.
     takes: Vec<Vec<f32>>,
 }
 
@@ -44,10 +45,16 @@ impl Rings {
         let (marks, marks_out) = RingBuffer::new(8);
         Self {
             frames,
-            frames_out,
             marks,
-            marks_out,
-            consumed: 0,
+            rings: TapRings {
+                frames: frames_out,
+                marks: marks_out,
+                fills: Arc::new(RingFills {
+                    frames: AtomicU64::new(0),
+                    marks: AtomicU64::new(0),
+                }),
+                consumed: 0,
+            },
             pushed: 0,
             takes: Vec::new(),
         }
@@ -82,90 +89,78 @@ impl Rings {
         });
     }
 
-    /// One step of the recorder, given the frames it counted and the mark it then looked at.
-    /// Returns what it did.
-    fn step(&mut self, available: u64, mark: Option<Mark>) -> Result<Next, Box<dyn Error>> {
-        let step = next(self.consumed, available, mark.as_ref());
-        match step {
-            Next::Frames(count) => {
-                for _ in 0..count {
-                    let frame = self.frames_out.pop()?;
-                    self.takes.last_mut().ok_or("a take is open")?.push(frame);
-                }
-                self.consumed = self.consumed.saturating_add(count);
-            }
-            Next::ApplyMark => {
-                if let Some(Mark {
-                    kind: MarkKind::Start { .. },
-                    ..
-                }) = mark
-                {
-                    self.takes.push(Vec::new());
-                }
-                self.marks_out.pop()?;
-            }
-            Next::CountAgain | Next::Idle => {}
-        }
-        Ok(step)
+    /// The recorder's own count of the mono frames waiting, read first.
+    fn count(&self) -> u64 {
+        count(&self.rings, 1)
     }
 
-    /// The recorder's drain as `recorder.rs` makes it: the frames' count first, then the marks.
-    fn drain(&mut self) -> TestResult {
-        loop {
-            let available = self.frames_out.slots() as u64;
-            let mark = self.marks_out.peek().ok().copied();
-            if self.step(available, mark)? == Next::Idle {
-                return Ok(());
+    /// The recorder's own step, from frames counted before: what it receives goes to the takes.
+    fn step(&mut self, available: u64) -> Next {
+        let takes = &mut self.takes;
+        step(&mut self.rings, 1, available, &mut |drained| {
+            receive(takes, drained)
+        })
+    }
+
+    /// The recorder's own drain.
+    fn drain(&mut self) -> bool {
+        let takes = &mut self.takes;
+        drain(&mut self.rings, 1, &mut |drained| receive(takes, drained))
+    }
+}
+
+/// Files what the drain hands over: a start opens a take, frames go to the last take opened.
+fn receive(takes: &mut Vec<Vec<f32>>, drained: Drained<'_>) {
+    match drained {
+        Drained::Frames(samples) => {
+            if let Some(take) = takes.last_mut() {
+                take.extend_from_slice(samples);
             }
         }
+        Drained::Mark(Mark {
+            kind: MarkKind::Start { .. },
+            ..
+        }) => takes.push(Vec::new()),
+        Drained::Mark(_) => {}
     }
 }
 
 /// The recorder counts the frames, then the tap ends take A, starts take B and pushes B's frames,
-/// then the recorder looks at the marks: A's frames go to A, B's to B.
+/// then the recorder looks at the marks, through its own step and drain: A's frames go to A, B's to
+/// B.
 #[test]
-fn frames_counted_before_the_marks_go_to_their_own_take() -> TestResult {
+fn frames_counted_before_the_marks_go_to_their_own_take() {
     let mut rings = Rings::new();
     rings.push_take(1.0, 10);
-    let available = rings.frames_out.slots() as u64;
+    let available = rings.count();
     rings.push_end(10);
     rings.push_take(2.0, 5);
     rings.push_end(5);
-    let mark = rings.marks_out.peek().ok().copied();
+    assert_eq!(rings.step(available), Next::ApplyMark, "the start of A");
     assert_eq!(
-        rings.step(available, mark)?,
-        Next::ApplyMark,
-        "the start of A"
+        rings.step(available),
+        Next::Frames(10),
+        "A's frames, counted"
     );
-    rings.drain()?;
+    assert!(rings.drain());
     assert_eq!(rings.takes, [vec![1.0; 10], vec![2.0; 5]]);
-    Ok(())
+    assert!(!rings.drain(), "nothing more");
 }
 
-/// The other order, marks first: the recorder finds no mark beyond A's start, then counts frames
-/// that the tap pushed after A's end and B's start, and writes B's frames into A. This is the bug
-/// the order of `marks.rs` prevents.
-#[test]
-fn marks_read_before_the_frames_would_put_the_next_takes_frames_in_the_last() -> TestResult {
-    let mut rings = Rings::new();
-    rings.push_take(1.0, 10);
-    let mark = rings.marks_out.peek().ok().copied();
-    assert_eq!(rings.step(0, mark)?, Next::ApplyMark, "the start of A");
-    // Marks first: none waits.
-    let mark = rings.marks_out.peek().ok().copied();
-    assert_eq!(mark, None);
-    rings.push_end(10);
-    rings.push_take(2.0, 5);
-    // Then the frames, counted after the tap went on.
-    let available = rings.frames_out.slots() as u64;
-    assert_eq!(rings.step(available, mark)?, Next::Frames(15));
-    assert_eq!(rings.takes, [[vec![1.0; 10], vec![2.0; 5]].concat()]);
-    Ok(())
-}
-
-/// A mark that lies beyond the frames counted makes the recorder count again, never wait.
+/// A mark beyond the frames counted, the count read before the frames it follows were pushed: the
+/// step asks to count again, and the drain does, reaching the mark.
 #[test]
 fn a_mark_beyond_the_frames_counted_makes_the_recorder_count_again() {
+    let mut rings = Rings::new();
+    rings.push_take(1.0, 4);
+    assert!(rings.drain());
+    let available = rings.count();
+    rings.push_frames(1.0, 2);
+    rings.push_end(6);
+    assert_eq!(available, 0);
+    assert_eq!(rings.step(available), Next::CountAgain);
+    assert!(rings.drain());
+    assert_eq!(rings.takes, [vec![1.0; 6]]);
     let end = Mark {
         position: 12,
         kind: MarkKind::End {
@@ -173,11 +168,31 @@ fn a_mark_beyond_the_frames_counted_makes_the_recorder_count_again() {
             reason: EndReason::Stopped,
         },
     };
-    assert_eq!(next(10, 0, Some(&end)), Next::CountAgain);
     assert_eq!(next(10, 5, Some(&end)), Next::Frames(2));
     assert_eq!(next(12, 5, Some(&end)), Next::ApplyMark);
     assert_eq!(next(12, 5, None), Next::Frames(5));
     assert_eq!(next(12, 0, None), Next::Idle);
+}
+
+/// The other order, marks first: the recorder finds no mark beyond A's start, then counts frames
+/// that the tap pushed after A's end and B's start, and writes B's frames into A. This is the bug
+/// the order of `marks.rs` prevents; `next` is the decision the recorder's step makes.
+#[test]
+fn marks_read_before_the_frames_would_put_the_next_takes_frames_in_the_last() {
+    let mut rings = Rings::new();
+    rings.push_take(1.0, 10);
+    assert_eq!(rings.step(0), Next::ApplyMark, "the start of A");
+    // Marks first: none waits.
+    let mark = rings.rings.marks.peek().ok().copied();
+    assert_eq!(mark, None);
+    rings.push_end(10);
+    rings.push_take(2.0, 5);
+    // Then the frames, counted after the tap went on: all fifteen would go to A.
+    let available = rings.count();
+    assert_eq!(
+        next(rings.rings.consumed, available, mark.as_ref()),
+        Next::Frames(15)
+    );
 }
 
 // ---- A power cut replayed ----

@@ -224,6 +224,7 @@ pub fn new(config: EngineConfig) -> Result<(Controller, Processor), EngineError>
     let pool = BufferPool::new(stride, silence.input_channels, silence.output_channels);
     let controller = Controller::new(ControllerParts {
         stats: Arc::clone(&stats),
+        sample_rate: config.sample_rate,
         context,
         stride,
         messages: message_producer,
