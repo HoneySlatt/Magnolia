@@ -20,6 +20,7 @@ use super::graph::NodeId;
 use super::pool::BufferPool;
 use super::sequence::MidiSequence;
 use crate::node::Node;
+use crate::record::tap::TapChange;
 use crate::time::TempoMap;
 
 /// A swap's phases, in order, the last one steady, and the nodes it lets go.
@@ -181,4 +182,7 @@ pub(crate) struct SwapMessage {
     pub(crate) chunks: Vec<(usize, Option<ArenaChunk>)>,
     /// A larger buffer pool, when the graph needs more channels than the processor's holds.
     pub(crate) pool: Option<BufferPool>,
+    /// The armed tracks' taps, when the swap arms or disarms one: the processor's capture tap
+    /// applies it at its next run, after the transport's commands (ADR-0032).
+    pub(crate) taps: Option<Box<TapChange>>,
 }

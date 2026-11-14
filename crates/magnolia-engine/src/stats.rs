@@ -37,6 +37,9 @@ pub struct EngineStats {
     generation_mismatches: AtomicU64,
     missed_plugin_deadlines: AtomicU64,
     disk_underruns: AtomicU64,
+    capture_overruns: AtomicU64,
+    missed_takes: AtomicU64,
+    tap_stopped: AtomicBool,
     /// The last generation of disk streams handed out, by any disk reader of this engine.
     generations: AtomicU64,
     /// The latest generation a disk reader has primed.
@@ -171,6 +174,28 @@ impl EngineStats {
         self.disk_underruns.load(Ordering::Relaxed)
     }
 
+    /// How many frames the capture tap dropped because an armed track's ring had no room for them:
+    /// the recorder's thread had not emptied it in time. The recorder writes each as a zero, so that
+    /// the rest of the take stays in place
+    /// ([ADR-0030](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0030-takes-in-wav-of-unknown-length-repaired-on-recovery.md)).
+    pub fn capture_overruns(&self) -> u64 {
+        self.capture_overruns.load(Ordering::Relaxed)
+    }
+
+    /// How many plays made no take on an armed track because its tap already held
+    /// [`MAX_WINDOWS`](crate::record::MAX_WINDOWS) takes waiting for their frames: plays and stops
+    /// that came faster than the round trip, many times over.
+    pub fn missed_takes(&self) -> u64 {
+        self.missed_takes.load(Ordering::Relaxed)
+    }
+
+    /// Whether a panic stopped the capture tap: it records nothing more, while the graph plays on
+    /// ([ADR-0032](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0032-recording-by-a-capture-tap-of-the-processor.md)).
+    /// A recorder that reads it ends its open takes at what they hold.
+    pub fn tap_stopped(&self) -> bool {
+        self.tap_stopped.load(Ordering::Acquire)
+    }
+
     /// The latest generation of disk streams that a disk reader has primed: every stream holds what
     /// a play from its cue reads first. A play of a later generation waits for it
     /// ([`Controller::play`](crate::engine::Controller::play)); 0 before any.
@@ -267,6 +292,8 @@ impl EngineStats {
             &stats.generation_mismatches,
             &stats.missed_plugin_deadlines,
             &stats.disk_underruns,
+            &stats.capture_overruns,
+            &stats.missed_takes,
             &stats.generations,
             &stats.primed_generation,
             &stats.own_overruns,
@@ -279,6 +306,7 @@ impl EngineStats {
         }
         stats.block_start.store(black_box(0), Ordering::Relaxed);
         stats.poisoned.store(black_box(false), Ordering::Relaxed);
+        stats.tap_stopped.store(black_box(false), Ordering::Relaxed);
         stats.audio_thread_id.store(black_box(0), Ordering::Relaxed);
         stats
     }
@@ -343,6 +371,21 @@ impl EngineStats {
         if frames > 0 {
             self.disk_underruns.fetch_add(frames, Ordering::Relaxed);
         }
+    }
+
+    pub(crate) fn count_capture_overruns(&self, frames: u64) {
+        if frames > 0 {
+            self.capture_overruns.fetch_add(frames, Ordering::Relaxed);
+        }
+    }
+
+    pub(crate) fn count_missed_take(&self) {
+        self.missed_takes.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Release: a recorder that reads it set then finds in its rings everything the tap pushed.
+    pub(crate) fn set_tap_stopped(&self) {
+        self.tap_stopped.store(true, Ordering::Release);
     }
 
     /// A new generation of disk streams, above every one handed out before on this engine, so that

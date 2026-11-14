@@ -30,5 +30,11 @@ harness = false
 name = "disk_reader"
 harness = false
 
+# Measures the recorder with 1, 8 and 32 armed mono tracks recorded in real time: its thread's
+# passes, the syncs, the fullest ring; prints its figures (docs/measurements.md).
+[[bench]]
+name = "recorder"
+harness = false
+
 [lints]
 workspace = true

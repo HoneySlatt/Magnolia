@@ -18,11 +18,14 @@ use super::delay_line::DelayLine;
 use super::description::{Description, NodeShape};
 use super::events::TimedEvent;
 use super::graph::{Destination, Edge, GraphError, NodeId, Source};
+use super::memory::written_vec;
 use super::pool::BufferPool;
 use super::sequence::MidiSequence;
 use super::sources::TimelineSources;
 use super::transport::{Cue, Play, TransportCommand};
 use crate::node::{MAX_LATENCY, Node};
+use crate::record::Tap;
+use crate::record::tap::{TapChange, TapId, TrackTap};
 use crate::stats::EngineStats;
 use crate::time::TempoMap;
 
@@ -50,6 +53,10 @@ use crate::time::TempoMap;
 /// ([ADR-0027](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0027-timeline-events-from-sources-on-nodes.md)).
 /// [`play`](Self::play) and [`stop`](Self::stop) drive the transport, which pre-rolls by the
 /// graph's largest compensation.
+///
+/// [`arm`](Self::arm) and [`disarm`](Self::disarm) arm a track for recording and disarm it, edits
+/// like the graph's that the next commit sends: the processor's capture tap changes at that swap
+/// ([ADR-0032](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0032-recording-by-a-capture-tap-of-the-processor.md)).
 pub struct Controller {
     stats: Arc<EngineStats>,
     context: CompileContext,
@@ -87,6 +94,12 @@ pub struct Controller {
     /// processor has applied the swap that brings their node.
     held_events: Vec<TimedEvent>,
     slots: Slots,
+    /// The taps armed in the description being edited, by their track's number.
+    armed: BTreeMap<u32, TapId>,
+    /// Taps armed and not yet sent to the processor.
+    unsent_taps: BTreeMap<TapId, TrackTap>,
+    /// The taps of the last swap sent: those the processor holds, or will.
+    sent_taps: BTreeSet<TapId>,
     /// The arena's chunks the processor holds.
     chunks_sent: usize,
     /// The channels of the processor's buffer pool, in its input and output regions.
@@ -94,10 +107,11 @@ pub struct Controller {
     pool_outputs: usize,
 }
 
-/// A commit not yet sent: its graph, compensated, and its timeline sources.
+/// A commit not yet sent: its graph, compensated, its timeline sources and its armed taps.
 struct Committed {
     graph: Compensated,
     sources: TimelineSources,
+    taps: BTreeSet<TapId>,
 }
 
 /// A swap sent and not yet steady.
@@ -163,6 +177,24 @@ pub enum TransportError {
     CueAlreadyPlayed,
 }
 
+/// Why [`Controller::arm`] or [`Controller::disarm`] was refused.
+#[derive(Debug)]
+pub enum ArmError {
+    /// The tap records a capture channel the engine does not have. The tap is given back.
+    ChannelOutOfRange {
+        /// The tap, unarmed.
+        tap: Tap,
+        /// The channel.
+        channel: usize,
+        /// The engine's capture channels.
+        capture_channels: usize,
+    },
+    /// A tap of that track is armed already: disarm it first. The tap is given back.
+    AlreadyArmed(Tap),
+    /// No tap of that track is armed.
+    NotArmed(u32),
+}
+
 /// Capacity of the queue that carries swaps. One swap is in flight at most; a second place lets
 /// the controller push without checking that the processor has popped the last message.
 pub(crate) const MESSAGE_CAPACITY: usize = 2;
@@ -206,6 +238,9 @@ impl Controller {
             unsent_delay_lines: BTreeMap::new(),
             held_events: Vec::new(),
             slots: Slots::default(),
+            armed: BTreeMap::new(),
+            unsent_taps: BTreeMap::new(),
+            sent_taps: BTreeSet::new(),
             chunks_sent: 0,
             pool_inputs: parts.pool_inputs,
             pool_outputs: parts.pool_outputs,
@@ -318,6 +353,49 @@ impl Controller {
             .map_err(|_| TransportError::QueueFull)
     }
 
+    /// Arms a track for recording with its tap, which [`Recorder::tap`](crate::record::Recorder::tap)
+    /// made: the next commit sends it, and it records from the first play that starts after the
+    /// processor applies that commit, never from a play under way.
+    ///
+    /// # Errors
+    ///
+    /// [`ArmError::ChannelOutOfRange`] for a capture channel the engine lacks;
+    /// [`ArmError::AlreadyArmed`] while a tap of that track is armed. Either gives the tap back.
+    pub fn arm(&mut self, tap: Tap) -> Result<(), ArmError> {
+        let capture_channels = self.context.capture_channels;
+        if let Some(&channel) = tap
+            .capture_channels()
+            .iter()
+            .find(|&&channel| channel >= capture_channels)
+        {
+            return Err(ArmError::ChannelOutOfRange {
+                tap,
+                channel,
+                capture_channels,
+            });
+        }
+        if self.armed.contains_key(&tap.track()) {
+            return Err(ArmError::AlreadyArmed(tap));
+        }
+        let track = *tap.track;
+        self.armed.insert(track.track, track.id);
+        self.unsent_taps.insert(track.id, track);
+        Ok(())
+    }
+
+    /// Disarms a track: the next commit retires its tap, which ends the take under way at the
+    /// frames it has reached. A play whose frames have not started makes no take.
+    ///
+    /// # Errors
+    ///
+    /// [`ArmError::NotArmed`] when no tap of that track is armed.
+    pub fn disarm(&mut self, track: u32) -> Result<(), ArmError> {
+        self.armed
+            .remove(&track)
+            .map(|_| ())
+            .ok_or(ArmError::NotArmed(track))
+    }
+
     /// Adds an edge to the description. It is checked at the next commit.
     pub fn connect(&mut self, source: Source, destination: Destination) {
         self.draft.edges.push(Edge {
@@ -361,9 +439,13 @@ impl Controller {
             sequences.contains_key(&node)
         });
         let delay_lines = self.delay_line_nodes(&plan)?;
+        let taps: BTreeSet<TapId> = self.armed.values().copied().collect();
+        // A tap disarmed before any swap carried it is dropped here: its recorder lets its track go.
+        self.unsent_taps.retain(|tap, _| taps.contains(tap));
         self.committed = Some(Committed {
             graph: plan.compensate(&self.draft, &delay_lines),
             sources: self.sources.clone(),
+            taps,
         });
         if self.in_flight.is_some() {
             return Ok(Commit::Deferred);
@@ -560,6 +642,7 @@ impl Controller {
         let Committed {
             graph: target,
             sources,
+            taps: target_taps,
         } = self.committed.take()?;
         let sequence = self.next_sequence;
         let mut compiled = compile(&self.sent, &target, sequence, self.context);
@@ -601,6 +684,7 @@ impl Controller {
             nodes,
             chunks,
             pool,
+            taps: self.tap_change(&target_taps),
         });
         if let Err(PushError::Full(mut message)) = self.messages.push(message) {
             // Unreachable while one swap is in flight at most; the commit stays deferred.
@@ -613,9 +697,15 @@ impl Controller {
                     }
                 }
             }
+            if let Some(change) = message.taps.take() {
+                for track in change.taps {
+                    self.unsent_taps.insert(track.id, track);
+                }
+            }
             self.committed = Some(Committed {
                 graph: target,
                 sources,
+                taps: target_taps,
             });
             return None;
         }
@@ -625,6 +715,7 @@ impl Controller {
             self.pool_outputs = outputs;
         }
         self.sent = target;
+        self.sent_taps = target_taps;
         self.in_flight = Some(InFlight {
             sequence,
             added,
@@ -632,6 +723,22 @@ impl Controller {
         });
         self.next_sequence += 1;
         Some(sequence)
+    }
+
+    /// What a swap to the taps `target` changes of the processor's: the taps it arms, with room for
+    /// every tap it keeps, and those it keeps; `None` when it changes nothing.
+    fn tap_change(&mut self, target: &BTreeSet<TapId>) -> Option<Box<TapChange>> {
+        if *target == self.sent_taps {
+            return None;
+        }
+        let kept: Box<[TapId]> = target.intersection(&self.sent_taps).copied().collect();
+        let mut taps = written_vec(target.len());
+        for tap in target.difference(&self.sent_taps) {
+            if let Some(track) = self.unsent_taps.remove(tap) {
+                taps.push(track);
+            }
+        }
+        Some(Box::new(TapChange { taps, kept }))
     }
 
     /// Sends the held events whose node no longer waits for its swap, in the order they came.
@@ -743,3 +850,25 @@ impl fmt::Display for TransportError {
 }
 
 impl Error for TransportError {}
+
+impl fmt::Display for ArmError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ChannelOutOfRange {
+                tap,
+                channel,
+                capture_channels,
+            } => write!(
+                formatter,
+                "track {} records capture channel {channel}, but the engine has {capture_channels}",
+                tap.track()
+            ),
+            Self::AlreadyArmed(tap) => {
+                write!(formatter, "track {} is armed already", tap.track())
+            }
+            Self::NotArmed(track) => write!(formatter, "track {track} is not armed"),
+        }
+    }
+}
+
+impl Error for ArmError {}

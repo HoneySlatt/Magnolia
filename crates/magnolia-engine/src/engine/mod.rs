@@ -8,8 +8,9 @@
 //! - the [`Controller`], on any thread but the audio one, edits a description of the graph,
 //!   compiles each change into a swap and sends it, and sends timed events;
 //! - the [`Processor`], owned by a backend, runs once a period on the real-time thread: it applies
-//!   a swap whole at a period's start, plays its phases, and hands what it replaces to the
-//!   collector thread, which drops it.
+//!   a swap whole at a period's start, copies the armed tracks' capture into the recorder's rings
+//!   ([`record`](crate::record)), plays its phases, and hands what it replaces to the collector
+//!   thread, which drops it.
 //!
 //! A swap that changes edges fades them over 5 ms: a crossfade through the union of both graphs,
 //! or, when the union would cycle or cost too much, a dip that fades the old graph out, then the
@@ -66,7 +67,9 @@ use std::sync::Arc;
 use rtrb::RingBuffer;
 
 pub use collector::wake_collector;
-pub use controller::{Commit, Controller, SendEventError, SwapStatus, TransportError, WaitError};
+pub use controller::{
+    ArmError, Commit, Controller, SendEventError, SwapStatus, TransportError, WaitError,
+};
 pub use events::TimedEvent;
 pub use graph::{Destination, Edge, EdgeEnd, GraphError, NodeId, Source};
 pub use processor::Processor;
@@ -74,6 +77,8 @@ pub use sequence::{
     ControllerPoint, MidiClip, MidiNote, MidiSequence, PitchBendPoint, SequenceError,
 };
 pub use transport::Cue;
+
+pub(crate) use transport::PlayInfo;
 
 pub(crate) use delay_line::DelayLine;
 pub(crate) use fade::{FadeTable, fade_frames};

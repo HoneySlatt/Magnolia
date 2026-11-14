@@ -1,9 +1,11 @@
 //! The processor: the engine's real-time half, which a backend calls once a period.
 //!
 //! Each period it applies at most one swap the controller sent, then the transport's commands,
-//! takes the events due, runs the graph's nodes in sub-blocks, each with its own events and those
-//! its timeline sources play, and fills the device's playback buffers. It never allocates, frees,
-//! locks or blocks; its one system call wakes the collector, which frees what it lets go.
+//! takes the events due, runs the capture tap, which copies the armed tracks' capture into their
+//! rings, then runs the graph's nodes in sub-blocks, each with its own events and those its
+//! timeline sources play, and fills the device's playback buffers. It never allocates, frees, locks
+//! or blocks; its system calls wake the collector, which frees what it lets go, the disk reader and
+//! the recorder.
 
 // The processor runs this module's code in every period: nothing here may panic (ADR-0022).
 #![warn(
@@ -28,9 +30,10 @@ use super::fade::{FadeTable, Gain};
 use super::graph::NodeId;
 use super::pool::{self, BufferPool};
 use super::sources::{NodeTimeline, SourceReader, Timeline};
-use super::transport::TransportClock;
+use super::transport::{PlayInfo, TransportClock};
 use crate::device::DeviceBuffers;
 use crate::node::{Event, ProcessContext, ProcessStatus};
+use crate::record::tap::{CaptureTap, PeriodView};
 use crate::stats::EngineStats;
 use crate::time::{SamplePosition, SampleRate};
 
@@ -59,6 +62,11 @@ pub struct Processor {
     transport: TransportClock,
     messages: Consumer<Box<SwapMessage>>,
     garbage: GarbageOut,
+    /// The armed tracks' taps (ADR-0032).
+    taps: CaptureTap,
+    /// The last play, as the last period's start that completed left the transport: what the taps
+    /// place takes by, never read from a transport a panic may have left half-changed.
+    last_play: Option<PlayInfo>,
     /// The first sample of the next period, on the engine's clock.
     position: i64,
     poisoned: bool,
@@ -112,6 +120,8 @@ impl Processor {
             transport: parts.transport,
             messages: parts.messages,
             garbage: parts.garbage,
+            taps: CaptureTap::new(),
+            last_play: None,
             position: 0,
             poisoned: false,
         }
@@ -156,10 +166,14 @@ impl Processor {
 
     /// Processes one period: reads the device's capture buffers, fills its playback buffers.
     ///
-    /// Real-time: it never allocates, frees, locks or blocks, and its only system call wakes the
-    /// collector. A panic inside poisons the processor: this period and every later one write
-    /// silence to every playback channel and return normally
+    /// Real-time: it never allocates, frees, locks or blocks; its only system calls wake the
+    /// collector, the disk reader and the recorder. A panic of the period's start or of the graph
+    /// poisons the processor: this period and every later one write silence to every playback
+    /// channel and return normally
     /// ([ADR-0022](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0022-a-panic-on-the-real-time-path-gives-silence.md)).
+    /// The capture tap runs between the two, in a `catch_unwind` of its own, so that a poisoned
+    /// processor still records the takes under way, and a panic of the tap stops the tap alone
+    /// ([ADR-0032](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0032-recording-by-a-capture-tap-of-the-processor.md)).
     /// Every period, poisoned or not, counts in the heartbeat and the histogram of callback times.
     #[cfg_attr(magnolia_rtsan, sanitize(realtime = "nonblocking"))]
     pub fn process(&mut self, device: &mut dyn DeviceBuffers) {
@@ -167,14 +181,20 @@ impl Processor {
         let frames = device.frames();
         self.stats
             .publish_block_start(SamplePosition(self.position));
+        // After a panic the processor touches its graph, pool, arena and transport no more, so a
+        // state left half-changed by the unwinding is never read.
         if !self.poisoned {
-            // After a panic the processor touches its graph, pool and arena no more, so a state
-            // left half-changed by the unwinding is never read.
-            let period = catch_unwind(AssertUnwindSafe(|| self.run_period(device)));
-            if let Err(payload) = period {
-                self.poisoned = true;
-                self.stats.set_poisoned();
-                self.garbage.release(Garbage::PanicPayload(payload));
+            let started = catch_unwind(AssertUnwindSafe(|| self.start_period()));
+            match started {
+                Ok(()) => self.last_play = self.transport.last_play(),
+                Err(payload) => self.poison(payload),
+            }
+        }
+        self.run_taps(device, frames);
+        if !self.poisoned {
+            let played = catch_unwind(AssertUnwindSafe(|| self.play_period(device)));
+            if let Err(payload) = played {
+                self.poison(payload);
             }
         }
         if self.poisoned {
@@ -186,8 +206,15 @@ impl Processor {
         self.stats.callback_times.record(entry.elapsed());
     }
 
-    fn run_period(&mut self, device: &mut dyn DeviceBuffers) {
-        let frames = device.frames();
+    /// From now on, the processor writes silence (ADR-0022).
+    fn poison(&mut self, payload: Box<dyn std::any::Any + Send>) {
+        self.poisoned = true;
+        self.stats.set_poisoned();
+        self.garbage.release(Garbage::PanicPayload(payload));
+    }
+
+    /// The period's start: a swap, the transport's commands, the events queued.
+    fn start_period(&mut self) {
         self.garbage.flush_overflow();
         self.apply_swap();
         // After the swap, so that a play pre-rolls by the compensation of the graph about to play.
@@ -196,6 +223,40 @@ impl Processor {
         // Every queued event may be taken, even while a swap waits: the controller sends an event
         // for a node a swap brings only once the processor has applied that swap.
         self.events.pop();
+    }
+
+    /// Runs the capture tap over the period, unless a panic stopped it: it copies the armed tracks'
+    /// capture into their rings, placed by the last play, and hands the taps a swap disarmed to the
+    /// collector. A panic stops it for good, flagged in the statistics; the graph plays on.
+    fn run_taps(&mut self, device: &dyn DeviceBuffers, frames: usize) {
+        if self.taps.is_stopped() {
+            return;
+        }
+        let view = PeriodView {
+            device,
+            start: self.position,
+            frames,
+            play: self.last_play,
+            latency: self.stats.device_latency(),
+        };
+        let Self { taps, stats, .. } = self;
+        let ran = catch_unwind(AssertUnwindSafe(|| taps.run(&view, stats)));
+        match ran {
+            Ok(Some(retired)) => self.garbage.release(Garbage::Taps(retired)),
+            Ok(None) => {}
+            Err(payload) => {
+                // Flagged first: the recorders it wakes read the flag.
+                self.stats.set_tap_stopped();
+                self.taps.stop(self.position);
+                self.garbage.release(Garbage::PanicPayload(payload));
+            }
+        }
+    }
+
+    /// The graph's part of the period: its nodes, sub-block after sub-block, into the device's
+    /// playback buffers.
+    fn play_period(&mut self, device: &mut dyn DeviceBuffers) {
+        let frames = device.frames();
         let mut done = 0;
         while done < frames {
             let length = self.sub_block_length(frames.saturating_sub(done));
@@ -227,6 +288,13 @@ impl Processor {
         if let Some(pool) = message.pool.take() {
             let old = std::mem::replace(&mut self.pool, pool);
             self.garbage.release(Garbage::Pool(old));
+        }
+        // A stopped tap takes no change: the message's taps go to the collector with it.
+        if !self.taps.is_stopped()
+            && let Some(change) = message.taps.take()
+            && let Some(displaced) = self.taps.stage(change, self.transport.play())
+        {
+            self.garbage.release(Garbage::Taps(displaced));
         }
         // The old pool, the used message and the old graph are the three items `can_take_swap`
         // made room for. A graph steady at once releases its dropped nodes after them, so they may

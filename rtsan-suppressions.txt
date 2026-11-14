@@ -13,3 +13,8 @@ call-stack-contains:magnolia_engine::engine::collector::wake_collector
 # `Thread::unpark`, made only when the reader sleeps and no other player has asked since it last
 # woke (ADR-0026).
 call-stack-contains:magnolia_engine::disk::reader::wake_disk_reader
+
+# The capture tap wakes the recorder's thread once a track's ring holds enough frames, or a take
+# starts or ends: a futex wake through `Thread::unpark`, made only when the recorder sleeps, once a
+# period at most (ADR-0032).
+call-stack-contains:magnolia_engine::record::tap::wake_recorder

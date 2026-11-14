@@ -1,7 +1,8 @@
 //! A swap takes no page fault on the processing thread: every page the processor will touch was
 //! written by the controller first; nor do audio players, whose streams' slots are written when
-//! they are made. RealtimeSanitizer cannot see a page fault, which is not a call; the kernel counts
-//! them per thread, in field 10 of `/proc/thread-self/stat`.
+//! they are made, nor capture taps, whose rings are written when they are made. RealtimeSanitizer
+//! cannot see a page fault, which is not a call; the kernel counts them per thread, in field 10 of
+//! `/proc/thread-self/stat`.
 
 use std::fs::File;
 use std::io::Read;
@@ -10,9 +11,11 @@ use std::time::Duration;
 use magnolia_engine::disk::BLOCK_FRAMES;
 use magnolia_engine::engine::{Commit, Destination, NodeId, Source};
 use magnolia_engine::nodes::{Gain, Sine, TestLatency};
+use magnolia_engine::time::SamplePosition;
 use magnolia_engine::wav::SampleFormat;
 
 use crate::disk_support::{DiskRig, Reader, TempDir, TrackSpec, clip, write_wav};
+use crate::record_support::RecordRig;
 use crate::support::{Rig, rate};
 
 const PERIOD: usize = 64;
@@ -204,5 +207,47 @@ fn audio_players_take_no_page_fault_on_the_processing_thread_after_warm_up() {
     assert!(
         rounds[1..].iter().all(|&faults| faults == 0),
         "faults per round of audio playing: {rounds:?}"
+    );
+}
+
+#[test]
+fn capture_taps_take_no_page_fault_on_the_processing_thread_while_the_recorder_drains() {
+    // Rings of 8,192 frames: each round goes three times round them.
+    let mut rig = RecordRig::new("page-faults", 3, |config| config.ring_frames = 8_192);
+    rig.arm(1, "voice", &[0, 1]);
+    rig.arm(2, "guitar", &[2]);
+    rig.rig.controller.commit().unwrap();
+    let capture: Vec<Vec<f32>> = (0..3)
+        .map(|channel| {
+            (0..PERIOD)
+                .map(|sample| (sample + channel) as f32 * 1e-3)
+                .collect()
+        })
+        .collect();
+    let capture: Vec<&[f32]> = capture.iter().map(Vec::as_slice).collect();
+    rig.rig.backend.play_period(PERIOD, &capture);
+    rig.rig.controller.poll();
+    rig.rig.controller.play(SamplePosition(0)).unwrap();
+    // Each round plays 400 periods of 64 frames while the recorder drains the rings and writes the
+    // takes. The first round warms the code and the stack.
+    let mut rounds = Vec::new();
+    for _ in 0..4 {
+        let mut faults = 0;
+        for _ in 0..400 {
+            rig.wait_idle();
+            let before = minor_faults();
+            rig.rig.backend.play_period(PERIOD, &capture);
+            faults += minor_faults() - before;
+            rig.rig.controller.poll();
+        }
+        rounds.push(faults);
+    }
+    println!("minor faults per round of recording: {rounds:?}");
+    let stats = rig.rig.controller.stats().clone();
+    assert_eq!(stats.capture_overruns(), 0);
+    assert!(rig.recorder().stats().frames_written() > 3 * 25_600);
+    assert!(
+        rounds[1..].iter().all(|&faults| faults == 0),
+        "faults per round of recording: {rounds:?}"
     );
 }

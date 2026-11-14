@@ -2,7 +2,7 @@
 //! never frees memory itself.
 //!
 //! The processor pushes what it replaces (an old graph, an old pool, a used message, the nodes a
-//! swap dropped) into a queue, then wakes the collector with [`wake_collector`], the one system
+//! swap dropped, the taps a swap disarmed) into a queue, then wakes the collector with [`wake_collector`], the one system
 //! call it makes for it
 //! ([ADR-0023](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0023-the-real-time-allowlist.md)).
 //! The collector sleeps until woken, frees everything queued, and sleeps again. At rest nothing is
@@ -29,15 +29,17 @@ use rtrb::{Consumer, Producer, PushError, RingBuffer};
 use super::compiled::{CompiledGraph, SwapMessage};
 use super::pool::BufferPool;
 use crate::node::Node;
+use crate::record::tap::TapChange;
 
 /// The most items one applied swap returns at once: the old graph, the used message and the old
 /// pool. The processor applies a swap only when the queue has room for them all.
 pub(crate) const RELEASED_PER_SWAP: usize = 3;
 
 /// Items the processor keeps when the queue is full, until it has room. Between two swaps it
-/// releases at most one item beyond those it made room for: the dropped nodes, at the steady
-/// phase. A panic's payload may add one.
-const OVERFLOW_SLOTS: usize = 4;
+/// releases at most two items beyond those it made room for: the dropped nodes, at the steady
+/// phase, and the taps the swap disarmed, at the capture tap's run. The graph's panic and the
+/// capture tap's may add a payload each.
+const OVERFLOW_SLOTS: usize = 6;
 
 /// Something the processor lets go, for the collector to drop.
 pub(crate) enum Garbage {
@@ -45,6 +47,8 @@ pub(crate) enum Garbage {
     Pool(BufferPool),
     Message(Box<SwapMessage>),
     Nodes(Vec<Box<dyn Node>>),
+    /// The taps a swap disarmed, with the list of the taps it kept.
+    Taps(Box<TapChange>),
     PanicPayload(Box<dyn Any + Send>),
 }
 
@@ -94,7 +98,7 @@ impl GarbageOut {
                     *slot = Some(item);
                 } else {
                     // Unreachable: a swap is applied only with the overflow empty and room in the
-                    // queue for what it returns (`can_take_swap`), which leaves at most two items
+                    // queue for what it returns (`can_take_swap`), which leaves at most four items
                     // for these slots. Leaking is still better than freeing on this thread.
                     std::mem::forget(item);
                 }
@@ -194,6 +198,7 @@ fn drop_item(item: Garbage) {
         Garbage::Pool(pool) => drop(pool),
         Garbage::Message(message) => drop(message),
         Garbage::Nodes(nodes) => drop(nodes),
+        Garbage::Taps(taps) => drop(taps),
         Garbage::PanicPayload(payload) => drop(payload),
     }
 }

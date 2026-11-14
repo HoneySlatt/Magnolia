@@ -4,13 +4,13 @@
 //! nothing. It also checks that a block's conversions of time, as the engine makes them, neither
 //! allocate nor make a system call, and that the engine's processor stays silent through swaps,
 //! events, removals, sleeping and failing nodes, swaps that add and remove a delay line, MIDI
-//! sequences played through the test synth, and audio tracks streamed from disk, with play, stop
-//! and play while rolling.
+//! sequences played through the test synth, audio tracks streamed from disk, and armed tracks
+//! recorded, with play, stop and play while rolling.
 //!
-//! The processor's allowed system calls, the collector's wake and the disk reader's, are suppressed
-//! by name (`rtsan-suppressions.txt`, ADR-0023, ADR-0026). Cases prove the suppressions right: each
-//! wake is a system call the sanitizer stops without its own line, and a lock's wait made beside
-//! the collector's wake is still stopped with them.
+//! The processor's allowed system calls, the collector's wake, the disk reader's and the
+//! recorder's, are suppressed by name (`rtsan-suppressions.txt`, ADR-0023, ADR-0026, ADR-0032).
+//! Cases prove the suppressions right: each wake is a system call the sanitizer stops without its
+//! own line, and a lock's wait made beside the collector's wake is still stopped with them.
 //!
 //! The sanitizer ends the process at its first report, so each case runs in a child process: this
 //! same executable, started again with `MAGNOLIA_RTSAN_CASE` naming the case. The parent reads the
@@ -41,6 +41,7 @@ use magnolia_engine::engine::{
 use magnolia_engine::node::{EventKind, Node, Note, ProcessContext, ProcessStatus};
 use magnolia_engine::nodes::{Gain, Sine, TestLatency, TestSynth};
 use magnolia_engine::offline::OfflineBackend;
+use magnolia_engine::record::{RecordConfig, RecordTrack, Recorder};
 use magnolia_engine::time::{
     Meter, MusicalPosition, SamplePosition, SampleRate, TICKS_PER_QUARTER, Tempo, TempoMap,
     TimePosition, place,
@@ -564,6 +565,74 @@ fn play_audio() {
     assert!(!stats.poisoned());
 }
 
+/// Records two armed tracks, a stereo and a mono one, through a play, a stop, a play and a play
+/// while rolling, the recorder on its own thread, woken by the capture tap. Only the processor runs
+/// in a real-time context; between periods the test waits until the recorder has done what it was
+/// asked, so that it sleeps, and each wake is a system call.
+fn play_record() {
+    let dir = PathBuf::from(env::var_os(FOLDER_VARIABLE).expect("the parent names a folder"))
+        .join("takes");
+    fs::create_dir_all(&dir).unwrap();
+    let rate = SampleRate::new(48_000).unwrap();
+    let (mut controller, processor) = engine::new(EngineConfig::new(rate, 256, 3, 1)).unwrap();
+    let sine = controller
+        .add_node(Box::new(Sine::new(rate, 440.0, 0.5)))
+        .unwrap();
+    controller.connect(Source::Node(sine, 0), Destination::Playback(0));
+    let mut recorder = Recorder::start(RecordConfig::new(&dir, rate), controller.stats()).unwrap();
+    for (number, channels) in [(1, vec![0, 1]), (2, vec![2])] {
+        let tap = recorder
+            .tap(RecordTrack {
+                number,
+                name: "take".into(),
+                capture_channels: channels,
+            })
+            .unwrap();
+        controller.arm(tap).unwrap();
+    }
+    controller.commit().unwrap();
+    let mut backend = OfflineBackend::new(processor);
+    let capture: Vec<Vec<f32>> = (0..3)
+        .map(|channel| {
+            (0..1_000)
+                .map(|sample| (sample as f32 * 0.01 + channel as f32).sin() * 0.5)
+                .collect()
+        })
+        .collect();
+    let mut play = |controller: &mut engine::Controller, recorder: &Recorder, periods: usize| {
+        for period in 0..periods {
+            assert!(recorder.wait_idle(Duration::from_secs(10)));
+            let frames = [64, 1_000, 100, 256][period % 4];
+            let buffers: Vec<&[f32]> = capture.iter().map(|channel| &channel[..frames]).collect();
+            backend.play_period(frames, &buffers);
+            controller.poll();
+        }
+    };
+    play(&mut controller, &recorder, 4);
+    controller.play(SamplePosition(0)).unwrap();
+    play(&mut controller, &recorder, 60);
+    controller.stop().unwrap();
+    play(&mut controller, &recorder, 8);
+    controller.play(SamplePosition(2_000)).unwrap();
+    play(&mut controller, &recorder, 30);
+    // A play while rolling: the old takes' tails, then the new takes.
+    controller.play(SamplePosition(40_000)).unwrap();
+    play(&mut controller, &recorder, 40);
+    controller.stop().unwrap();
+    play(&mut controller, &recorder, 8);
+    assert!(recorder.wait_idle(Duration::from_secs(10)));
+    let stats = controller.stats();
+    assert_eq!(
+        recorder.stats().takes_started(),
+        6,
+        "three plays, two tracks"
+    );
+    assert_eq!(recorder.takes().len(), 6);
+    assert!(recorder.stats().frames_written() > 3 * 10_000);
+    assert_eq!(stats.capture_overruns(), 0);
+    assert!(!stats.poisoned() && !stats.tap_stopped());
+}
+
 /// A silent node whose drop keeps the collector busy until `open` is set, or ten seconds pass;
 /// `entered` tells the test it has started.
 struct BlockingDrop {
@@ -731,6 +800,7 @@ fn run_case(case: &str) -> ExitCode {
         "delay_lines" => on_new_thread(play_delay_lines),
         "sequences" => on_new_thread(play_sequences),
         "audio" => on_new_thread(play_audio),
+        "record" => on_new_thread(play_record),
         "wake" => {
             let collector = sleeping_thread();
             on_new_thread(move || wake(&collector));
@@ -787,7 +857,7 @@ fn suppressions_without(left_out: &str) -> PathBuf {
         .filter(|line| !line.contains(left_out))
         .map(|line| format!("{line}\n"))
         .collect();
-    let path = children_folder().join("suppressions-without-a-line.txt");
+    let path = children_folder().join(format!("suppressions-without-{left_out}.txt"));
     fs::write(&path, kept).expect("the children's folder is writable");
     path
 }
@@ -872,6 +942,7 @@ fn main() -> ExitCode {
     }
     fs::create_dir_all(children_folder()).expect("the temporary folder is writable");
     let without_disk_line = suppressions_without("wake_disk_reader");
+    let without_recorder_line = suppressions_without("wake_recorder");
     let results = [
         check("halve", Expected::Silent),
         check("convert", Expected::Silent),
@@ -888,6 +959,17 @@ fn main() -> ExitCode {
             },
             &options_with(Some(&without_disk_line)),
             "audio_without_the_disk_line",
+        ),
+        check("record", Expected::Silent),
+        // The capture tap's wakes are what the case's silence rests on: without the recorder's
+        // line, the first is stopped.
+        check_under(
+            "record",
+            Expected::StoppedAtSystemCall {
+                from: "wake_recorder",
+            },
+            &options_with(Some(&without_recorder_line)),
+            "record_without_the_recorder_line",
         ),
         // The wake is a system call the sanitizer stops, until the suppressions name it.
         check_under(

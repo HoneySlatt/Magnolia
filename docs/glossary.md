@@ -9,6 +9,8 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
   edits it in place.
 - **Arena**: the store where the engine's nodes live, apart from any compiled graph, so that they
   survive a swap.
+- **Armed track**: a track that records: from each play, its capture tap copies its capture
+  channels into its takes ([`ARCHITECTURE.md`](ARCHITECTURE.md#recording)).
 - **Arrangement**: the timeline of a song's tracks and clips; FL Studio calls it the *playlist*.
 - **Audible region**: the timeline samples a play makes heard, from the position asked for up to
   the stop; a timeline source plays only the events inside it
@@ -25,6 +27,11 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
 - **Buffer pool**: the one set of channel buffers the engine's processor works in, an input region and
   an output region, each channel a stride long; compiled graphs name its channels by index
   ([`ARCHITECTURE.md`](ARCHITECTURE.md#memory-the-real-time-thread-touches)).
+- **Capture overrun**: a frame the capture tap dropped because its track's ring had no room, the
+  recorder having fallen behind; its take holds a zero there, so the rest stays in place.
+- **Capture tap**: the processor's part that copies each armed track's capture channels into the
+  track's rings, at each period's start, before the graph, placed by the round trip
+  ([ADR-0032](adr/0032-recording-by-a-capture-tap-of-the-processor.md)).
 - **Channel**: a strip of the mixer. Each track owns one; a multi-output instrument has child
   channels under its track ([ADR-0008](adr/0008-the-project-model.md)).
 - **Chase**: at a play's start, each MIDI sequence first sends the last pitch bend and controller
@@ -72,7 +79,8 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
   25 hours at 48 kHz; each period's first frame has one.
 - **Gap**: a period whose frame time does not follow on from the last one's, as when the server
   skipped the client's cycles; the JACK backend counts them
-  ([`ARCHITECTURE.md`](ARCHITECTURE.md#what-the-callback-counts)).
+  ([`ARCHITECTURE.md`](ARCHITECTURE.md#what-the-callback-counts)). A take's gap is another thing:
+  frames the capture tap dropped, which the recorder writes as zeros.
 - **Generation**: how many nodes have occupied an arena slot before; a node's id holds it, so that
   an old id never reaches the node that reuses its slot. A disk stream's generation is another
   thing: the number the engine gives each locate, which a stream's blocks were filled for; an audio
@@ -99,6 +107,8 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
   every stream from; it gives the cue a play from there takes.
 - **Low-water mark**: the fewest frames an audio player found ready ahead of it since its play
   started.
+- **Mark**: what a capture tap sends the recorder beside a track's frames: a take's start, a gap, a
+  take's end, each at its place among the frames ([`ARCHITECTURE.md`](ARCHITECTURE.md#recording)).
 - **MCP**: the Model Context Protocol, through which agents drive Magnolia.
 - **Memory budget**: the most memory a test session may ask for, 1 GiB, estimated from its file
   before anything large is allocated ([`ARCHITECTURE.md`](ARCHITECTURE.md#the-memory-budget)).
@@ -145,6 +155,10 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
 - **Real-time rights**: what lets a thread run at real-time priority: rtkit, or the user's
   real-time priority limit (`RLIMIT_RTPRIO`); without them the audio thread shares the processor
   with every other program.
+- **Recorder**: the thread that writes armed tracks' takes from their rings, with the sync threads
+  that make them durable ([`ARCHITECTURE.md`](ARCHITECTURE.md#recording)).
+- **Recovery**: the repair, under the recording folder's lock, of the takes a crash left unfinished
+  ([ADR-0030](adr/0030-takes-in-wav-of-unknown-length-repaired-on-recovery.md)).
 - **Reference project**: a session fixed in M1.3 for each tier, on which the sound's budgets are
   measured, never tuned for afterwards ([`reference-projects.md`](reference-projects.md)).
 - **Refill**: a pass of the disk reader that fills some stream.
@@ -154,6 +168,9 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
   draws nothing, plugin hosts receive no calls, and nothing of Magnolia's wakes outside the audio
   device's callback, while the device stays open
   ([ADR-0010](adr/0010-the-quality-bar.md)).
+- **Round trip**: how late the input hears what the output plays: the device's playback and capture
+  latencies, plus the recorder's extra latency; a take is placed by it
+  ([ADR-0031](adr/0031-the-round-trip-reported-and-takes-placed-by-it.md)).
 - **rtkit**: a system service that grants real-time priority to a program's threads.
 - **Scan-out**: the time a display takes to send an image's lines to the panel, from top to bottom.
 - **Screen of reference**: a screen fixed before the work, on which uwui and its rivals are
@@ -176,6 +193,8 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
   engine's largest block; it cuts a period there and at the end of each phase.
 - **Swap**: the change from one compiled graph to the next, applied whole at a period's start and
   played through its phases without a click.
+- **Take**: what an armed track records over one play: a WAV file whose first frame is the frame
+  captured a round trip after the output played the play's first timeline sample.
 - **Take lane**: one recorded take of a track, kept beside the others for comping.
 - **Tempo map**: where musical time lies on the absolute timeline: tempo changes at ticks, meter
   changes at bars, from the song start.
@@ -200,6 +219,9 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
   ([`ARCHITECTURE.md`](ARCHITECTURE.md#the-transport)).
 - **Underrun**: a frame an audio player needed that its stream did not hold ready; it plays silence
   there, never waits, and counts it in `EngineStats::disk_underruns`.
+- **Window**: the engine samples whose capture a take holds: from a round trip after the output
+  plays the play's first timeline sample, for the length of its audible region
+  ([`ARCHITECTURE.md`](ARCHITECTURE.md#recording)).
 - **WAL**: SQLite's write-ahead log, which makes each transaction whole or absent after a crash.
 - **Winelib**: a program built for Linux that also calls Windows' functions through Wine.
 - **Wine bridge**: the plugin host built for Windows, run under the system's Wine

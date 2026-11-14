@@ -7,6 +7,8 @@
 //! - [`nodes`]: the engine's own nodes, a sine, a gain, a test latency and a test synth;
 //! - [`disk`]: the disk reader, which streams audio clips from WAV files ahead of the playhead, and
 //!   the audio players, the nodes that play those streams;
+//! - [`record`]: the capture tap, which copies armed tracks' capture on the real-time thread, the
+//!   recorder, which writes it into WAV takes that survive a crash, and their recovery;
 //! - [`device`] and [`offline`]: what a backend lends the processor each period, and a backend
 //!   without a device, for tests;
 //! - [`stats`] and [`callback_times`]: what the engine reports of itself while it plays;
@@ -26,6 +28,7 @@ pub mod engine;
 pub mod node;
 pub mod nodes;
 pub mod offline;
+pub mod record;
 mod seqlock;
 pub mod stats;
 pub mod time;

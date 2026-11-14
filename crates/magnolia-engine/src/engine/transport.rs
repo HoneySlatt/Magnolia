@@ -32,6 +32,12 @@
 //! Commands come through a queue of their own and apply at a period's start, after any swap, so a
 //! play pre-rolls by the compensation of the graph about to play. A swap that changes the
 //! compensation while the transport rolls keeps the running clock.
+//!
+//! The capture tap places each take by the last play ([`PlayInfo`]): the engine sample at which the
+//! output plays its first timeline sample, and its stop once asked
+//! ([ADR-0032](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0032-recording-by-a-capture-tap-of-the-processor.md)).
+//! Within a play the clock moves with the engine's, sample for sample, so the output plays timeline
+//! sample `t` at engine sample `audible_at + (t - from)`.
 
 // The processor runs this module's code in every period: nothing here may panic (ADR-0022).
 #![warn(
@@ -109,6 +115,20 @@ impl From<SamplePosition> for Cue {
     }
 }
 
+/// The last play started, as the capture tap places takes by it (ADR-0032).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PlayInfo {
+    /// The play's number, from 1.
+    pub(crate) sequence: u64,
+    /// The timeline sample it plays from, the audible region's start.
+    pub(crate) from: i64,
+    /// The engine sample at which the output plays `from`.
+    pub(crate) audible_at: i64,
+    /// The audible region's stop, once asked; `from` for a play stopped before anything audible was
+    /// read.
+    pub(crate) stop: Option<i64>,
+}
+
 /// Whether a play may start, as far as its disk streams go: it reads none, or a disk reader has
 /// primed its generation.
 fn is_primed(play: &Play, stats: &EngineStats) -> bool {
@@ -134,6 +154,8 @@ pub(crate) struct TransportClock {
     waiting: Option<Play>,
     /// The number of the last play started; 0 before any.
     play: u64,
+    /// The engine sample at which the output plays the last play's `from`.
+    audible_at: i64,
     /// The generation of the disk streams the last play started reads; 0 for none.
     generation: u64,
 }
@@ -150,6 +172,7 @@ impl TransportClock {
             stop: Some(0),
             waiting: None,
             play: 0,
+            audible_at: 0,
             generation: 0,
         }
     }
@@ -201,8 +224,8 @@ impl TransportClock {
         self.from = play.from.0;
         self.stop = None;
         self.clock = play.from.0.saturating_sub(compensation);
-        let audible_at = SamplePosition(period_start.saturating_add(compensation));
-        stats.publish_play_start(play.sequence, audible_at);
+        self.audible_at = period_start.saturating_add(compensation);
+        stats.publish_play_start(play.sequence, SamplePosition(self.audible_at));
     }
 
     /// Sets where a rolling transport stops, unless it is set already; stops at once if nothing
@@ -225,6 +248,16 @@ impl TransportClock {
     /// any.
     pub(crate) fn play(&self) -> u64 {
         self.play
+    }
+
+    /// The last play started, whether it still rolls or not; `None` before any.
+    pub(crate) fn last_play(&self) -> Option<PlayInfo> {
+        (self.play > 0).then_some(PlayInfo {
+            sequence: self.play,
+            from: self.from,
+            audible_at: self.audible_at,
+            stop: self.stop,
+        })
     }
 
     /// How many frames the transport rolls before it stops, when it rolls towards a known stop: up
