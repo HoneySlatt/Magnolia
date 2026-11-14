@@ -79,5 +79,13 @@ stage's audit triages the whole list.
 - **The session's memory budget copies the recorder's marks ring** (`load/budget.rs`, 256 marks
   of 64 bytes, against the engine's private `MARKS_CAPACITY`): an overestimate today, which will
   not follow a change of the engine's until it exports a tap's bytes.
+- **Two `magnolia` processes collide in JACK2**, even on different servers: JACK2 names a client's
+  notification socket after the client's name alone and deletes any socket in its way, and the
+  command line's client is always `magnolia`. The tests name their clients by process id.
+- **libjack's close may wait for ever**: JACK2 1.9.22 cancels its client threads asynchronously and
+  joins them without a bound, one of them inside a process-wide mutex; read in its code, not seen.
+  A hang of the JACK tests during `scripts/check.sh` on 2026-11-14 was never reproduced in 248
+  runs; a watchdog now ends any JACK test stuck 120 s, with a diagnosis
+  (`crates/magnolia-jack/tests/common/mod.rs`).
 - **The test server's command line is written in three places** (`ARCHITECTURE.md`,
   `CONTRIBUTING.md`, the tests' `common/mod.rs`): to keep in the code and link from the documents.
