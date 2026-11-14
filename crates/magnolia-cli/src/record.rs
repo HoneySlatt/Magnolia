@@ -12,7 +12,9 @@ use magnolia_session::{RecordSettings, Session, SessionRecorder};
 
 use crate::arguments::RecordOptions;
 use crate::latency;
-use crate::play::{Closed, Span, Watch, connect, open_backend, roll, seconds, server_name};
+use crate::play::{
+    Closed, Connect, Span, Watch, connect, open_backend, roll, seconds, server_name,
+};
 use crate::recover::print_recovery;
 use crate::say;
 
@@ -53,6 +55,9 @@ pub fn record(options: &RecordOptions) -> Result<(), Box<dyn Error>> {
         format: options.format,
     };
     let (mut recording, processor) = SessionRecorder::new(&session, settings)?;
+    // Printed first, so that it is seen even when the server then fails to open.
+    say("The recovery of the folder, before recording:");
+    print_recovery(recording.recorder.recovery());
     let backend = open_backend(play, processor)?;
     say(format_args!(
         "Recording {} into {} on {}, as the client {:?}: {} frames at {} Hz, from {} s to {} s.",
@@ -73,7 +78,10 @@ pub fn record(options: &RecordOptions) -> Result<(), Box<dyn Error>> {
             numbered_from_one(&track.capture_channels)
         ));
     }
-    connect(play, &backend)?;
+    let capture_ports = connect(play, &backend, Connect::PlaybackAndCapture)?;
+    if play.connect {
+        warn_unconnected(&tracks, capture_ports);
+    }
     let monitoring = session.monitoring_latency().unwrap_or(0);
     let latency = latency::settle(&backend, monitoring, Some(options.extra_latency), rate);
     say(latency);
@@ -93,17 +101,41 @@ pub fn record(options: &RecordOptions) -> Result<(), Box<dyn Error>> {
             options.extra_latency,
         )
     });
-    let closed = Closed::close(backend, &recording.player);
+    let mut closed = Closed::close(backend, &recording.player);
+    if rolled.is_err() {
+        // The play stopped before its takes ended. Dropping the processor drops its taps, which
+        // ends each take at what it recorded; when the server died with it, the processor is
+        // lost, so closing the recorder ends them.
+        closed.drop_processor();
+        recording.recorder.close();
+    }
 
     let takes = recording.recorder.takes();
     print_takes(&takes);
-    say("The recovery of the folder, before recording:");
-    print_recovery(recording.recorder.recovery());
     print_recorder(&recording.recorder, &tracks, &stats);
     closed.print(&stats);
     rolled?;
     closed.outcome(&stats)?;
     takes_outcome(&takes, &stats)
+}
+
+/// Warns of each armed track's capture port that `--connect` could not connect, the server
+/// having fewer physical capture ports: that port records silence, and the capture latency
+/// reported is that of the other ports.
+fn warn_unconnected(tracks: &[RecordTrack], capture_ports: usize) {
+    for track in tracks {
+        for &channel in &track.capture_channels {
+            if channel >= capture_ports {
+                say(format_args!(
+                    "warning: capture port {} of track {} {:?} is connected to no physical port: \
+                     it records silence",
+                    channel.saturating_add(1),
+                    track.number,
+                    track.name
+                ));
+            }
+        }
+    }
 }
 
 /// The engine's capture channels as the JACK ports number them, from 1.

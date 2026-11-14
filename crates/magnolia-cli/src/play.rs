@@ -57,7 +57,7 @@ pub fn play(options: &PlayOptions) -> Result<(), Box<dyn Error>> {
         seconds(span.from, rate),
         seconds(span.end, rate),
     ));
-    connect(options, &backend)?;
+    connect(options, &backend, Connect::Playback)?;
     if let Some(monitoring) = session.monitoring_latency() {
         say(latency::settle(&backend, monitoring, None, rate));
     }
@@ -83,31 +83,55 @@ pub(crate) fn server_name(options: &PlayOptions) -> String {
     )
 }
 
-/// With `--connect`, connects the playback ports, then the capture ports, to the server's
-/// physical ones, and waits for their latency. Connected ports play whether or not the server
-/// reported their latency: a play only reports it, so its absence is a warning, not a failure.
-pub(crate) fn connect(options: &PlayOptions, backend: &JackBackend) -> Result<(), Box<dyn Error>> {
+/// Which of Magnolia's ports `--connect` connects to the server's physical ones.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Connect {
+    /// The playback ports alone: `play`, which must never route a microphone to the speakers
+    /// unasked, as a session's input tracks would monitor it.
+    Playback,
+    /// The playback ports, then the capture ports: `record`.
+    PlaybackAndCapture,
+}
+
+/// With `--connect`, connects the ports `which` names to the server's physical ones, and waits for
+/// their latency; returns how many capture ports it connected. Connected ports play whether or
+/// not the server reported their latency: a play only reports it, so its absence is a warning, not
+/// a failure.
+pub(crate) fn connect(
+    options: &PlayOptions,
+    backend: &JackBackend,
+    which: Connect,
+) -> Result<usize, Box<dyn Error>> {
     if !options.connect {
-        return Ok(());
+        return Ok(0);
     }
-    for kind in ["playback", "capture"] {
+    let mut kinds = vec!["playback"];
+    if which == Connect::PlaybackAndCapture {
+        kinds.push("capture");
+    }
+    let mut capture_ports = 0;
+    for kind in kinds {
         let connected = if kind == "playback" {
             backend.connect_to_physical_playback()
         } else {
             backend.connect_to_physical_capture()
         };
         match connected {
-            Ok(0) if kind == "capture" => {}
-            Ok(connected) => say(format_args!(
-                "Connected {connected} {kind} ports to the server's physical ones."
-            )),
+            Ok(connected) => {
+                say(format_args!(
+                    "Connected {connected} {kind} ports to the server's physical ones."
+                ));
+                if kind == "capture" {
+                    capture_ports = connected;
+                }
+            }
             Err(ConnectError::Latency(error)) => say(format_args!(
                 "warning: connected the {kind} ports to the server's physical ones, but {error}."
             )),
             Err(error) => return Err(error.into()),
         }
     }
-    Ok(())
+    Ok(capture_ports)
 }
 
 /// What a play leaves once its client is closed: what was read of the engine and the backend
@@ -116,7 +140,8 @@ pub(crate) struct Closed {
     realtime: RealtimeStatus,
     report: PlayReport,
     callback_panicked: bool,
-    closed: Result<Processor, CloseError>,
+    /// The processor the backend gave back, until [`drop_processor`](Self::drop_processor).
+    closed: Result<Option<Processor>, CloseError>,
 }
 
 impl Closed {
@@ -130,7 +155,7 @@ impl Closed {
             realtime,
             report,
             callback_panicked,
-            closed: backend.close(),
+            closed: backend.close().map(Some),
         }
     }
 
@@ -142,6 +167,14 @@ impl Closed {
             "gaps in the server's frame time: {}",
             stats.frame_time_gaps()
         ));
+    }
+
+    /// Drops the processor the backend gave back, and with it the capture taps it held, which ends
+    /// the takes still under way at what they recorded. Does nothing when the backend kept it.
+    pub(crate) fn drop_processor(&mut self) {
+        if let Ok(processor) = &mut self.closed {
+            drop(processor.take());
+        }
     }
 
     /// Whether the client closed, and neither the backend's callback nor the engine panicked.

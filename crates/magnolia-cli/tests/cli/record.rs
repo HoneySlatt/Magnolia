@@ -192,6 +192,41 @@ fn a_held_folder_refuses_another_recorder_and_a_killed_take_is_recovered() {
     assert_eq!(info.bext.unwrap().time_reference, 0);
 }
 
+#[test]
+fn a_server_that_stops_mid_take_still_leaves_the_take_ended_and_listed() {
+    let _turn = one_at_a_time();
+    let mut server = Server::start(256);
+    let dir = TempDir::new("record-server-stops");
+    let mut arguments = record_small(&dir, &server.name);
+    arguments.extend(["--seconds", "30"].map(OsString::from));
+    let mut recording = Command::new(magnolia_binary())
+        .args(&arguments)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let takes = dir.path().join("takes");
+    wait_for_frames(&takes.join(MIC_TAKE), 8_192, &mut recording);
+    server.stop();
+    let output = recording.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stdout}\n{stderr}");
+    // The play failed, but the take it held ended at what it recorded, and is listed: the
+    // processor, which JACK2 keeps when its server dies, never lets its tap go, so closing the
+    // recorder ends the take.
+    assert!(stdout.contains("Takes: 1"), "{stdout}");
+    assert!(
+        stdout.contains("it ended when the recorder closed")
+            || stdout.contains("it ended when the engine let its track go"),
+        "{stdout}"
+    );
+    let info = info_of(&takes.join(MIC_TAKE));
+    assert!(!info.length_repaired, "its sizes are written");
+    assert!(info.frames > 0);
+}
+
 /// The samples of the take `recover` is given in the test below: a ramp of distinct values.
 fn ramp(frames: usize) -> Vec<f32> {
     (0..frames).map(|frame| frame as f32 / 4_096.0).collect()

@@ -136,7 +136,7 @@ fn a_bad_session_is_a_plain_error() {
 #[test]
 fn a_misuse_exits_with_2_and_the_usage() {
     let not_text = OsString::from_vec(vec![b'-', 0xFF]);
-    let misuses: [Vec<OsString>; 11] = [
+    let misuses: [Vec<OsString>; 12] = [
         vec![],
         vec!["paly".into(), "session.json".into()],
         vec!["render".into(), "session.json".into()],
@@ -167,6 +167,13 @@ fn a_misuse_exits_with_2_and_the_usage() {
             "takes".into(),
             "--extra-latency".into(),
             "1.5".into(),
+        ],
+        vec![
+            "record".into(),
+            "session.json".into(),
+            "takes".into(),
+            "--extra-latency".into(),
+            "65537".into(),
         ],
         vec!["recover".into()],
         vec!["recover".into(), "takes".into(), "--all".into()],

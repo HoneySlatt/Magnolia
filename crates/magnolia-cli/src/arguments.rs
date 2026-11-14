@@ -1,11 +1,11 @@
 //! The command line's arguments, read by hand: the command, its options, and a plain error for
 //! every misuse.
 
-use magnolia_engine::node::MAX_LATENCY;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::path::PathBuf;
 
+use magnolia_engine::node::MAX_LATENCY;
 use magnolia_engine::record::TakeFormat;
 use magnolia_engine::time::{TIME_UNITS_PER_SECOND, TimePosition};
 
@@ -24,8 +24,8 @@ play     Plays a test session through JACK, from --from for --seconds, or to the
          tracks monitors them, and prints the round trip's latency first.
   --server NAME    the JACK server to play on; the default one otherwise. Magnolia never starts
                    a server.
-  --connect        connects the playback ports to the server's first physical playback ports,
-                   and the capture ports to its first physical capture ports.
+  --connect        connects the playback ports to the server's first physical playback ports;
+                   with record, the capture ports to its first physical capture ports too.
   --from SECONDS   where the play starts on the timeline; 0 by default.
   --seconds N      how long it plays.
 
@@ -76,7 +76,8 @@ pub struct PlayOptions {
     pub session: PathBuf,
     /// The JACK server to play on, by name; `None` for the default one.
     pub server: Option<String>,
-    /// Whether to connect the playback ports to the server's physical playback ports.
+    /// Whether to connect the playback ports to the server's physical playback ports, and, for
+    /// `record`, the capture ports to its physical capture ports.
     pub connect: bool,
     /// Where the play starts on the timeline.
     pub from: TimePosition,
@@ -529,6 +530,16 @@ mod tests {
                 format: TakeFormat::Float32,
             }
         );
+        let Ok(Command::Record(options)) = parsed(&[
+            "record",
+            "session.json",
+            "takes",
+            "--extra-latency",
+            "65536",
+        ]) else {
+            panic!("record was not read");
+        };
+        assert_eq!(options.extra_latency, MAX_LATENCY, "the largest taken");
         let Ok(Command::Record(options)) = parsed(&[
             "record",
             "--format",

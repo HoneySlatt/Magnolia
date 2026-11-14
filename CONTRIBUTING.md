@@ -145,8 +145,8 @@ cargo run --release -p magnolia-cli -- play /tmp/magnolia-small/session.json --s
 ```
 
 Its options: `--server NAME` (the default server otherwise; it never starts one), `--connect`
-(connect to the first physical playback ports, and capture ports when the session has input
-tracks; off by default), `--from SECONDS` (where the play
+(connect to the first physical playback ports; off by default; `play` never connects the capture
+ports, so a session's input tracks monitor nothing unless another client connects them), `--from SECONDS` (where the play
 starts on the timeline, 0 by default), `--seconds N` (how long it plays; by default to the
 session's end and one second of tail). The server must run at the session's rate, 48 kHz for the
 generated sessions. A session with input tracks monitors them, the capture ports `capture_1` and on
@@ -172,14 +172,15 @@ It takes `play`'s options, and `--extra-latency FRAMES`, the loopback latency `j
 measures beyond the server's, by which takes are placed earlier (0 by default), and `--format
 float32|int24` (float32, the device's samples bit for bit, by default). `--connect` connects the
 playback ports, then the capture ports, to the first physical ones, before the take starts: a
-connection made during a take changes its latency, which ends it. `--extra-latency` takes at most
-65,536 frames. Before it
-plays, it recovers the folder, holds it for its own, and prints the round trip with the extra and
+connection made during a take changes its latency, which ends it; an armed track whose capture
+port finds no physical port is warned of, as it records silence. `--extra-latency` takes at most
+65,536 frames. Before it opens the server, it recovers the folder, holds it for its own, and prints the round trip with the extra and
 what places the takes. Once the takes have ended, it prints each take (its file, track, first
 timeline sample, frames and how it ended), the recovery made at the start, the recorder's figures
 and the engine's. A take is named `<track number>-<track name>-take<n>.wav`, the tracks counted
 from 1 in the session's order. It exits with 1 when a take's writing failed or a change of latency
-ended it.
+ended it; a take padded with silence after the disk fell behind exits 0, its padding printed. A
+play that fails mid-take still ends its takes at what they recorded, and lists them.
 
 A recording ended by a crash, a kill or Ctrl-C leaves its take with its sizes unknown; the next
 `record` on the folder repairs it, or:

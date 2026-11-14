@@ -530,8 +530,8 @@ Its limits:
   what they hold;
 - after a panic in a period's start, a take whose stop was unknown records until the processor is
   replaced;
-- a recorder dropped while its tracks are armed ends their takes; its taps then fill their rings and
-  drop what follows, counted as overruns;
+- a recorder closed (`Recorder::close`) or dropped while its tracks are armed ends their takes at
+  what they hold; its taps then fill their rings and drop what follows, counted as overruns;
 - the recorder reads the engine's statistics it was started with: a processor rebuilt on a new
   engine needs a new recorder;
 - the latency is compared at each period's start: a change published mid-period ends the take at
@@ -759,7 +759,7 @@ ADR-0031). `JackBackend::wait_for_latency` takes the connections the caller made
 is in the graph the server runs (`jack_port_connected_to`), then asks the server to recompute the
 latencies (`jack_recompute_total_latencies`) and waits until the callback has run in both modes
 since: a request counter the handle raises, and, for each mode, the request the callback saw when it
-began. `connect_to_physical_playback` waits so before it returns, and `set_monitoring_latency`
+began. `connect_to_physical_playback` and `connect_to_physical_capture` wait so before they return, and `set_monitoring_latency`
 waits for the recompute it asks; each gives up after 2 s with a plain error. JACK2 runs the callback
 of a client connected to nothing too, since it walks every active client.
 
@@ -1104,7 +1104,8 @@ It prints the frames, the time taken and the memory the session asks for, estima
 2. builds a `SessionPlayer` and opens the JACK backend on its processor, on the named server or the
    default one; a server at another rate than the session's is an error;
 3. with `--connect`, connects the playback ports to the server's first physical playback ports,
-   which waits for their latency;
+   which waits for their latency; `play` never connects the capture ports, so that a session's
+   input tracks never route a microphone to the speakers unasked: `record` does;
 4. for a session with input tracks, sets the backend's monitoring latency to
    [`Session::monitoring_latency`](#the-graph-a-session-builds), which waits until the server has
    recomputed the latencies, and prints the **latency report** (`latency.rs`,
@@ -1147,7 +1148,11 @@ backend's callback panicked prints its figures, then exits with 1.
    engine's figures as `play` prints them.
 
 It exits with 1, after printing, when a take's writing failed, when a change of the device's
-latency ended a take, or when the capture tap panicked. Dropping the recorder at the end removes the
+latency ended a take, or when the capture tap panicked; a take padded with silence exits 0, its
+padding printed. A play that fails mid-take, as when the server stops, first drops the processor the
+backend gave back, which ends the takes; when the backend could not give it back, as when the
+server died, it closes the recorder, which ends them; then it prints them as above, and exits
+with 1. Dropping the recorder at the end removes the
 file it made ahead of each track's next take, so the folder holds the finished takes alone.
 
 `magnolia recover <folder>` (`recover.rs`) runs [`record::recover`](#recording) on the folder, and

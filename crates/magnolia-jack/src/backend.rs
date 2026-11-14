@@ -19,7 +19,8 @@ use crate::latency::{self, LatencyContext, LentContext};
 use crate::notifications::{Notifications, Shared};
 use crate::realtime::{self, AudioServer, RealtimeStatus, ThreadScheduling};
 
-/// How long [`JackBackend::connect_to_physical_playback`] and
+/// How long [`JackBackend::connect_to_physical_playback`],
+/// [`JackBackend::connect_to_physical_capture`] and
 /// [`JackBackend::set_monitoring_latency`] wait for the latency callback. JACK2's dummy driver ran
 /// it within 2 ms of a connection, measured while designing ADR-0031; a server that has not run it
 /// in two seconds is stalled.
@@ -665,7 +666,8 @@ impl fmt::Display for CloseError {
 
 impl Error for CloseError {}
 
-/// Why [`JackBackend::connect_to_physical_playback`] failed.
+/// Why [`JackBackend::connect_to_physical_playback`] or
+/// [`JackBackend::connect_to_physical_capture`] failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConnectError {
     /// The server refused a connection.

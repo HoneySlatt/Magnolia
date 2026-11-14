@@ -76,5 +76,8 @@ stage's audit triages the whole list.
 - **A WAV size torn by a power cut can hide frames**: `wav::repair` assumes storage writes a
   sector whole. A 4-byte size torn mid-write, as when a repair marks a file of sizes 0 unfinished,
   can leave a file that reads as finished but short, which no repair then takes up.
+- **The session's memory budget copies the recorder's marks ring** (`load/budget.rs`, 256 marks
+  of 64 bytes, against the engine's private `MARKS_CAPACITY`): an overestimate today, which will
+  not follow a change of the engine's until it exports a tap's bytes.
 - **The test server's command line is written in three places** (`ARCHITECTURE.md`,
   `CONTRIBUTING.md`, the tests' `common/mod.rs`): to keep in the code and link from the documents.

@@ -54,7 +54,8 @@
 //! capture channel feeds one channel of one input track at most. An armed input track is recorded
 //! when the session is played with a recorder ([`SessionRecorder`](crate::SessionRecorder)).
 //!
-//! The schema is strict: a field unknown or missing, a value of the wrong type or out of range, a
+//! The schema is strict: a field unknown or missing (an optional field given as `null` counts as
+//! absent, so `"inputs": null` passes in version 1 as no `inputs` does), a value of the wrong type or out of range, a
 //! version newer than this reader's, each refuses the file with a [`FileError`] that names the
 //! field by its path, such as `tracks[1].clips[0].start`. Other limits: every position lies at or
 //! after the timeline's zero, where a render starts, and every clip ends within 24 hours of it, at

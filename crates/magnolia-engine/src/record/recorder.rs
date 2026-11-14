@@ -603,20 +603,30 @@ impl Recorder {
     }
 }
 
-impl Drop for Recorder {
-    /// Ends the recorder's thread, which drains the rings, ends the takes under way, removes the
-    /// files made ahead and waits for the sync threads. Off the real-time thread.
+impl Recorder {
+    /// Ends the recorder's thread, which drains the rings, ends the takes under way at what they
+    /// hold, removes the files made ahead and waits for the sync threads; the takes, the figures
+    /// and the recovery stay readable. For an owner whose engine cannot let its taps go, as when
+    /// the audio server died with the processor: the takes end here rather than at the drop.
+    /// Nothing is recorded afterwards. Off the real-time thread.
     #[expect(
         clippy::disallowed_methods,
         reason = "the owner's thread waits for the recorder's thread to end; never on the real-time path"
     )]
-    fn drop(&mut self) {
+    pub fn close(&mut self) {
         self.shared.closed.store(true, Ordering::SeqCst);
         self.thread.unpark();
         if let Some(writer) = self.writer.take() {
             // A thread that panicked has said so through `failed`.
             let _ = writer.join();
         }
+    }
+}
+
+impl Drop for Recorder {
+    /// Closes the recorder, if [`close`](Recorder::close) has not. Off the real-time thread.
+    fn drop(&mut self) {
+        self.close();
     }
 }
 
