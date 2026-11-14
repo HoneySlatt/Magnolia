@@ -20,6 +20,8 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
 - **BBT**: a musical position in bars, beats and ticks.
 - **Best rival**: on a criterion, the rival that does best, measured; a lead is a margin over it
   ([ADR-0014](adr/0014-the-quality-bar-measured-against-the-market.md)).
+- **bext**: the Broadcast WAV chunk (EBU Tech 3285) that names a file's origin and holds its
+  time reference; a take's places it on the timeline and marks it as Magnolia's.
 - **Blank window**: a window that only clears and presents. What a program adds above it is its
   *own cost* ([ADR-0014](adr/0014-the-quality-bar-measured-against-the-market.md)).
 - **Block**: the frames the engine processes in one callback, a period's worth. A stream's block is
@@ -73,6 +75,8 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
   ([ADR-0014](adr/0014-the-quality-bar-measured-against-the-market.md)).
 - **Foreign surface**: a surface drawn by another process, shown in an element of Magnolia's window,
   as a plugin's GUI will be.
+- **Freewheel**: a JACK server's mode that runs periods as fast as its clients finish them, without
+  the device; the JACK tests play in it, faster than real time.
 - **Futex ping-pong**: two processes that wake each other in turn through a futex; the least that
   any bridge between processes pays for a round trip.
 - **Frame time**: the server's count of frames since it started, 32 bits, which wraps after about
@@ -95,6 +99,8 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
   ([`ARCHITECTURE.md`](ARCHITECTURE.md#events)).
 - **Heartbeat**: the count of periods the processor has run, which stops when the backend stops
   calling it.
+- **Input monitoring**: hearing a track's input live through its plugins while it plays or records;
+  Magnolia never delays it to line it up with the timeline.
 - **Label**: a timecode as a clock shows it, hours, minutes, seconds and frames, such as
   01:00:00:00; drop-frame skips some labels.
 - **Lead**: a margin of the quality bar over the best rival, measured; missed, it is debt, never a
@@ -105,6 +111,8 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
   offset, length, loop, transposition and velocity scale.
 - **Locate**: the disk reader's start of a new generation from a timeline sample, which it fills
   every stream from; it gives the cue a play from there takes.
+- **Loopback**: a cable from an output of the audio interface to one of its inputs, by which a
+  round trip is measured.
 - **Low-water mark**: the fewest frames an audio player found ready ahead of it since its play
   started.
 - **Mark**: what a capture tap sends the recorder beside a track's frames: a take's start, a gap, a
@@ -170,6 +178,7 @@ The terms Magnolia coins, and the audio and system terms its documents use witho
   draws nothing, plugin hosts receive no calls, and nothing of Magnolia's wakes outside the audio
   device's callback, while the device stays open
   ([ADR-0010](adr/0010-the-quality-bar.md)).
+- **RF64**: the WAV variant whose sizes are 64 bits wide, in a `ds64` chunk, for files past 4 GiB.
 - **Round trip**: how late the input hears what the output plays: the device's playback and capture
   latencies, plus the recorder's extra latency; a take is placed by it
   ([ADR-0031](adr/0031-the-round-trip-reported-and-takes-placed-by-it.md)).

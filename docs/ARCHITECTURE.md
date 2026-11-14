@@ -496,7 +496,8 @@ empty, so that a take never waits for its file; the recorder removes the files m
 ends. `Recorder::takes` lists every take that ended: its file, frames, padding, how it ended, and
 the error that ended it, if one did.
 
-**Syncs never block the writer.** The sync threads take jobs from one queue, so that several files
+**Syncs run off the writer's thread.** On btrfs they still slow its writes: about 1 ms with four
+sync threads, 5 to 57 ms with eight ([measurements](measurements.md#the-recorder)). The sync threads take jobs from one queue, so that several files
 sync in parallel: a sync of a take's data (`fdatasync`), asked after each second of its audio, one
 in flight per take; a take's end, which syncs its data, writes its sizes (`WavWriter::finish`) and
 syncs them, so that the sizes never claim data that did not reach the disk; and a sync of the
@@ -522,8 +523,8 @@ first timeline sample, its frames, whether it was repaired. `Recorder::start` ru
 
 **What a crash loses.** A kill loses what had not yet left the tap's ring: at most a period plus
 2,047 frames, the tap's wake coming once 2,048 frames wait, and a pass: about 50 ms at 48 kHz with
-periods of 256 frames. A power cut loses at most the last second of each take, its data synced every
-second. A stall of the disk longer than the ring, 4 s by default, drops frames, which become zeros,
+periods of 256 frames. A power cut loses about the last second of each take and the time of a sync, its data synced
+every second. A stall of the disk longer than the ring, 4 s by default, drops frames, which become zeros,
 so the rest of the take stays in place.
 
 Its limits:
@@ -1139,7 +1140,8 @@ backend's callback panicked prints its figures, then exits with 1.
 
 1. opens the session, and refuses one without an armed input track before it touches the folder;
 2. starts the recorder on the folder, which must exist: it recovers the folder and holds its lock,
-   so a folder another recorder or a recovery holds is a plain error; `--extra-latency` is the
+   so a folder another recorder or a recovery holds is a plain error, and prints what the recovery
+   did, before the server is opened, so that it is seen even when that fails; `--extra-latency` is the
    recorder's extra latency, 0 by default, `--format` its takes' samples, 32-bit floats by default;
 3. opens the backend, connects it with `--connect`, sets the monitoring latency and prints the
    latency report as `play` does, with the extra latency, and what places the takes: the capture
@@ -1148,8 +1150,7 @@ backend's callback panicked prints its figures, then exits with 1.
    trip after it, which the takes' last frames need, then for the recorder to end each armed
    track's take of the play, 10 s at most;
 5. closes the client, and prints each take (its file, track, first timeline sample, frames, padded
-   frames, the round trip that placed it and how it ended), the recovery made at the start, the
-   recorder's figures, its rings at their fullest, the capture's overruns and missed takes, and the
+   frames, the round trip that placed it and how it ended), the recorder's figures, its rings at their fullest, the capture's overruns and missed takes, and the
    engine's figures as `play` prints them.
 
 It exits with 1, after printing, when a take's writing failed, when a change of the device's

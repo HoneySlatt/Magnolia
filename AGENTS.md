@@ -10,10 +10,11 @@ each out of the engine's process. Its interface will be written on uwui, the own
 which is not ready yet. It is licensed under GPL-3.0-or-later, its copyright held by the owner
 alone ([ADR-0002](docs/adr/0002-gpl-3-0-or-later-copyright-kept.md)).
 
-Its real state: the design is done (ADRs 0001 to 0029); the workspace and its checks exist (M1.1);
-the engine holds the time model (M1.2), plays a graph through JACK (M1.3) and plays a test session
-of audio clips and MIDI from disk, delays compensated, through the `magnolia` command (M1.4); M1.3
-and M1.4 are built and wait for the owner's measures by hand.
+Its real state: the design is done (ADRs 0001 to 0032); the workspace and its checks exist (M1.1);
+the engine holds the time model (M1.2), plays a graph through JACK (M1.3), plays a test session
+of audio clips and MIDI from disk, delays compensated, through the `magnolia` command (M1.4), and
+monitors and records input tracks into takes that survive a crash (M1.5); M1.3 to M1.5 are built
+and wait for the owner's measures by hand.
 
 Agents develop it; the owner sets its direction and validates its decisions. Anyone must be able to
 understand it from the repository alone. Documentation is part of every deliverable.

@@ -131,11 +131,15 @@ Done, 2026-11-11: exact positions over a film's length ([ADR-0018](adr/0018-the-
   [`measurements.md`](measurements.md#m15--recording-and-monitoring).
 - **By hand, by the owner**, as [CONTRIBUTING](../CONTRIBUTING.md#measuring-the-round-trip) says:
   - on the Focusrite at 64 frames, a loopback cable and `jack_iodelay`, direct and through
-    Magnolia's monitoring path: the two round trips equal, to the sample;
-  - a take of the small session's playback through the cable, placed by `--extra-latency` from
-    `jack_iodelay`: in line with its render, to the sample;
-  - through `pw-jack`: the latency report gives PipeWire's figures, and `record --connect` records;
-  - a voice recorded and heard live, at 64 frames;
+    Magnolia's monitoring path, each reopened several times: the two round trips equal, to the
+    sample;
+  - a take of the small session's playback through the cable, its `mic` at gain 0 so that nothing
+    feeds back, placed by `--extra-latency` from `jack_iodelay`: in line with its render, to the
+    sample;
+  - through `pw-jack`: the latency report gives PipeWire's figures, `record --connect` records,
+    and a quantum forced during a take ends it, reported;
+  - a voice recorded and heard live, at 64 frames: no xrun nor own overrun during the take, the
+    callback within its floor;
   - on the laptop, `cargo bench --bench recorder`: the syncs' stall on its storage.
 
 ### M1.6 — Plugin hosts

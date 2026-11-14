@@ -18,7 +18,9 @@ and its checks exist, the engine's time model, and a graph of nodes that plays t
 from an example program: tested on JACK2, built for PipeWire too, which the owner checks by ear. A
 command line plays a test session of audio and MIDI clips from disk through JACK, or renders it
 offline; a test shows, on JACK2, that the session played through the JACK backend equals its
-offline render to the bit. The first stage builds the audio engine and plugin
+offline render to the bit. It monitors a session's input tracks live and records the armed ones
+into WAV takes, placed by the round trip's latency, which a crash leaves whole for `magnolia
+recover` to repair. The first stage builds the audio engine and plugin
 hosting, without an interface; the interface comes at Stage 3, on
 [uwui](https://github.com/HoneySlatt/uwui), once a stable release of uwui holds what Magnolia needs.
 Magnolia is a later client of uwui, not one of the programs of its first stage.
@@ -68,8 +70,9 @@ nix develop --command pw-jack -p 64 cargo run --release -p magnolia-cli -- play 
 nix develop --command cargo run --release -p magnolia-cli -- render /tmp/magnolia-small/session.json /tmp/magnolia-small.wav
 ```
 
-`magnolia --help` gives its options; [`CONTRIBUTING.md`](CONTRIBUTING.md#playing-and-rendering-a-session)
-says more.
+`magnolia record <session.json> <folder>` plays a session and records its armed input tracks into
+the folder; `magnolia recover <folder>` repairs the takes a crash left there. `magnolia --help`
+gives the options; [`CONTRIBUTING.md`](CONTRIBUTING.md#playing-and-rendering-a-session) says more.
 
 ## License
 

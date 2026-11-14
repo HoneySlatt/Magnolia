@@ -1,7 +1,7 @@
 # 0023. The real-time allowlist
 
-- Status: Accepted; amends 0007 (what the allowlist holds, how it is suppressed); amended by 0026 and 0032
-  (the disk reader's wake)
+- Status: Accepted; amends 0007 (what the allowlist holds, how it is suppressed); amended by 0026
+  (the disk reader's wake) and 0032 (the recorder's)
 - Date: 2026-11-11
 
 ## Context

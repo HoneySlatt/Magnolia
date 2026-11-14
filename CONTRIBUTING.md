@@ -234,7 +234,23 @@ pw-jack -p 64 cargo run --release -p magnolia-cli -- play loop/session.json --se
 
 then connect `jack_delay:out` to the cable's playback port, the cable's capture port to
 `magnolia:capture_1`, and `magnolia:playback_1` to `jack_delay:in`. The two total round trips must
-be equal, to the sample. The extra loopback latency is what `record --extra-latency` takes.
+be equal, to the sample; reopen each several times, as an interface's latency may change from one
+opening to the next. The extra loopback latency is what `record --extra-latency` takes.
+
+A cable from an output to an input that a session monitors is a feedback loop: the small session's
+`mic` plays its input to the master, so with the cable it howls. To check where takes land, record
+the small session's playback through the cable with its `mic` silenced, which still records, as
+the capture tap takes the input before any gain:
+
+```sh
+sed -i '/"name": "mic"/,/"sends"/ s/"gain": 1.0/"gain": 0.0/' /tmp/magnolia-small/session.json
+cargo run --release -p magnolia-cli -- render /tmp/magnolia-small/session.json /tmp/small.wav
+pw-jack -p 64 cargo run --release -p magnolia-cli -- record /tmp/magnolia-small/session.json \
+    /tmp/magnolia-takes --connect --extra-latency <the extra loopback latency>
+```
+
+Opened in REAPER, the render at 0 and the take at its `bext` position, a drum hit starts on the same
+sample in both.
 
 ## Fuzzing
 

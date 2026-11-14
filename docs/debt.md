@@ -52,10 +52,11 @@ stage's audit triages the whole list.
   default, and the lowest tier's storage is not measured yet (the owner's list, M1.4).
 - **The player copies with one relaxed atomic load per sample**, which the compiler does not
   vectorise: cheap at 16 tracks; to measure at large track counts in M1.9.
-- **The session's memory estimate repeats the engine's compensation rule** (`magnolia-session`'s
-  `load/budget.rs` against `engine/compensation.rs`) and its rounding of streams and buffers: a
-  change to either must change both until the engine exposes its own estimate; Stage 2's project
-  replaces the test session.
+- **The session repeats the engine's compensation rule twice**: its memory estimate
+  (`load/budget.rs`, with the rounding of streams and buffers) and the monitoring latency the
+  command line reports to JACK (`load/latency.rs`), against `engine/compensation.rs`. A change to
+  either must change both until the engine exposes its own figures; at M1.6, plugins' latencies are
+  known only at run time, in the engine, and the second copy would then go wrong without a sound.
 - **`JackBackend::close` stalls on a JACK2 server started with `jackd -S`**: the `jack` crate
   invalidates its callbacks before it deactivates the client, so a cycle in between ends the
   client's thread and a synchronous server waits for it, then may refuse to deactivate it

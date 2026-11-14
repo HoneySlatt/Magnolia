@@ -264,6 +264,23 @@ Eight `fdatasync` calls at once slow one another on this btrfs and stall the wri
 The callback's figures include the capture tap and a test graph, not the reference projects. The
 lowest tier's storage is measured by the owner.
 
+### The callback while recording, on the high tier's project
+
+The closing review played the high tier's reference project, its live voice armed, for 60 s at 64
+frames on a dummy JACK2 server without real time, with `magnolia play` then `magnolia record`, and
+in the other order; release build, one run each. Without real time these are indicators, not the
+floor's figures, which the owner measures on the hardware.
+
+| Run | Median | 99.9th percentile | Longest | Own overruns | Server xruns | Load |
+|---|---|---|---|---|---|---|
+| play, first | 47.1 µs | 205 µs | 1.89 ms | 22 | 43 | 1.4 to 1.0 |
+| record, second | 51.2 µs | 344 µs | 3.95 ms | 51 | 810 | 1.0 to 3.4 |
+| record, first | 49.2 µs | 123 µs | 915 µs | 15 | 11 | 1.7 |
+| play, second | 49.2 µs | 102 µs | 357 µs | 0 | 0 | 0.6 |
+
+The capture tap shows nothing in the median. No frame was dropped; the take's longest sync took 146
+and 162 ms on btrfs, the recorder's longest pass 3.1 ms and 154 µs.
+
 ### The tests that prove it
 
 - Killed mid-take with SIGKILL after at least 200,000 frames, a take is recovered whole: every frame
