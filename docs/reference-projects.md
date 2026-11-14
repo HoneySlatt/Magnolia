@@ -89,6 +89,7 @@ repository, the same to the byte on every machine
 |---|---|---|
 | Audio tracks | 10 mono vocal takes, 2 stereo backing vocals, 4 stereo stems (drums, bass, keys, effects) | 20 mono vocal takes, 8 stereo backing vocals, 4 mono guitars, 4 stereo pianos, 3 sets of the 4 stems |
 | MIDI tracks, each into the test synth | drums, bass, chords, a lead with pitch bends, pads with controllers, an arpeggio, a counter-melody, plucks | the same 8, then percussion, stabs, a sub bass, bells, 5 string parts, 5 brass parts, a string pad and brass stabs |
+| Input tracks | none | `live voice`: mono, from capture channel 1, armed, through a gain where Auto-Tune goes, into the vocals bus |
 | Buses | vocals, drums into beat, beat, room (a gain where the reverb goes), fed by sends | vocals, backing, instruments, drums into beat, beat, score, room and hall fed by sends |
 | Files | 16 WAV files, 24-bit, 0.67 GB; 8 MIDI files | 48 WAV files, 24-bit, 2.18 GB; 24 MIDI files |
 
@@ -98,9 +99,11 @@ its double, harmonies, the bridge or ad-libs, each in some sections, resting two
 files hold silence between phrases, and their clips leave gaps between sections; the guitars play
 the verses and choruses. Stems and pianos play from the start to the end, the drums and bass
 percussive, the voices, backing vocals and pads sustained. The room and hall buses hold a gain where
-their reverb will go; the other plugins' places hold nothing yet. Rendered offline, the master
-peaks at -3.0 dBFS in the lowest tier's project and -4.3 dBFS in the high tier's. The live input of
-the high tier comes with recording (M1.5).
+their reverb will go, and the live voice one where Auto-Tune goes; the other plugins' places hold
+nothing yet. Rendered offline, the master peaks at -3.0 dBFS in the lowest tier's project and
+-4.3 dBFS in the high tier's. The live voice plays the device's capture, monitored whether the
+session plays or not: a render, which has no capture, holds none of it, and `magnolia record`
+records it through JACK ([CONTRIBUTING](../CONTRIBUTING.md#recording)).
 
 To render one offline into a WAV file of floats, with the [command
 line](ARCHITECTURE.md#the-command-line):

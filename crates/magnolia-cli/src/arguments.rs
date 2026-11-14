@@ -1,26 +1,44 @@
 //! The command line's arguments, read by hand: the command, its options, and a plain error for
 //! every misuse.
 
+use magnolia_engine::node::MAX_LATENCY;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::path::PathBuf;
 
+use magnolia_engine::record::TakeFormat;
 use magnolia_engine::time::{TIME_UNITS_PER_SECOND, TimePosition};
 
 /// The usage, printed by `--help` and after a misuse.
 pub const USAGE: &str = "\
 Usage:
   magnolia play <session.json> [--server NAME] [--connect] [--from SECONDS] [--seconds N]
+  magnolia record <session.json> <folder> [--server NAME] [--connect] [--from SECONDS]
+                  [--seconds N] [--extra-latency FRAMES] [--format float32|int24]
+  magnolia recover <folder>
   magnolia render <session.json> <out.wav> [--block FRAMES]
   magnolia --help
 
 play     Plays a test session through JACK, from --from for --seconds, or to the session's end
-         and one second of tail; stops, then prints the engine's figures.
+         and one second of tail; stops, then prints the engine's figures. A session with input
+         tracks monitors them, and prints the round trip's latency first.
   --server NAME    the JACK server to play on; the default one otherwise. Magnolia never starts
                    a server.
-  --connect        connects the playback ports to the server's first physical playback ports.
+  --connect        connects the playback ports to the server's first physical playback ports,
+                   and the capture ports to its first physical capture ports.
   --from SECONDS   where the play starts on the timeline; 0 by default.
   --seconds N      how long it plays.
+
+record   Plays a test session as play does, and records each armed input track into a take, a
+         WAV file in <folder>, an existing folder, which it recovers first. Prints the round
+         trip's latency, then the takes and the recorder's figures. Exits with 1 when a take's
+         writing failed, or a change of latency ended it. It takes play's options, and:
+  --extra-latency FRAMES  the loopback latency jack_iodelay measured beyond the server's, by
+                   which takes are placed earlier; 0 by default, 65536 at most.
+  --format F       float32, the device's samples bit for bit, by default; or int24.
+
+recover  Repairs the takes a crash left in a recording folder, and lists them. A folder that a
+         recording uses is refused.
 
 render   Renders a test session offline, from its start to its end and one second of tail, into
          a new WAV file of 32-bit floats. It never writes over a file.
@@ -43,6 +61,10 @@ pub enum Command {
     Help,
     /// Play a session through JACK.
     Play(PlayOptions),
+    /// Play a session through JACK and record its armed input tracks.
+    Record(RecordOptions),
+    /// Recover a recording folder.
+    Recover(RecoverOptions),
     /// Render a session offline into a WAV file.
     Render(RenderOptions),
 }
@@ -60,6 +82,26 @@ pub struct PlayOptions {
     pub from: TimePosition,
     /// How long it plays, in time units; `None` to the session's end and its tail.
     pub length: Option<TimePosition>,
+}
+
+/// What `magnolia record` plays and records, and where.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RecordOptions {
+    /// The session, the server and the span, as `play` takes them.
+    pub play: PlayOptions,
+    /// The recording folder.
+    pub folder: PathBuf,
+    /// The recorder's latency beyond the server's, in frames.
+    pub extra_latency: u32,
+    /// How the takes' samples are written.
+    pub format: TakeFormat,
+}
+
+/// What `magnolia recover` recovers.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RecoverOptions {
+    /// The recording folder.
+    pub folder: PathBuf,
 }
 
 /// What `magnolia render` renders, and into what.
@@ -98,6 +140,8 @@ pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Command, U
     };
     match command.to_str() {
         Some("play") => parse_play(rest).map(Command::Play),
+        Some("record") => parse_record(rest).map(Command::Record),
+        Some("recover") => parse_recover(rest).map(Command::Recover),
         Some("render") => parse_render(rest).map(Command::Render),
         Some("help") => Ok(Command::Help),
         _ => Err(UsageError(format!("unknown command {command:?}"))),
@@ -105,54 +149,157 @@ pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Command, U
 }
 
 fn parse_play(arguments: &[OsString]) -> Result<PlayOptions, UsageError> {
-    let mut session = None;
-    let mut server = None;
-    let mut connect = None;
-    let mut from = None;
-    let mut length = None;
+    let mut play = PlayArguments::default();
     let mut arguments = arguments.iter();
     while let Some(argument) = arguments.next() {
         let Some(option) = option_name(argument)? else {
-            if session.is_some() {
+            if play.session.is_some() {
                 return Err(one_too_many("play takes one session file", argument));
             }
-            session = Some(PathBuf::from(argument));
+            play.session = Some(PathBuf::from(argument));
+            continue;
+        };
+        if !play.option(option, &mut arguments)? {
+            return Err(unknown_option("play", option));
+        }
+    }
+    play.options("play needs a session file")
+}
+
+fn parse_record(arguments: &[OsString]) -> Result<RecordOptions, UsageError> {
+    let mut play = PlayArguments::default();
+    let mut folder = None;
+    let mut extra_latency = None;
+    let mut format = None;
+    let mut arguments = arguments.iter();
+    while let Some(argument) = arguments.next() {
+        let Some(option) = option_name(argument)? else {
+            if play.session.is_none() {
+                play.session = Some(PathBuf::from(argument));
+            } else if folder.is_none() {
+                folder = Some(PathBuf::from(argument));
+            } else {
+                return Err(one_too_many(
+                    "record takes a session file and a recording folder",
+                    argument,
+                ));
+            }
             continue;
         };
         match option {
+            "--extra-latency" => {
+                let text = value(&mut arguments, option)?;
+                // A converter adds tens of frames; past a node's largest latency, 1.4 s at
+                // 48 kHz, the figure is a mistake, and `record` would wait that long for a take.
+                let frames = u32::try_from(frames(option, text)?)
+                    .ok()
+                    .filter(|&frames| frames <= MAX_LATENCY)
+                    .ok_or_else(|| {
+                        UsageError(format!(
+                            "{option} takes at most {MAX_LATENCY} frames, not {text}"
+                        ))
+                    })?;
+                set_once(&mut extra_latency, option, frames)?;
+            }
+            "--format" => {
+                let take_format = match value(&mut arguments, option)? {
+                    "float32" => TakeFormat::Float32,
+                    "int24" => TakeFormat::Int24,
+                    other => {
+                        return Err(UsageError(format!(
+                            "{option} takes float32 or int24, not {other:?}"
+                        )));
+                    }
+                };
+                set_once(&mut format, option, take_format)?;
+            }
+            _ if play.option(option, &mut arguments)? => {}
+            _ => return Err(unknown_option("record", option)),
+        }
+    }
+    let needs = "record needs a session file and a recording folder";
+    let play = play.options(needs)?;
+    Ok(RecordOptions {
+        play,
+        folder: folder.ok_or_else(|| UsageError(needs.to_owned()))?,
+        extra_latency: extra_latency.unwrap_or(0),
+        format: format.unwrap_or_default(),
+    })
+}
+
+fn parse_recover(arguments: &[OsString]) -> Result<RecoverOptions, UsageError> {
+    let mut folder = None;
+    for argument in arguments {
+        if let Some(option) = option_name(argument)? {
+            return Err(unknown_option("recover", option));
+        }
+        if folder.is_some() {
+            return Err(one_too_many("recover takes one recording folder", argument));
+        }
+        folder = Some(PathBuf::from(argument));
+    }
+    Ok(RecoverOptions {
+        folder: folder.ok_or_else(|| UsageError("recover needs a recording folder".to_owned()))?,
+    })
+}
+
+/// The options `play` takes, and `record` with it, as they are read.
+#[derive(Default)]
+struct PlayArguments {
+    session: Option<PathBuf>,
+    server: Option<String>,
+    connect: Option<()>,
+    from: Option<TimePosition>,
+    length: Option<TimePosition>,
+}
+
+impl PlayArguments {
+    /// Reads `option`, and its value from `arguments`, if it is one of `play`'s; returns whether
+    /// it was.
+    fn option<'a>(
+        &mut self,
+        option: &str,
+        arguments: &mut impl Iterator<Item = &'a OsString>,
+    ) -> Result<bool, UsageError> {
+        match option {
             "--server" => {
-                let name = value(&mut arguments, option)?;
+                let name = value(arguments, option)?;
                 if name.is_empty() {
                     return Err(UsageError(
                         "--server needs a server's name, not an empty one".to_owned(),
                     ));
                 }
-                set_once(&mut server, option, name.to_owned())?;
+                set_once(&mut self.server, option, name.to_owned())?;
             }
-            "--connect" => set_once(&mut connect, option, ())?,
+            "--connect" => set_once(&mut self.connect, option, ())?,
             "--from" => {
-                let start = seconds(option, value(&mut arguments, option)?)?;
-                set_once(&mut from, option, start)?;
+                let start = seconds(option, value(arguments, option)?)?;
+                set_once(&mut self.from, option, start)?;
             }
             "--seconds" => {
-                let seconds = seconds(option, value(&mut arguments, option)?)?;
+                let seconds = seconds(option, value(arguments, option)?)?;
                 if seconds.0 == 0 {
                     return Err(UsageError(
                         "--seconds takes a number of seconds above 0".to_owned(),
                     ));
                 }
-                set_once(&mut length, option, seconds)?;
+                set_once(&mut self.length, option, seconds)?;
             }
-            _ => return Err(unknown_option("play", option)),
+            _ => return Ok(false),
         }
+        Ok(true)
     }
-    Ok(PlayOptions {
-        session: session.ok_or_else(|| UsageError("play needs a session file".to_owned()))?,
-        server,
-        connect: connect.is_some(),
-        from: from.unwrap_or(TimePosition(0)),
-        length,
-    })
+
+    /// The options read, with their defaults; `needs` says what is missing without a session.
+    fn options(self, needs: &str) -> Result<PlayOptions, UsageError> {
+        Ok(PlayOptions {
+            session: self.session.ok_or_else(|| UsageError(needs.to_owned()))?,
+            server: self.server,
+            connect: self.connect.is_some(),
+            from: self.from.unwrap_or(TimePosition(0)),
+            length: self.length,
+        })
+    }
 }
 
 fn parse_render(arguments: &[OsString]) -> Result<RenderOptions, UsageError> {
@@ -369,6 +516,65 @@ mod tests {
     }
 
     #[test]
+    fn record_takes_a_session_a_folder_and_plays_options() {
+        let Ok(Command::Record(options)) = parsed(&["record", "session.json", "takes"]) else {
+            panic!("record was not read");
+        };
+        assert_eq!(
+            options,
+            RecordOptions {
+                play: play(&["play", "session.json"]),
+                folder: PathBuf::from("takes"),
+                extra_latency: 0,
+                format: TakeFormat::Float32,
+            }
+        );
+        let Ok(Command::Record(options)) = parsed(&[
+            "record",
+            "--format",
+            "int24",
+            "session.json",
+            "--from",
+            "1.5",
+            "takes",
+            "--extra-latency",
+            "48",
+            "--connect",
+            "--server",
+            "studio",
+            "--seconds",
+            "3",
+        ]) else {
+            panic!("record was not read");
+        };
+        assert_eq!(
+            options,
+            RecordOptions {
+                play: PlayOptions {
+                    session: PathBuf::from("session.json"),
+                    server: Some("studio".to_owned()),
+                    connect: true,
+                    from: TimePosition(SECOND * 3 / 2),
+                    length: Some(TimePosition(3 * SECOND)),
+                },
+                folder: PathBuf::from("takes"),
+                extra_latency: 48,
+                format: TakeFormat::Int24,
+            }
+        );
+    }
+
+    #[test]
+    fn recover_takes_a_folder() {
+        assert_eq!(
+            parsed(&["recover", "takes"]),
+            Ok(Command::Recover(RecoverOptions {
+                folder: PathBuf::from("takes")
+            }))
+        );
+    }
+
+    #[test]
     fn render_takes_two_files_and_a_block() {
         assert_eq!(
             render(&["render", "session.json", "out.wav"]),
@@ -392,6 +598,8 @@ mod tests {
             &["help"],
             &["play", "--help"],
             &["render", "session.json", "-h"],
+            &["record", "--help"],
+            &["recover", "-h"],
             &["unknown", "--help"],
         ] {
             assert_eq!(parsed(arguments), Ok(Command::Help), "{arguments:?}");
@@ -447,7 +655,7 @@ mod tests {
 
     #[test]
     fn each_misuse_is_said_plainly() {
-        let cases: [(&[&str], &str); 19] = [
+        let cases: [(&[&str], &str); 31] = [
             (&[], "no command given"),
             (&["paly", "session.json"], "unknown command \"paly\""),
             (&["play"], "play needs a session file"),
@@ -505,6 +713,53 @@ mod tests {
             (
                 &["render", "a.json", "b.wav", "--block", "6.4"],
                 "--block takes a whole number of frames",
+            ),
+            (
+                &["record"],
+                "record needs a session file and a recording folder",
+            ),
+            (
+                &["record", "a.json"],
+                "record needs a session file and a recording folder",
+            ),
+            (
+                &["record", "a.json", "takes", "more"],
+                "record takes a session file and a recording folder; \"more\" is one too many",
+            ),
+            (
+                &["record", "a.json", "takes", "--block", "64"],
+                "record has no option \"--block\"",
+            ),
+            (
+                &["record", "a.json", "takes", "--extra-latency", "-1"],
+                "--extra-latency takes a whole number of frames, not \"-1\"",
+            ),
+            (
+                &["record", "a.json", "takes", "--extra-latency", "65537"],
+                "--extra-latency takes at most 65536 frames, not 65537",
+            ),
+            (
+                &["record", "a.json", "takes", "--format", "wav"],
+                "--format takes float32 or int24, not \"wav\"",
+            ),
+            (
+                &[
+                    "record", "a.json", "takes", "--format", "int24", "--format", "int24",
+                ],
+                "--format is given twice",
+            ),
+            (
+                &["record", "a.json", "takes", "--seconds", "0"],
+                "--seconds takes a number of seconds above 0",
+            ),
+            (&["recover"], "recover needs a recording folder"),
+            (
+                &["recover", "a", "b"],
+                "recover takes one recording folder; \"b\" is one too many",
+            ),
+            (
+                &["recover", "a", "--force"],
+                "recover has no option \"--force\"",
             ),
         ];
         for (arguments, expected) in cases {

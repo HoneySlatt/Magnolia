@@ -136,7 +136,7 @@ fn a_bad_session_is_a_plain_error() {
 #[test]
 fn a_misuse_exits_with_2_and_the_usage() {
     let not_text = OsString::from_vec(vec![b'-', 0xFF]);
-    let misuses: [Vec<OsString>; 6] = [
+    let misuses: [Vec<OsString>; 11] = [
         vec![],
         vec!["paly".into(), "session.json".into()],
         vec!["render".into(), "session.json".into()],
@@ -153,6 +153,23 @@ fn a_misuse_exits_with_2_and_the_usage() {
             "--server".into(),
             "".into(),
         ],
+        vec!["record".into(), "session.json".into()],
+        vec![
+            "record".into(),
+            "session.json".into(),
+            "takes".into(),
+            "--format".into(),
+            "mp3".into(),
+        ],
+        vec![
+            "record".into(),
+            "session.json".into(),
+            "takes".into(),
+            "--extra-latency".into(),
+            "1.5".into(),
+        ],
+        vec!["recover".into()],
+        vec!["recover".into(), "takes".into(), "--all".into()],
     ];
     for arguments in misuses {
         let ran = magnolia(&arguments);
@@ -170,6 +187,11 @@ fn help_prints_the_usage() {
         assert_eq!(ran.code, Some(0));
         assert!(ran.stdout.starts_with("Usage:"), "{}", ran.stdout);
         assert!(ran.stdout.contains("magnolia play <session.json>"));
+        assert!(
+            ran.stdout
+                .contains("magnolia record <session.json> <folder>")
+        );
+        assert!(ran.stdout.contains("magnolia recover <folder>"));
         assert!(
             ran.stdout
                 .contains("magnolia render <session.json> <out.wav>")

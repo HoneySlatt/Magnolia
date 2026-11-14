@@ -1,12 +1,16 @@
 //! `magnolia`, Magnolia's command line until the interface comes at Stage 3: it plays a test
-//! session through JACK, or renders one offline into a WAV file. `magnolia --help` gives its usage;
+//! session through JACK, records its armed input tracks as it plays, recovers a recording folder a
+//! crash left, or renders a session offline into a WAV file. `magnolia --help` gives its usage;
 //! `docs/ARCHITECTURE.md`, under *The command line*, says how it works.
 //!
 //! It exits with 0 when the command did what was asked, 2 for a misuse of the command line, with
 //! the usage, and 1 for any other failure, said plainly on standard error.
 
 mod arguments;
+mod latency;
 mod play;
+mod record;
+mod recover;
 mod render;
 
 use std::env;
@@ -33,6 +37,8 @@ fn main() -> ExitCode {
             Ok(())
         }
         Command::Play(options) => play::play(&options),
+        Command::Record(options) => record::record(&options),
+        Command::Recover(options) => recover::recover(&options),
         Command::Render(options) => render::render(&options),
     };
     match done {

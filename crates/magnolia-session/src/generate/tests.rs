@@ -5,16 +5,18 @@
 use super::audio::Synth;
 use super::song::Song;
 use super::{Content, Plan, Random, high, lowest, session_file};
-use crate::file::{self, MASTER};
+use crate::file::{self, Insert, MASTER, TrackKind};
 
-/// The audio tracks of a plan by their channels, mono then stereo, and its MIDI tracks.
-fn counts(plan: &Plan) -> (usize, usize, usize) {
-    let mut counts = (0, 0, 0);
+/// The audio tracks of a plan by their channels, mono then stereo, its MIDI tracks, and its input
+/// tracks.
+fn counts(plan: &Plan) -> (usize, usize, usize, usize) {
+    let mut counts = (0, 0, 0, 0);
     for track in &plan.tracks {
-        match &track.content {
-            Content::Audio(part) if part.channels() == 1 => counts.0 += 1,
-            Content::Audio(_) => counts.1 += 1,
-            Content::Midi(..) => counts.2 += 1,
+        match &track.file {
+            Some((_, Content::Audio(part))) if part.channels() == 1 => counts.0 += 1,
+            Some((_, Content::Audio(_))) => counts.1 += 1,
+            Some((_, Content::Midi(..))) => counts.2 += 1,
+            None => counts.3 += 1,
         }
     }
     counts
@@ -31,7 +33,7 @@ fn the_lowest_tiers_project_holds_its_tracks_and_buses() {
     // 3 minutes 30 seconds at 48 kHz.
     assert_eq!(song.sample_of(song.end()), 210 * 48_000);
     let plan = lowest(&song);
-    assert_eq!(counts(&plan), (10, 6, 8));
+    assert_eq!(counts(&plan), (10, 6, 8, 0));
     let session = parses(&plan, &song);
     let buses: Vec<&str> = session.buses.iter().map(|bus| bus.name.as_str()).collect();
     assert_eq!(buses, ["vocals", "drums", "beat", "room"]);
@@ -43,14 +45,14 @@ fn the_lowest_tiers_project_holds_its_tracks_and_buses() {
         .count();
     assert_eq!(sends_to_room, 13, "the vocals and the lead");
     // Vocal takes leave gaps between their clips.
-    assert!(session.tracks[0].clips.len() > 1);
+    assert!(session.tracks[0].clips().len() > 1);
 }
 
 #[test]
 fn the_high_tiers_project_holds_its_tracks() {
     let song = Song::reference().unwrap();
     let plan = high(&song);
-    assert_eq!(counts(&plan), (24, 24, 24));
+    assert_eq!(counts(&plan), (24, 24, 24, 1));
     let session = parses(&plan, &song);
     assert!(
         session
@@ -58,6 +60,17 @@ fn the_high_tiers_project_holds_its_tracks() {
             .iter()
             .all(|bus| bus.output == MASTER || bus.output == "beat")
     );
+    // Its live voice: mono, from capture channel 1, armed, into the vocals' bus through the gain
+    // that holds Auto-Tune's place.
+    let voice = session.tracks.last().unwrap();
+    assert_eq!(voice.name, "live voice");
+    assert_eq!(voice.kind, TrackKind::Input);
+    assert_eq!(voice.channels, Some(1));
+    assert_eq!(voice.inputs.as_deref(), Some(&[1][..]));
+    assert_eq!(voice.armed, Some(true));
+    assert_eq!(voice.inserts, [Insert::Gain { value: 1.0 }]);
+    assert_eq!(voice.output, "vocals");
+    assert!(voice.clips.is_none());
 }
 
 #[test]

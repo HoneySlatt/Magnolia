@@ -106,8 +106,9 @@ cargo run --release -p magnolia-jack --example play -- --server magnolia-try --l
 A test session is a JSON file beside the WAV and MIDI files it names
 ([ARCHITECTURE](docs/ARCHITECTURE.md#the-test-session)). The generator writes one into an empty or
 new folder, outside the repository: `lowest` and `high`, the [reference
-projects](docs/reference-projects.md) without their plugins (0.67 and 2.18 GB), or `small`, about
-8 seconds of every feature of the format (7 MB):
+projects](docs/reference-projects.md) without their plugins (0.67 and 2.18 GB), the high tier's
+with its live voice, an input track; or `small`, about 8 seconds of every feature of the format, an
+armed input track among them (7 MB):
 
 ```sh
 cargo run --release -p magnolia-session --example generate -- small /tmp/magnolia-small
@@ -144,12 +145,51 @@ cargo run --release -p magnolia-cli -- play /tmp/magnolia-small/session.json --s
 ```
 
 Its options: `--server NAME` (the default server otherwise; it never starts one), `--connect`
-(connect to the first physical playback ports; off by default), `--from SECONDS` (where the play
+(connect to the first physical playback ports, and capture ports when the session has input
+tracks; off by default), `--from SECONDS` (where the play
 starts on the timeline, 0 by default), `--seconds N` (how long it plays; by default to the
 session's end and one second of tail). The server must run at the session's rate, 48 kHz for the
-generated sessions. Once stopped, it prints whether the audio thread ran in real time, the callback
-times, the counters, the disk reader's figures and each audio track's low-water mark.
+generated sessions. A session with input tracks monitors them, the capture ports `capture_1` and on
+carrying the inputs the session numbers from 1; before it plays, it prints the round trip's
+latency: the capture and playback latencies the server reports, their sum, and the latency of
+Magnolia's monitoring path. Once stopped, it prints whether the audio thread ran in real time, the
+callback times, the counters, the disk reader's figures and each audio track's low-water mark.
 `magnolia --help` gives the usage.
+
+#### Recording
+
+`magnolia record` plays a session as `play` does and records each of its armed input tracks into a
+take, a WAV file in a recording folder, which must exist. The small session's `mic` records from
+capture port 1:
+
+```sh
+mkdir /tmp/magnolia-takes
+cargo run --release -p magnolia-cli -- record /tmp/magnolia-small/session.json /tmp/magnolia-takes \
+    --server magnolia-try --connect --from 1 --seconds 4
+```
+
+It takes `play`'s options, and `--extra-latency FRAMES`, the loopback latency `jack_iodelay`
+measures beyond the server's, by which takes are placed earlier (0 by default), and `--format
+float32|int24` (float32, the device's samples bit for bit, by default). `--connect` connects the
+playback ports, then the capture ports, to the first physical ones, before the take starts: a
+connection made during a take changes its latency, which ends it. `--extra-latency` takes at most
+65,536 frames. Before it
+plays, it recovers the folder, holds it for its own, and prints the round trip with the extra and
+what places the takes. Once the takes have ended, it prints each take (its file, track, first
+timeline sample, frames and how it ended), the recovery made at the start, the recorder's figures
+and the engine's. A take is named `<track number>-<track name>-take<n>.wav`, the tracks counted
+from 1 in the session's order. It exits with 1 when a take's writing failed or a change of latency
+ended it.
+
+A recording ended by a crash, a kill or Ctrl-C leaves its take with its sizes unknown; the next
+`record` on the folder repairs it, or:
+
+```sh
+cargo run --release -p magnolia-cli -- recover /tmp/magnolia-takes
+```
+
+which lists each take found and whether it was repaired, and refuses a folder that a recording
+uses. Delete the folder afterwards: nothing cleans it.
 
 ## Fuzzing
 

@@ -881,48 +881,57 @@ take: the processor cannot outrun the reader, so no frame is missing, and no cyc
 
 ## The test session
 
-`magnolia-session` reads, plays and generates the test session of M1.4
+`magnolia-session` reads, plays, records and generates the test session of M1.4 and M1.5
 ([ADR-0028](adr/0028-the-test-session-in-json.md)): a JSON file beside the WAV and MIDI files it
 names, which the tests and the command line read until Stage 2's project replaces it. The `file`
 module's documentation gives the format, an example and every rule; this section gives the flow.
 
 | Step | Code | Does |
 |---|---|---|
-| parse | `file::parse` | reads the format and the version first, so that a newer version is refused as such; then the whole file into `SessionFile` with serde, `deny_unknown_fields`; then every check that needs no file on disk ([below](#what-parse-checks)) |
+| parse | `file::parse` | reads the format and the version first, so that a version it does not read is refused as such; then the whole file into `SessionFile` with serde, `deny_unknown_fields`; then every check that needs no file on disk ([below](#what-parse-checks)) |
 | open | `Session::open` | reads the file, at most 64 MiB, and parses it; holds the memory the session asks for to a budget of 1 GiB, before allocating it ([below](#the-memory-budget)); reads each MIDI file once, at most 64 MiB; opens each audio file once and checks its rate, its channels and that it holds every frame of its clips; makes each MIDI track's clips one `MidiSequence`; resolves every output and send |
 | build | `Session::build` | makes the engine, the disk reader and the graph, and commits it with the tempo map ([below](#the-graph-a-session-builds)) |
 | render | `render`, `render_to_file` | plays the session offline from sample 0 into a WAV file of 32-bit floats ([below](#the-offline-render)) |
 | play | `SessionPlayer` | builds the session with the disk reader's thread and hands its processor to a backend: the JACK backend, or the device-less backend in tests |
+| record | `SessionRecorder` | builds it as `SessionPlayer` does, with a recorder that records its armed input tracks ([below](#recording-a-session)) |
 | generate | `generate::generate` | writes the reference projects without their plugins, or a small session of every feature, the same to the byte on every machine ([below](#the-generator)) |
 
 ### What parse checks
+
+The format is at version 2, which brought input tracks; this reader reads versions 1 and 2, and the
+generator writes 2. A version it does not read is refused as such, before any other field.
 
 The ranges of every value: the rate is one the time model takes, a tempo lies from 1 to 1,000
 quarter notes a minute, channels from 1 to 1,024 (the master's from 2), a latency up to 65,536
 samples, every gain finite, every clip at least a frame or a tick long, at or after the timeline's
 zero and ending within 24 hours of it at the session's rate, so that a test session lasts at most a
 day and its render with it; over it, the clip's `length` is refused. The tempo map builds. Each
-track has the fields of its kind and no other: an audio track its channels, a MIDI track its instrument; an audio
-clip its file offset and gain, a MIDI clip neither. Bus names are unique and none is `master`;
-every output and send names `master` or a bus; what feeds a bus or the master has its channels, or
-is mono into stereo; no bus feeds itself back, through any chain of buses, checked once per bus. A
-track's audio clips, placed on the sample grid, do not overlap
-([ADR-0026](adr/0026-one-stream-per-audio-track.md)). Paths are relative and stay inside the session
-file's folder: an absolute path or a `..` is refused, a `.` ignored, so that one file has one
-spelling, and is read once; a symbolic link inside the folder is followed wherever it leads. At most
-512 distinct audio files, each kept open while the session plays.
+track has the fields of its kind and no other: an audio track its channels and clips, a MIDI track
+its instrument and clips, an input track its channels, `inputs` and `armed`; an audio clip its file
+offset and gain, a MIDI clip neither. An input track's `inputs` name capture channels from 1 to
+1,024, one per channel of the track, and each capture channel feeds one channel of one input track
+at most; an input track in a file of version 1 is refused. Bus names are unique and none is
+`master`; every output and send names `master` or a bus; what feeds a bus or the master has its
+channels, or is mono into stereo; no bus feeds itself back, through any chain of buses, checked
+once per bus. A track's audio clips, placed on the sample grid, do not overlap
+([ADR-0026](adr/0026-one-stream-per-audio-track.md)). Paths are relative and stay inside the
+session file's folder: an absolute path or a `..` is refused, a `.` ignored, so that one file has
+one spelling, and is read once; a symbolic link inside the folder is followed wherever it leads. At
+most 512 distinct audio files, each kept open while the session plays.
 
 An error names the field by its path, such as `tracks[1].clips[0].start`, and says what is wrong.
 serde_json gives an error's line and column, and names an unknown or missing field, but not the
 path to it, so `file/position.rs` walks the text up to the error's position to name the field. The
 checks the loader needs again, such as resolving the routing or placing a clip, are the same
 functions, so that one rule has one copy. The fuzz target `session_file` feeds the parser text, raw
-or built like a session with arbitrary values, and checks that a session that parses names no file
-outside its folder and writes back to text that parses. The fuzz target `session_open` feeds
-`Session::open` text, raw or a session that opens changed in a few places, beside small WAV and
-MIDI files it writes at its start, so that most inputs reach the memory estimate, the MIDI files'
-clips and the sequences; it checks that a session that opens fits its budget and lasts at most a
-day.
+or built like a session with arbitrary values, input tracks among its tracks, and checks that a
+session that parses names no file outside its folder, names each capture channel once at most, in
+input tracks of version 2 alone, and writes back to text that parses. The fuzz target
+`session_open` feeds `Session::open` text, raw or a session that opens changed in a few places, its
+input tracks' capture channels among them, beside small WAV and MIDI files it writes at its start,
+so that most inputs reach the memory estimate, the MIDI files' clips and the sequences; it checks
+that a session that opens fits its budget, lasts at most a day, and gives each armed track capture
+channels the engine has.
 
 ### The memory budget
 
@@ -936,38 +945,53 @@ what takes the memory (`load/budget.rs`):
   blocks of 4,096 and two blocks more, as the disk reader rounds, times 4 bytes;
 - each test latency's history, and each delay line's that the engine will add: channels times
   samples of delay, times 4 bytes. The delay lines are worked out by the engine's rule
-  ([above](#delay-compensation)) on the graph a session builds: a track's gain runs as far ahead as
-  the most demanding of its output and its sends, and every other one gets a delay line;
+  ([above](#delay-compensation)) on the graph a session builds (`load/latency.rs`): a track's gain
+  runs as far ahead as the most demanding of its output and its sends, and every other one gets a
+  delay line; an input track is live, so nothing out of it gets one;
 - the engine's buffers: a largest block of 1,024 frames for each input and output of every node and
-  each playback channel, times 4 bytes;
+  each capture and playback channel, times 4 bytes;
+- each armed input track's recording rings: a recorder's default ring, 4 seconds, times its
+  channels, times 4 bytes, and its ring of marks;
 - each MIDI file, read and parsed once, at 16 bytes an event, and the events each clip expands it to,
   at 128 bytes an event, above the 78 measured at the peak of 400 clips of a file of 40,000 events.
 
-The first three come from the file alone, and are checked first. Then the MIDI files are read, each
+The first four come from the file alone, and are checked first. Then the MIDI files are read, each
 once, the budget checked after each; then the clips' events are counted and checked, before any
 clip expands. `Session::memory_estimate` gives the estimate of a session that opened. The high
-tier's reference project asks for 142 MiB, the lowest tier's 44 MiB.
+tier's reference project asks for 143 MiB, the lowest tier's 44 MiB.
 
 ### The graph a session builds
 
 ```text
 audio track:  player    ─┐
-MIDI track:   test synth ┴─> inserts, in series ─> gain ─┬─> its output's input
-                                                         └─> one gain per send ─> the send's input
+MIDI track:   test synth ┼─> inserts, in series ─> gain ─┬─> its output's input
+input track:  capture   ─┘                               └─> one gain per send ─> the send's input
 bus:          its input sums ─> inserts, in series ─> gain ─> its output's input
 master:       its input sums ─> inserts, in series ─> the playback channels
 ```
 
-The engine has the session's rate, the master's channels as playback channels, no capture, and a
-largest block of 1,024. A strip's input is its first insert, else its gain; the master without
-inserts sums straight into the playback channels. Sends leave after the track's gain. A mono source
-feeds both channels of a stereo input. The disk reader reads 10 seconds ahead, one stream per audio
-track; its players come in the audio tracks' order, and are paired with them by that order. Inserts
-are the engine's test nodes, `TestLatency` and `Gain`, until plugins come (M1.6); the engine
-compensates their latencies ([above](#delay-compensation)). `tests/session.rs` renders impulses
-through each kind of path: a send after its track's gain, compensated onto its output's sample; a
-bus into a bus; mono into stereo; a clip that starts between two samples; a note of a MIDI file of
-1,000 ticks a quarter; and a compensation longer than the read-ahead.
+The engine has the session's rate, the master's channels as playback channels, as many capture
+channels as the highest that an input track names (`Session::capture_channels`, none without input
+tracks), and a largest block of 1,024. A strip's input is its first insert, else its gain; the
+master without inserts sums straight into the playback channels. Sends leave after the track's
+gain. A mono source feeds both channels of a stereo input. The disk reader reads 10 seconds ahead,
+one stream per audio track; its players come in the audio tracks' order, and are paired with them
+by that order. Inserts are the engine's test nodes, `TestLatency` and `Gain`, until plugins come
+(M1.6); the engine compensates their latencies ([above](#delay-compensation)). `tests/session.rs`
+renders impulses through each kind of path: a send after its track's gain, compensated onto its
+output's sample; a bus into a bus; mono into stereo; a clip that starts between two samples; a note
+of a MIDI file of 1,000 ticks a quarter; and a compensation longer than the read-ahead.
+
+An input track plays its capture channels, numbered from 1 in the file and from 0 in the engine,
+one per channel of the track: monitoring is always on, whether the transport plays or not. Its path
+is live, so the engine never delays it to line it up with others: a capture frame reaches the
+playback channels late by the test latencies along its path alone, its inserts', each bus's it
+goes through and the master's. `Session::monitoring_latency` gives the slowest such path over every
+input track's output and sends, which the command line hands the JACK backend as its monitoring
+latency ([ADR-0031](adr/0031-the-round-trip-reported-and-takes-placed-by-it.md)).
+`tests/session.rs` feeds an input through the device-less backend and hears it late by its insert's
+latency and no more, while a latent audio track pre-rolls every play, and through its send into a
+latent bus later by that bus's latency, without a delay line.
 
 A MIDI clip plays its whole file from its start: every track of the file merged, at one tick in the
 order of the tracks then of the file; each tick scaled from the file's division to the time model's
@@ -984,18 +1008,20 @@ ignored: the session's tempo map rules.
 `render(session, block_frames, writer)` builds the session with a disk reader without a thread,
 locates it at sample 0, primes it and plays the cue. It processes blocks of `block_frames`, from 1
 to half the read-ahead (240,000 frames at 48 kHz), the reader filled before each, so it never
-underruns. It writes from the engine sample where the output reaches timeline sample 0, which the
-largest compensation delays (`PlayStart::audible_at`), up to the session's last clip's end and one
-second of tail, every playback channel, in 32-bit floats. Its report gives the frames written, the
-underruns and the largest compensation. `render_to_file` renders into a new file so that it appears
-whole or not at all: into `.<name>.partial` beside it, synced to disk, then renamed; a render that
-fails removes its partial file, and a file in the way is never written over.
+underruns. It gives the engine no capture: input tracks play silence. It writes from the engine
+sample where the output reaches timeline sample 0, which the largest compensation delays
+(`PlayStart::audible_at`), up to the session's last clip's end and one second of tail, every
+playback channel, in 32-bit floats. Its report gives the frames written, the underruns and the
+largest compensation. `render_to_file` renders into a new file so that it appears whole or not at
+all: into `.<name>.partial` beside it, synced to disk, then renamed; a render that fails removes its
+partial file, and a file in the way is never written over.
 
 The render is the same to the bit whatever its blocks, and a play from sample 0 through a
 `SessionPlayer`, in periods of any length, plays the same bits from where its output reaches that
 sample: `tests/session.rs` renders the small session in blocks of 4,096, 64 and 1,000 and plays it
-in random periods of 1 to 5,000 frames, waiting for the disk reader between periods. Its sends into
-a latent bus put two delay lines in its graph, which the test counts, so that the null passes them.
+in random periods of 1 to 5,000 frames, its capture silent, waiting for the disk reader between
+periods. Its sends into a latent bus put two delay lines in its graph, which the test counts, so
+that the null passes them; its input track sends there too, and adds none.
 
 `SessionPlayer::start(from, timeout)` stops any play under way, locates the reader, waits until it
 has primed the cue, then plays it, the order the disk reader documents
@@ -1005,13 +1031,38 @@ play rolls, the backend must be playing for the wait to end. `stop` stops;
 `report` gives the engine's and the reader's statistics and each audio track's low-water mark, which
 stays empty while its stream holds the track to its end, as for a track shorter than the read-ahead.
 
+### Recording a session
+
+`SessionRecorder::new(session, settings)` builds the session as `SessionPlayer::new` does, with a
+recorder ([above](#recording)) in `RecordSettings::folder`, which must exist, its extra latency and
+its take format given. Once the engine is made and before any node is, it starts the recorder,
+which takes the folder's lock, holds it until it is dropped, and recovers what a crash left there,
+then arms each of `Session::armed_tracks` with a tap: the track's number, from 1 in the session's
+order of tracks, every kind together; its name; its capture channels from its `inputs`. The arming
+goes out in the graph's own commit, so the first play records. The recorder's ring has its default
+length, which the memory budget counts.
+
+It holds the player and the recorder side by side, as public fields: the player starts and stops
+plays as `SessionPlayer` does, and the recorder lists each take once its file is complete
+(`Recorder::takes`). A take of a play from timeline sample `from` starts with the frame captured a
+round trip after the output played `from`, and lasts to the play's stop. It is dropped once the
+backend has let its processor go and the takes have ended: the recorder then removes the file it
+made ahead of each track's next take, and releases the folder's lock.
+
+`tests/session.rs` records the small session's input through the device-less backend, its capture
+a ramp of distinct values, from one second in with an extra latency of 37 frames: the take's
+frames are the frames captured from 37 after the output played the cue, bit for bit, its `bext`
+time reference the cue, its length the span to the stop.
+
 ### The generator
 
 `cargo run --release -p magnolia-session --example generate -- <kind> <folder>` writes
 `session.json`, `audio/*.wav` in 24 bits and `midi/*.mid` into an empty or new folder, and refuses
 any other. The kinds: `lowest` and `high`, the [reference projects](reference-projects.md) without
-their plugins and without the high tier's live input; `small`, about 8 seconds that hold every
-feature of the file, for tests and CI.
+their plugins, the high tier's with its live voice, an armed mono input track from capture channel
+1 into the vocals' bus through a gain where Auto-Tune goes; `small`, about 8 seconds that hold every
+feature of the file, an armed mono input track `mic` among them, through a test latency of 32
+samples into the vocals' bus and sent to the latent room bus, for tests and CI.
 
 Every file is the same to the byte on every machine. Each draws its numbers from a SplitMix64
 generator of its own, seeded from one fixed seed mixed with the file's name; a part's musical line
@@ -1021,18 +1072,20 @@ the sine from a table computed by its Taylor series, the equal temperament from 
 two found by bisection, decays by one multiplication a sample; never `sin`, `exp` or `powf`, whose
 precision differs between C libraries. The JSON is serde_json's, the MIDI files the module's own
 writer's: format 1, a first track of the song's tempo and meters, which Magnolia ignores and REAPER
-reads, then the part. `tests/session.rs` generates the small session twice and compares the bytes,
-and pins a digest of its files, which a machine that computes otherwise fails; the test says what
-to do when the generator changes on purpose.
+reads, then the part. An input track has no file. `tests/session.rs` generates the small session
+twice and compares the bytes, and pins a digest of its files, which a machine that computes
+otherwise fails; the test says what to do when the generator changes on purpose.
 
 The test session's limits: the format holds no comments; buses have no sends; the only instrument
 is the test synth; only mono feeds a wider strip, and only a stereo one; a MIDI clip has no offset
-into its file.
+into its file; an input track always monitors, and an armed one records whenever a recorder plays
+the session.
 
 ## The command line
 
-`magnolia`, the binary of `magnolia-cli`, plays a test session through the JACK backend and renders
-one offline; `magnolia --help` gives its usage, and
+`magnolia`, the binary of `magnolia-cli`, plays a test session through the JACK backend, records
+its armed input tracks as it plays, recovers a recording folder, and renders a session offline;
+`magnolia --help` gives its usage, and
 [CONTRIBUTING](../CONTRIBUTING.md#playing-and-rendering-a-session) its commands. It reads its
 arguments by hand (`arguments.rs`). A misuse exits with 2 and the usage, any other failure with 1;
 each is one plain sentence on standard error, and bad arguments or a bad session never panic.
@@ -1050,24 +1103,71 @@ It prints the frames, the time taken and the memory the session asks for, estima
    last sample and one second of tail, as the render;
 2. builds a `SessionPlayer` and opens the JACK backend on its processor, on the named server or the
    default one; a server at another rate than the session's is an error;
-3. starts the play ([`SessionPlayer::start`](#the-offline-render), the disk reader given 30 s to
+3. with `--connect`, connects the playback ports to the server's first physical playback ports,
+   which waits for their latency;
+4. for a session with input tracks, sets the backend's monitoring latency to
+   [`Session::monitoring_latency`](#the-graph-a-session-builds), which waits until the server has
+   recomputed the latencies, and prints the **latency report** (`latency.rs`,
+   [ADR-0031](adr/0031-the-round-trip-reported-and-takes-placed-by-it.md)): the device's capture and
+   playback latencies, their sum, and the monitoring path's latency, each in frames and
+   milliseconds;
+5. starts the play ([`SessionPlayer::start`](#the-offline-render), the disk reader given 30 s to
    prime), then waits until the output has played the span, counted from the play's first audible
    sample on the engine's own clock (`EngineStats::play_start` and `block_start`), not the wall
    clock;
-4. stops, and waits for the stop to play out: the pre-roll's length, the fade and the test synth's
+6. stops, and waits for the stop to play out: the pre-roll's length, the fade and the test synth's
    release, 5 ms each, and 100 ms of margin;
-5. asks the kernel whether the audio thread runs in real time, while it still runs, closes the
+7. asks the kernel whether the audio thread runs in real time, while it still runs, closes the
    client, and prints that report, the player's `PlayReport` and the gaps in the server's frame
    time.
 
-Between two looks at the engine, the main thread sleeps for what is left to play, at least a period
-and at most a second. It gives up when the server shuts the client down, when the backend's
+A latency the server did not report in time is a warning, not a failure: the ports play all the
+same. Between two looks at the engine, the main thread sleeps for what is left to play, at least a
+period and at most a second. It gives up when the server shuts the client down, when the backend's
 callback panics, or when no period has run for 2 s. A play during which the engine or the
 backend's callback panicked prints its figures, then exits with 1.
 
+`magnolia record <session.json> <folder> [--server NAME] [--connect] [--from SECONDS] [--seconds N]
+[--extra-latency FRAMES] [--format float32|int24]` (`record.rs`) plays as `play` does, through a
+[`SessionRecorder`](#recording-a-session):
+
+1. opens the session, and refuses one without an armed input track before it touches the folder;
+2. starts the recorder on the folder, which must exist: it recovers the folder and holds its lock,
+   so a folder another recorder or a recovery holds is a plain error; `--extra-latency` is the
+   recorder's extra latency, 0 by default, `--format` its takes' samples, 32-bit floats by default;
+3. opens the backend, connects it with `--connect`, sets the monitoring latency and prints the
+   latency report as `play` does, with the extra latency, and what places the takes: the capture
+   and playback latencies and the extra;
+4. plays, stops and waits for the stop as `play` does, then, on the engine's clock, for the round
+   trip after it, which the takes' last frames need, then for the recorder to end each armed
+   track's take of the play, 10 s at most;
+5. closes the client, and prints each take (its file, track, first timeline sample, frames, padded
+   frames, the round trip that placed it and how it ended), the recovery made at the start, the
+   recorder's figures, its rings at their fullest, the capture's overruns and missed takes, and the
+   engine's figures as `play` prints them.
+
+It exits with 1, after printing, when a take's writing failed, when a change of the device's
+latency ended a take, or when the capture tap panicked. Dropping the recorder at the end removes the
+file it made ahead of each track's next take, so the folder holds the finished takes alone.
+
+`magnolia recover <folder>` (`recover.rs`) runs [`record::recover`](#recording) on the folder, and
+lists, each list in the order of the files' names, the takes it found, whether each was repaired or
+whole already, the files it removed, those it left untouched and those it failed to repair; a
+folder that a recorder holds is a plain error, and a take it failed to repair makes it exit with 1.
+
+`tests/cli/` runs the commands on a JACK2 server of the test's own, as the backend's tests do
+([above](#its-tests)): `record` leaves one finished take placed at `--from`, as long as the span
+played, and prints the dummy driver's latencies; a second `record`, and a `recover`, on a folder a
+first `record` holds fail plainly, and once that first one is killed mid-take, `recover` repairs
+its take; `recover` repairs a take cut by hand, its sizes unknown and half a frame at its end, and
+leaves another program's WAV file untouched.
+
 Its limits: the disk reader reads the session's fixed 10 seconds ahead, as `SessionPlayer` takes no
-read-ahead; Ctrl-C ends the process at once, without the stop's fade or the figures; the play
-starts once, with no locate or loop while it rolls.
+read-ahead; Ctrl-C ends the process at once, without the stop's fade or the figures, and leaves a
+take under way as a crash leaves it, which the next `record` or `recover` on the folder repairs; the
+play starts once, with no locate or loop while it rolls; `--connect` connects the playback ports,
+then the capture ports, before the play starts: a connection made during a take changes the capture
+latency, which ends the take.
 
 ## Checking the real-time path
 

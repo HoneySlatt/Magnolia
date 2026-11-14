@@ -1,5 +1,6 @@
 //! Building a session into an engine: [`Session::build`] makes the engine, the disk reader and the
-//! graph of nodes that plays the session.
+//! graph of nodes that plays the session; built to record, it also starts a recorder and arms the
+//! armed input tracks, in the same commit.
 
 // A session comes from a file from outside; building it must never crash Magnolia, so nothing here
 // may panic.
@@ -17,10 +18,12 @@ use std::sync::Arc;
 
 use magnolia_engine::disk::{AudioTrack, DiskConfig, DiskError, DiskReader};
 use magnolia_engine::engine::{
-    self, Controller, Destination, EngineConfig, EngineError, GraphError, NodeId, Processor, Source,
+    self, ArmError, Controller, Destination, EngineConfig, EngineError, GraphError, NodeId,
+    Processor, Source,
 };
 use magnolia_engine::node::Node;
 use magnolia_engine::nodes::{Gain, TestLatency, TestSynth};
+use magnolia_engine::record::{RecordConfig, RecordError, Recorder};
 use magnolia_engine::time::SamplePosition;
 
 use crate::file::{Insert, Instrument, Strip, Target};
@@ -55,18 +58,23 @@ pub struct BuiltSession {
 impl Session {
     /// Makes an engine that plays the session, its graph committed:
     ///
-    /// - the engine at the session's rate, its playback channels the master's, without capture,
-    ///   its largest block [`LARGEST_BLOCK`];
+    /// - the engine at the session's rate, its playback channels the master's, its capture channels
+    ///   as many as the highest that an input track names ([`Session::capture_channels`]), its
+    ///   largest block [`LARGEST_BLOCK`];
     /// - the disk reader of its audio tracks, reading 10 seconds ahead, on its thread or not;
-    /// - for each audio track its player, for each MIDI track its instrument playing its sequence;
-    ///   then the track's inserts in series, its gain, into its output's input, and from after its
-    ///   gain one gain per send into the send's destination's input;
+    /// - for each audio track its player, for each MIDI track its instrument playing its sequence,
+    ///   for each input track its capture channels, one per channel; then the track's inserts in
+    ///   series, its gain, into its output's input, and from after its gain one gain per send into
+    ///   the send's destination's input;
     /// - for each bus, its inserts in series and its gain, into its output's input;
     /// - for the master, its inserts in series into the playback channels.
     ///
     /// What feeds a bus or the master feeds its input: its first insert, else its gain, or for the
     /// master the playback channels. A mono source feeds every channel of a stereo destination.
-    /// It may be called again: each engine reads the same open files.
+    /// An input track's path is live: it sounds whether the transport plays or not, and the engine
+    /// never delays it to line it up with others. Without a device's capture, as offline, its
+    /// capture channels are silent. It may be called again: each engine reads the same open
+    /// files.
     ///
     /// # Errors
     ///
@@ -74,13 +82,43 @@ impl Session {
     /// asks; after the checks of [`Session::open`], only a thread that does not start, or a
     /// session of more nodes than the engine's arena holds.
     pub fn build(&self, mode: ReaderMode) -> Result<BuiltSession, BuildError> {
+        self.build_then(mode, |_| Ok(())).map(|(built, ())| built)
+    }
+
+    /// Builds the session as [`build`](Self::build) does, with a recorder made by `config`:
+    /// started on the engine before its graph is made, it takes its folder's lock and recovers the
+    /// folder; each of [`armed_tracks`](Self::armed_tracks) is armed with a tap of it, so that the
+    /// graph's commit carries them and the first play records.
+    pub(crate) fn build_recording(
+        &self,
+        mode: ReaderMode,
+        config: RecordConfig,
+    ) -> Result<(BuiltSession, Recorder), BuildError> {
+        self.build_then(mode, |controller| {
+            let mut recorder = Recorder::start(config, controller.stats())?;
+            for track in self.armed_tracks() {
+                let tap = recorder.tap(track)?;
+                controller.arm(tap)?;
+            }
+            Ok(recorder)
+        })
+    }
+
+    /// Builds the session, `before_the_graph` given the controller once the engine is made and
+    /// before any node is: its edits go out with the graph's commit.
+    fn build_then<T>(
+        &self,
+        mode: ReaderMode,
+        before_the_graph: impl FnOnce(&mut Controller) -> Result<T, BuildError>,
+    ) -> Result<(BuiltSession, T), BuildError> {
         let config = EngineConfig::new(
             self.rate,
             LARGEST_BLOCK,
-            0,
+            usize::from(self.capture_channels),
             usize::from(self.master_channels),
         );
         let (mut controller, processor) = engine::new(config)?;
+        let made = before_the_graph(&mut controller)?;
         // The audio tracks in the session's order, with their strips: the reader makes one player
         // for each, in that order, so that zipping the players with the strips pairs them.
         let (audio_tracks, audio_strips): (Vec<AudioTrack>, Vec<&Strip>) = self
@@ -89,7 +127,7 @@ impl Session {
             .zip(&self.routing.tracks)
             .filter_map(|(track, strip)| match &track.source {
                 LoadedSource::Audio(audio) => Some((audio.clone(), strip)),
-                LoadedSource::Midi { .. } => None,
+                LoadedSource::Midi { .. } | LoadedSource::Input { .. } => None,
             })
             .unzip();
         let disk = DiskConfig::new(self.rate);
@@ -119,7 +157,7 @@ impl Session {
         }
         for (player, strip) in players.into_iter().zip(audio_strips) {
             let source = graph.add(player)?;
-            graph.track(source, strip, &inputs)?;
+            graph.track(Feed::Node(source), strip, &inputs)?;
         }
         for (track, strip) in self.tracks.iter().zip(&self.routing.tracks) {
             let LoadedSource::Midi {
@@ -135,16 +173,22 @@ impl Session {
             graph
                 .controller
                 .set_sequences(source, vec![Arc::clone(sequence)])?;
-            graph.track(source, strip, &inputs)?;
+            graph.track(Feed::Node(source), strip, &inputs)?;
+        }
+        for (track, strip) in self.tracks.iter().zip(&self.routing.tracks) {
+            if let LoadedSource::Input { capture, .. } = &track.source {
+                graph.track(Feed::Capture(capture), strip, &inputs)?;
+            }
         }
         controller.set_tempo_map(self.tempo_map.clone());
         controller.commit()?;
-        Ok(BuiltSession {
+        let built = BuiltSession {
             controller,
             processor,
             reader,
             last_sample: self.last_sample,
-        })
+        };
+        Ok((built, made))
     }
 }
 
@@ -155,6 +199,15 @@ enum Input {
     Node(NodeId, u16),
     /// The playback channels.
     Playback(u16),
+}
+
+/// What feeds a track's chain.
+#[derive(Clone, Copy, Debug)]
+enum Feed<'a> {
+    /// Its source's outputs: an audio track's player, a MIDI track's instrument.
+    Node(NodeId),
+    /// An input track's capture channels, one per channel of the track.
+    Capture(&'a [usize]),
 }
 
 /// A chain of nodes: the first, which takes what feeds the strip, and the last, its gain.
@@ -194,15 +247,25 @@ impl Graph<'_> {
         self.controller.add_node(Box::new(node))
     }
 
-    /// A track's chain after its `source`, into its output's input, and from after its gain one
-    /// gain per send into the send's input.
-    fn track(&mut self, source: NodeId, strip: &Strip, inputs: &Inputs) -> Result<(), BuildError> {
+    /// A track's chain after what `feeds` it, into its output's input, and from after its gain
+    /// one gain per send into the send's input.
+    fn track(&mut self, feeds: Feed<'_>, strip: &Strip, inputs: &Inputs) -> Result<(), BuildError> {
         let chain = self.chain(strip)?;
-        self.feed(
-            source,
-            strip.channels,
-            Input::Node(chain.input, strip.channels),
-        );
+        match feeds {
+            Feed::Node(source) => self.feed(
+                source,
+                strip.channels,
+                Input::Node(chain.input, strip.channels),
+            ),
+            Feed::Capture(capture) => {
+                for (channel, &captured) in capture.iter().enumerate() {
+                    self.controller.connect(
+                        Source::Capture(captured),
+                        Destination::Node(chain.input, channel),
+                    );
+                }
+            }
+        }
         self.feed(chain.output, strip.channels, inputs.of(strip.output)?);
         for &(to, gain) in &strip.sends {
             let send = self.add(Gain::new(usize::from(strip.channels), gain))?;
@@ -298,6 +361,24 @@ pub enum BuildError {
     /// An output or a send names a bus, by its index, that the session does not hold: a fault of
     /// the loader, which resolves names to the session's own buses.
     UnknownBus(usize),
+    /// The recorder could not start, or make an armed track's tap: its folder is held by another
+    /// recorder, cannot be used, or a take's file cannot be made.
+    Record(RecordError),
+    /// The engine refused to arm a track: a fault of the loader, which gives each armed track
+    /// capture channels the engine has, once.
+    Arm(ArmError),
+}
+
+impl From<RecordError> for BuildError {
+    fn from(error: RecordError) -> Self {
+        Self::Record(error)
+    }
+}
+
+impl From<ArmError> for BuildError {
+    fn from(error: ArmError) -> Self {
+        Self::Arm(error)
+    }
 }
 
 impl From<EngineError> for BuildError {
@@ -328,6 +409,8 @@ impl fmt::Display for BuildError {
                 formatter,
                 "the session's routing names bus {index}, which the session does not hold"
             ),
+            Self::Record(error) => write!(formatter, "the recorder could not start: {error}"),
+            Self::Arm(error) => write!(formatter, "a track could not be armed: {error}"),
         }
     }
 }
@@ -338,6 +421,8 @@ impl Error for BuildError {
             Self::Engine(error) => Some(error),
             Self::Disk(error) => Some(error),
             Self::Graph(error) => Some(error),
+            Self::Record(error) => Some(error),
+            Self::Arm(error) => Some(error),
             Self::UnknownBus(_) => None,
         }
     }

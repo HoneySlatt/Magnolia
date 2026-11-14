@@ -12,8 +12,8 @@ use magnolia_engine::time::{
 };
 
 use super::{
-    Bus, Clip, FileError, Insert, Instrument, MASTER, MAX_AUDIO_FILES, MAX_CHANNELS, Problem,
-    SessionFile, TempoSection, Track, TrackKind, TrackSend,
+    Bus, Clip, FileError, INPUT_TRACKS_SINCE, Insert, Instrument, MASTER, MAX_AUDIO_FILES,
+    MAX_CHANNELS, Problem, SessionFile, TempoSection, Track, TrackKind, TrackSend,
 };
 
 /// The channels of a MIDI track's instrument: the test synth's two outputs.
@@ -64,6 +64,8 @@ pub(crate) enum TrackSource {
     Audio { channels: u16 },
     /// Clips of MIDI files, into this instrument.
     Midi(Instrument),
+    /// The capture channels its `inputs` name, one per channel, live; recorded when armed.
+    Input { channels: u16, armed: bool },
 }
 
 /// An audio clip placed on the sample grid.
@@ -92,8 +94,11 @@ impl SessionFile {
     pub(super) fn check(&self) -> Result<(), FileError> {
         let rate = self.rate()?;
         let tempo_map = self.tempo.map()?;
+        self.check_kinds_in_version()?;
         self.routing()?;
         let mut audio_files = BTreeSet::new();
+        // Each capture channel an input track names, by the field that names it first.
+        let mut capture_channels = HashMap::new();
         for (index, track) in self.tracks.iter().enumerate() {
             let field = format!("tracks[{index}]");
             match track.source(&field)? {
@@ -101,9 +106,45 @@ impl SessionFile {
                     check_audio_clips(&field, track, rate, &mut audio_files)?;
                 }
                 TrackSource::Midi(_) => check_midi_clips(&field, track, rate, &tempo_map)?,
+                TrackSource::Input { .. } => {
+                    check_capture_channels_free(&field, track, &mut capture_channels)?;
+                }
             }
         }
         Ok(())
+    }
+
+    /// Refuses a kind of track that the file's version does not have: an input track in version 1.
+    fn check_kinds_in_version(&self) -> Result<(), FileError> {
+        if self.version >= INPUT_TRACKS_SINCE {
+            return Ok(());
+        }
+        match self
+            .tracks
+            .iter()
+            .position(|track| track.kind == TrackKind::Input)
+        {
+            Some(index) => Err(FileError::new(
+                format!("tracks[{index}].kind"),
+                Problem::NotInVersion {
+                    version: self.version,
+                    since: INPUT_TRACKS_SINCE,
+                },
+            )),
+            None => Ok(()),
+        }
+    }
+
+    /// The capture channels the engine needs: the highest that an input track names, 0 without
+    /// input tracks. Each is checked first, by [`parse`](super::parse).
+    pub(crate) fn capture_channels(&self) -> u16 {
+        self.tracks
+            .iter()
+            .filter(|track| track.kind == TrackKind::Input)
+            .flat_map(|track| track.inputs.iter().flatten())
+            .copied()
+            .max()
+            .unwrap_or(0)
     }
 
     /// The session's sample rate.
@@ -142,7 +183,7 @@ impl SessionFile {
         for (index, track) in self.tracks.iter().enumerate() {
             let field = format!("tracks[{index}]");
             let channels = match track.source(&field)? {
-                TrackSource::Audio { channels } => channels,
+                TrackSource::Audio { channels } | TrackSource::Input { channels, .. } => channels,
                 TrackSource::Midi(_) => INSTRUMENT_CHANNELS,
             };
             let chain = Chain {
@@ -216,32 +257,128 @@ impl TempoSection {
 }
 
 impl Track {
-    /// What the track plays, the fields of its kind checked; `field` is its path.
+    /// What the track plays, the fields of its kind checked; `field` is its path. An input track's
+    /// capture channels are checked here; that no two input tracks share one, by `parse`.
     pub(crate) fn source(&self, field: &str) -> Result<TrackSource, FileError> {
         match self.kind {
             TrackKind::Audio => {
                 const KIND: &str = "an audio track";
+                self.refuse_live_fields(field, KIND)?;
                 if self.instrument.is_some() {
                     return Err(not_for_kind(format!("{field}.instrument"), KIND));
                 }
-                let channels_field = format!("{field}.channels");
-                let channels = self
-                    .channels
-                    .ok_or_else(|| missing_for_kind(channels_field.clone(), KIND))?;
-                check_channels(&channels_field, channels, CHANNELS)?;
+                self.require_clips(field, KIND)?;
+                let channels = self.channels(field, KIND)?;
                 Ok(TrackSource::Audio { channels })
             }
             TrackKind::Midi => {
                 const KIND: &str = "a MIDI track";
+                self.refuse_live_fields(field, KIND)?;
                 if self.channels.is_some() {
                     return Err(not_for_kind(format!("{field}.channels"), KIND));
                 }
+                self.require_clips(field, KIND)?;
                 self.instrument
                     .map(TrackSource::Midi)
                     .ok_or_else(|| missing_for_kind(format!("{field}.instrument"), KIND))
             }
+            TrackKind::Input => {
+                const KIND: &str = "an input track";
+                if self.instrument.is_some() {
+                    return Err(not_for_kind(format!("{field}.instrument"), KIND));
+                }
+                if self.clips.is_some() {
+                    return Err(not_for_kind(format!("{field}.clips"), KIND));
+                }
+                let channels = self.channels(field, KIND)?;
+                let inputs = self
+                    .inputs
+                    .as_deref()
+                    .ok_or_else(|| missing_for_kind(format!("{field}.inputs"), KIND))?;
+                check_inputs(&format!("{field}.inputs"), inputs, channels)?;
+                let armed = self
+                    .armed
+                    .ok_or_else(|| missing_for_kind(format!("{field}.armed"), KIND))?;
+                Ok(TrackSource::Input { channels, armed })
+            }
         }
     }
+
+    /// Its channels, which a track of `kind` needs, checked; `field` is its path.
+    fn channels(&self, field: &str, kind: &'static str) -> Result<u16, FileError> {
+        let channels_field = format!("{field}.channels");
+        let channels = self
+            .channels
+            .ok_or_else(|| missing_for_kind(channels_field.clone(), kind))?;
+        check_channels(&channels_field, channels, CHANNELS)?;
+        Ok(channels)
+    }
+
+    /// Refuses an input track's fields on a track of another `kind`.
+    fn refuse_live_fields(&self, field: &str, kind: &'static str) -> Result<(), FileError> {
+        if self.inputs.is_some() {
+            return Err(not_for_kind(format!("{field}.inputs"), kind));
+        }
+        if self.armed.is_some() {
+            return Err(not_for_kind(format!("{field}.armed"), kind));
+        }
+        Ok(())
+    }
+
+    /// Refuses a track of `kind` that gives no clips: an empty list says it has none.
+    fn require_clips(&self, field: &str, kind: &'static str) -> Result<(), FileError> {
+        match self.clips {
+            Some(_) => Ok(()),
+            None => Err(missing_for_kind(format!("{field}.clips"), kind)),
+        }
+    }
+}
+
+/// Checks an input track's capture channels, given at `field`: each from 1 to [`MAX_CHANNELS`],
+/// one per channel of the track.
+fn check_inputs(field: &str, inputs: &[u16], channels: u16) -> Result<(), FileError> {
+    for (index, &input) in inputs.iter().enumerate() {
+        if !(1..=MAX_CHANNELS).contains(&input) {
+            return Err(out_of_range(
+                format!("{field}[{index}]"),
+                input,
+                "a capture channel from 1 to 1,024",
+            ));
+        }
+    }
+    if inputs.len() != usize::from(channels) {
+        return Err(FileError::new(
+            field,
+            Problem::InputCount {
+                inputs: inputs.len(),
+                channels,
+            },
+        ));
+    }
+    Ok(())
+}
+
+/// Refuses an input track, at `field`, that names a capture channel an earlier input names, in
+/// this track or another: `taken` holds each channel named so far, by the field that names it.
+fn check_capture_channels_free(
+    field: &str,
+    track: &Track,
+    taken: &mut HashMap<u16, String>,
+) -> Result<(), FileError> {
+    for (index, &channel) in track.inputs.iter().flatten().enumerate() {
+        let input_field = format!("{field}.inputs[{index}]");
+        if let Some(by) = taken.get(&channel) {
+            return Err(FileError::new(
+                input_field,
+                Problem::CaptureChannelTaken {
+                    channel,
+                    by: by.clone(),
+                },
+            ));
+        }
+        taken.insert(channel, input_field);
+    }
+    Ok(())
 }
 
 /// The channels a bus or a track may have, and what the field accepts.
@@ -391,8 +528,8 @@ fn check_audio_clips(
     rate: SampleRate,
     audio_files: &mut BTreeSet<PathBuf>,
 ) -> Result<(), FileError> {
-    let mut spans = Vec::with_capacity(track.clips.len());
-    for (index, clip) in track.clips.iter().enumerate() {
+    let mut spans = Vec::with_capacity(track.clips().len());
+    for (index, clip) in track.clips().iter().enumerate() {
         let clip_field = format!("{field}.clips[{index}]");
         let file_field = format!("{clip_field}.file");
         let path = relative_path(&file_field, &clip.file)?;
@@ -425,7 +562,7 @@ fn check_midi_clips(
     rate: SampleRate,
     tempo_map: &TempoMap,
 ) -> Result<(), FileError> {
-    for (index, clip) in track.clips.iter().enumerate() {
+    for (index, clip) in track.clips().iter().enumerate() {
         let clip_field = format!("{field}.clips[{index}]");
         relative_path(&format!("{clip_field}.file"), &clip.file)?;
         place_midi_clip(&clip_field, clip, rate, tempo_map)?;

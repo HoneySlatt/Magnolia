@@ -1,7 +1,7 @@
 //! The test session through its public interface: each refusal of the loader with the field it
 //! names, the small session rendered and played to the same bits whatever the blocks and periods,
-//! a play that stops, a start while a play rolls, and the generator, the same to the byte each
-//! time.
+//! a play that stops, a start while a play rolls, an input track monitored and recorded, and the
+//! generator, the same to the byte each time.
 
 use std::fs::{self, File};
 use std::io::{BufWriter, Cursor};
@@ -12,6 +12,7 @@ use std::thread;
 use std::time::Duration;
 
 use magnolia_engine::offline::OfflineBackend;
+use magnolia_engine::record::{TakeEnd, TakeFormat};
 use magnolia_engine::time::{
     MusicalPosition, SamplePosition, TICKS_PER_QUARTER, TIME_UNITS_PER_SECOND, place,
 };
@@ -23,7 +24,8 @@ use magnolia_session::load::{
 };
 use magnolia_session::midi_file::{self, EventKind, Format, MidiFile, Track, TrackEvent};
 use magnolia_session::{
-    LoadError, ReaderMode, RenderError, Session, SessionPlayer, render, render_to_file,
+    LoadError, ReaderMode, RecordSettings, RenderError, Session, SessionPlayer, SessionRecorder,
+    render, render_to_file,
 };
 use serde_json::{Value, json};
 
@@ -183,12 +185,197 @@ fn an_unknown_field_is_refused_by_its_path() {
 fn a_newer_version_is_refused_as_such() {
     let dir = TempDir::new("version");
     let mut session = valid_session(&dir);
-    session["version"] = json!(2);
+    session["version"] = json!(3);
     // A field the newer version might add does not hide the version.
     session["tracks"][0]["colour"] = json!("red");
     let error = refused(&dir, &session);
     assert_eq!(error.field(), "version");
-    assert!(matches!(error.problem(), Problem::UnsupportedVersion(2)));
+    assert!(matches!(error.problem(), Problem::UnsupportedVersion(3)));
+    assert!(
+        error.to_string().contains("newer than this reader's, 2"),
+        "{error}"
+    );
+}
+
+// Input tracks.
+
+/// [`valid_session`] in version 2, with a third track, an armed mono input from capture channel 1
+/// into the bus.
+fn input_session(dir: &TempDir) -> Value {
+    let mut session = valid_session(dir);
+    session["version"] = json!(2);
+    session["tracks"].as_array_mut().unwrap().push(
+        json!({ "name": "mic", "kind": "input", "channels": 1, "inputs": [1],
+                      "armed": true, "inserts": [], "output": "vocals", "gain": 1.0,
+                      "sends": [] }),
+    );
+    session
+}
+
+#[test]
+fn a_version_1_session_still_reads_without_input_tracks() {
+    let dir = TempDir::new("version-1");
+    let session = open(&dir, &valid_session(&dir)).unwrap();
+    assert_eq!(session.capture_channels(), 0);
+    assert_eq!(session.monitoring_latency(), None);
+    assert!(session.armed_tracks().is_empty());
+
+    // An input track came with version 2: in a file of version 1, it is refused as such.
+    let mut session = input_session(&dir);
+    session["version"] = json!(1);
+    let error = refused(&dir, &session);
+    assert_eq!(error.field(), "tracks[2].kind");
+    assert!(matches!(
+        error.problem(),
+        Problem::NotInVersion {
+            version: 1,
+            since: 2
+        }
+    ));
+}
+
+#[test]
+fn an_input_track_opens_with_its_capture_channels() {
+    let dir = TempDir::new("input");
+    let mut session = input_session(&dir);
+    session["tracks"][2]["channels"] = json!(2);
+    session["tracks"][2]["inputs"] = json!([4, 2]);
+    let session = open(&dir, &session).unwrap();
+    // The highest capture channel named; the armed track numbered from 1 in the session's order,
+    // its channels numbered from 0 as the engine's.
+    assert_eq!(session.capture_channels(), 4);
+    let [armed] = session.armed_tracks().try_into().unwrap();
+    assert_eq!(
+        (armed.number, armed.name.as_str(), armed.capture_channels),
+        (3, "mic", vec![3, 1])
+    );
+    // Into the bus, which holds a test latency of 64 samples.
+    assert_eq!(session.monitoring_latency(), Some(64));
+}
+
+#[test]
+fn an_input_tracks_fields_are_checked_by_their_paths() {
+    let dir = TempDir::new("input-fields");
+    type Change = fn(&mut Value);
+    let cases: [(Change, &str, &str); 16] = [
+        (
+            |session| session["tracks"][2]["inputs"] = json!([0]),
+            "tracks[2].inputs[0]",
+            "0 is out of range: a capture channel from 1 to 1,024",
+        ),
+        (
+            |session| session["tracks"][2]["inputs"] = json!([1025]),
+            "tracks[2].inputs[0]",
+            "1025 is out of range",
+        ),
+        (
+            |session| session["tracks"][2]["inputs"] = json!([70000]),
+            "tracks[2].inputs[0]",
+            "invalid value",
+        ),
+        (
+            |session| session["tracks"][2]["inputs"] = json!([1, 2]),
+            "tracks[2].inputs",
+            "2 capture channels for a track of 1; an input track names one per channel",
+        ),
+        (
+            |session| session["tracks"][2]["inputs"] = json!([]),
+            "tracks[2].inputs",
+            "0 capture channels for a track of 1",
+        ),
+        (
+            |session| {
+                session["tracks"][2]["channels"] = json!(2);
+                session["tracks"][2]["inputs"] = json!([3, 3]);
+            },
+            "tracks[2].inputs[1]",
+            "capture channel 3 is used already, by tracks[2].inputs[0]",
+        ),
+        (
+            |session| {
+                let mut second = session["tracks"][2].clone();
+                second["inputs"] = json!([1]);
+                second["armed"] = json!(false);
+                session["tracks"].as_array_mut().unwrap().push(second);
+            },
+            "tracks[3].inputs[0]",
+            "capture channel 1 is used already, by tracks[2].inputs[0]",
+        ),
+        (
+            |session| {
+                session["tracks"][2]["clips"] = session["tracks"][0]["clips"].clone();
+            },
+            "tracks[2].clips",
+            "an input track does not have this field",
+        ),
+        (
+            |session| {
+                session["tracks"][2]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("armed");
+            },
+            "tracks[2].armed",
+            "an input track needs this field",
+        ),
+        (
+            |session| {
+                session["tracks"][2]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("inputs");
+            },
+            "tracks[2].inputs",
+            "an input track needs this field",
+        ),
+        (
+            |session| {
+                session["tracks"][2]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("channels");
+            },
+            "tracks[2].channels",
+            "an input track needs this field",
+        ),
+        (
+            |session| session["tracks"][2]["instrument"] = json!({ "test_synth": {} }),
+            "tracks[2].instrument",
+            "an input track does not have this field",
+        ),
+        (
+            |session| session["tracks"][0]["inputs"] = json!([2]),
+            "tracks[0].inputs",
+            "an audio track does not have this field",
+        ),
+        (
+            |session| session["tracks"][1]["armed"] = json!(true),
+            "tracks[1].armed",
+            "a MIDI track does not have this field",
+        ),
+        (
+            |session| {
+                session["tracks"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("clips");
+            },
+            "tracks[0].clips",
+            "an audio track needs this field",
+        ),
+        (
+            |session| session["tracks"][2]["output"] = json!("nowhere"),
+            "tracks[2].output",
+            "\"nowhere\" names neither",
+        ),
+    ];
+    for (change, field, message) in cases {
+        let mut session = input_session(&dir);
+        change(&mut session);
+        let error = refused(&dir, &session);
+        assert_eq!(error.field(), field, "{error}");
+        assert!(error.to_string().contains(message), "{field}: {error}");
+    }
 }
 
 #[test]
@@ -641,14 +828,17 @@ fn the_estimate_counts_streams_and_delays_as_the_engine_allocates_them() {
     generate(Kind::Small, dir.path()).unwrap();
     let session = Session::open(dir.path().join("session.json")).unwrap();
     let estimate = session.memory_estimate();
-    // Two mono tracks and two stereo ones; buses of two channels 64 and 100 samples late, and a
-    // mono track 300 samples late; and the delay lines of the two tracks that send to the bus 100
-    // samples late, each on the two channels of its output, the vocals' bus or the master.
+    // Two mono tracks and two stereo ones; buses of two channels 64 and 100 samples late, a mono
+    // track 300 samples late and the mono input 32; and the delay lines of the two tracks that
+    // send to the bus 100 samples late, each on the two channels of its output, the vocals' bus or
+    // the master. The input sends there too, but is live: it gets no delay line.
     assert_eq!(estimate.streams, 6 * STREAM_FRAMES * 4);
     assert_eq!(
         estimate.delays,
-        (2 * 64 + 2 * 100 + 300 + 2 * (2 * 100)) * 4
+        (2 * 64 + 2 * 100 + 300 + 32 + 2 * (2 * 100)) * 4
     );
+    // The armed input's rings: 4 seconds of one channel, and its marks.
+    assert_eq!(estimate.rings, 4 * 48_000 * 4 + 256 * 64);
     assert!(estimate.total() < MEMORY_BUDGET / 10, "{estimate}");
 }
 
@@ -1106,6 +1296,187 @@ fn a_compensation_longer_than_the_read_ahead_aligns_its_paths() {
 }
 
 #[test]
+fn an_input_track_monitors_its_capture_with_its_inserts_latency_and_no_more() {
+    let dir = TempDir::new("monitoring");
+    write_impulses(&dir, "audio/silence.wav", 1, 48_000, &[]);
+    let session = json!({
+        "format": "magnolia-test-session", "version": 2, "sample_rate": 48000,
+        "tempo": { "origin": 0, "changes": [ { "tick": 0, "bpm": [140, 1] } ],
+                   "meters": [ { "bar": 0, "beats": 4, "beat_unit": 4 } ] },
+        "master": { "channels": 2, "inserts": [] },
+        "buses": [
+            { "name": "room", "channels": 2, "inserts": [ { "test_latency": { "samples": 100 } } ],
+              "output": "master", "gain": 1.0 }
+        ],
+        "tracks": [
+            { "name": "late", "kind": "audio", "channels": 1,
+              "clips": [ { "file": "audio/silence.wav", "start": 0, "file_offset": 0,
+                           "length": 48000, "gain": 1.0 } ],
+              "inserts": [ { "test_latency": { "samples": 300 } } ], "output": "master",
+              "gain": 1.0, "sends": [] },
+            { "name": "voice", "kind": "input", "channels": 1, "inputs": [2], "armed": false,
+              "inserts": [ { "test_latency": { "samples": 40 } } ], "output": "master",
+              "gain": 0.5, "sends": [ { "to": "room", "gain": 0.5 } ] }
+        ]
+    });
+    let session = open(&dir, &session).unwrap();
+    // The slowest path from the input: its 40 samples, then the room's 100.
+    assert_eq!(session.monitoring_latency(), Some(140));
+    let mut built = session.build(ReaderMode::Offline).unwrap();
+    // Nothing out of a live track is delayed: no delay line lines its direct path up with its send.
+    assert!(built.controller.delay_lines().is_empty());
+    let mut backend = OfflineBackend::new(built.processor);
+    assert_eq!(backend.processor().capture_channels(), 2);
+
+    // An impulse on capture channel 2 while stopped, at 500, and another while the transport
+    // plays, at 3,000; one on capture channel 1, which no track plays, at 600.
+    let mut capture = [vec![0.0_f32; 4_096], vec![0.0_f32; 4_096]];
+    capture[1][500] = 1.0;
+    capture[1][3_000] = 1.0;
+    capture[0][600] = 1.0;
+    let mut played = [Vec::new(), Vec::new()];
+    for (index, start) in (0..4_096).step_by(256).enumerate() {
+        if index == 4 {
+            let cue = built.reader.locate(SamplePosition(0));
+            built.reader.wait_primed(cue, Duration::ZERO).unwrap();
+            built.controller.play(cue).unwrap();
+        }
+        built.reader.fill();
+        let period = [
+            &capture[0][start..start + 256],
+            &capture[1][start..start + 256],
+        ];
+        for (all, channel) in played.iter_mut().zip(backend.play_period(256, &period)) {
+            all.extend_from_slice(channel);
+        }
+    }
+    // The play, sent at 1,024, pre-rolled by the audio track's 300 samples, which the voice
+    // never waits for.
+    assert_eq!(
+        built.controller.stats().play_start().unwrap().audible_at,
+        SamplePosition(1_324)
+    );
+    // Mono into the stereo master: 0.5 directly, 40 samples late; 0.25 through the room, 140.
+    let expected = [(540, 0.5), (640, 0.25), (3_040, 0.5), (3_140, 0.25)];
+    for channel in &played {
+        assert_eq!(sounding(channel, 0, channel.len()), expected);
+    }
+}
+
+/// The capture a recording test feeds the engine at engine sample `sample`: a ramp of distinct
+/// values, exact in `f32`.
+fn captured_at(sample: u64) -> f32 {
+    (sample % 9_973) as f32 / 16_384.0 - 0.25
+}
+
+#[test]
+fn a_take_through_the_device_less_backend_is_the_capture_placed_at_the_cue() {
+    let dir = TempDir::new("record");
+    generate(Kind::Small, dir.path().join("session").as_path()).unwrap();
+    let session = Session::open(dir.path().join("session/session.json")).unwrap();
+    let folder = dir.path().join("takes");
+    fs::create_dir(&folder).unwrap();
+    let settings = RecordSettings {
+        folder: folder.clone(),
+        extra_latency: 37,
+        format: TakeFormat::Float32,
+    };
+    let (mut recording, processor) = SessionRecorder::new(&session, settings).unwrap();
+    assert!(recording.recorder.recovery().takes.is_empty());
+    let mut backend = OfflineBackend::new(processor);
+
+    // From one second in; the small session pre-rolls 300 samples.
+    let from = 48_000;
+    let sequence = recording
+        .player
+        .start(SamplePosition(from), Duration::from_secs(10))
+        .unwrap();
+    let mut position: u64 = 0;
+    let mut stop_after = None;
+    let mut ends_after = None;
+    let mut capture = vec![0.0_f32; 256];
+    while ends_after.is_none_or(|end| position < end) {
+        assert!(recording.player.reader().wait_idle(Duration::from_secs(10)));
+        for (offset, sample) in capture.iter_mut().enumerate() {
+            *sample = captured_at(position + offset as u64);
+        }
+        backend.play_period(256, &[&capture]);
+        position += 256;
+        let audible_at = recording
+            .player
+            .stats()
+            .play_start()
+            .filter(|start| start.sequence == sequence)
+            .map(|start| start.audible_at.0 as u64);
+        // Two seconds played, then stopped; then the round trip, the pre-roll, the fade and some.
+        if let Some(audible_at) = audible_at
+            && stop_after.is_none()
+            && position >= audible_at + 96_000
+        {
+            recording.player.stop().unwrap();
+            stop_after = Some(position);
+            ends_after = Some(position + 4_096);
+        }
+    }
+    assert!(recording.recorder.wait_idle(Duration::from_secs(10)));
+    let audible_at = recording.player.stats().play_start().unwrap().audible_at.0 as u64;
+    assert_eq!(audible_at, 300, "the play started at the first period");
+
+    let [take] = recording.recorder.takes().try_into().unwrap();
+    // The mic is the session's ninth track.
+    assert_eq!((take.track, take.play, take.take), (9, sequence, Some(1)));
+    assert_eq!(take.first_sample, SamplePosition(from));
+    assert_eq!((take.round_trip, take.padded), (37, 0));
+    assert_eq!(take.ended, TakeEnd::Stopped);
+    assert!(take.error.is_none());
+    // It lasts to the stop: from the cue to what the transport had read when the stop came, the
+    // pre-roll's 300 samples and a fade's 240 beyond what the output had played.
+    let played = stop_after.unwrap() - audible_at;
+    assert!(
+        (played + 540..=played + 540 + 256).contains(&take.frames),
+        "{} frames for {played} played",
+        take.frames
+    );
+    let path = take.path.clone().unwrap();
+    assert_eq!(path, folder.join("9-mic-take1.wav"));
+
+    let bytes = fs::read(&path).unwrap();
+    let info = read_info(&mut Cursor::new(&bytes)).unwrap();
+    assert_eq!(
+        (info.sample_format, info.channels, info.frames),
+        (SampleFormat::Float32, 1, take.frames)
+    );
+    assert!(!info.length_repaired, "its sizes were written");
+    assert_eq!(info.bext.unwrap().time_reference, from as u64);
+    let mut samples = vec![0.0; info.frames as usize];
+    decode(
+        info.sample_format,
+        1,
+        &bytes[info.data_offset as usize..],
+        &mut samples,
+    );
+    // The frame captured a round trip after the output played the cue holds the cue.
+    for (frame, sample) in samples.iter().enumerate() {
+        let expected = captured_at(audible_at + 37 + frame as u64);
+        assert!(
+            sample.to_bits() == expected.to_bits(),
+            "frame {frame}: {sample} where {expected} was captured"
+        );
+    }
+
+    // Dropped, the recorder removes the file it made ahead for the next take.
+    drop(backend);
+    drop(recording);
+    let mut left: Vec<String> = fs::read_dir(&folder)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".wav"))
+        .collect();
+    left.sort();
+    assert_eq!(left, ["9-mic-take1.wav"]);
+}
+
+#[test]
 #[expect(
     clippy::disallowed_methods,
     reason = "the test's thread paces its periods as a device would; it stands for a backend"
@@ -1283,7 +1654,7 @@ fn digest(dir: &Path) -> u64 {
 /// they differ only as meant, then put the new digest the failure prints here, in the same commit
 /// as the change, and say so in its message. If it is not meant, the generator has lost its
 /// determinism: a function whose precision differs between machines, or an order that does.
-const SMALL_SESSION_DIGEST: u64 = 0xC0FB_E9B5_5D27_1739;
+const SMALL_SESSION_DIGEST: u64 = 0xE828_D5F4_1903_03D7;
 
 #[test]
 fn the_small_session_is_the_same_on_every_machine() {

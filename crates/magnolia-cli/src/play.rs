@@ -1,5 +1,5 @@
 //! `magnolia play`: a test session played through the JACK backend, from a timeline position for
-//! a length, stopped, then the engine's figures.
+//! a length, stopped, then the engine's figures. `magnolia record` plays through the same pieces.
 
 use std::error::Error;
 use std::sync::Arc;
@@ -9,10 +9,13 @@ use std::time::{Duration, Instant};
 use magnolia_engine::engine::Processor;
 use magnolia_engine::stats::{EngineStats, PlayStart};
 use magnolia_engine::time::{SamplePosition, SampleRate, TimeUnits, place};
-use magnolia_jack::{ConnectError, JackBackend, JackOptions, OpenError};
-use magnolia_session::{Session, SessionPlayer};
+use magnolia_jack::{
+    CloseError, ConnectError, JackBackend, JackOptions, OpenError, RealtimeStatus,
+};
+use magnolia_session::{PlayReport, Session, SessionPlayer};
 
 use crate::arguments::PlayOptions;
+use crate::latency;
 use crate::say;
 
 /// The JACK client's name; the server adds a suffix when another client holds it.
@@ -30,7 +33,8 @@ const STOP_TAIL: Duration = Duration::from_millis(100);
 
 /// Plays the session `options` name through JACK, stops, waits for the stop's fade, closes the
 /// client, then prints whether the audio thread ran in real time and the engine's and the disk
-/// reader's figures.
+/// reader's figures. A session with input tracks monitors them, and prints the round trip's
+/// latency before it plays.
 ///
 /// # Errors
 ///
@@ -43,31 +47,19 @@ pub fn play(options: &PlayOptions) -> Result<(), Box<dyn Error>> {
     let span = Span::new(options, rate, session.last_sample())?;
     let (mut player, processor) = SessionPlayer::new(&session)?;
     let backend = open_backend(options, processor)?;
-    let server = options.server.as_deref().map_or_else(
-        || "the default JACK server".to_owned(),
-        |name| format!("the JACK server {name:?}"),
-    );
     say(format_args!(
-        "Playing {} on {server}, as the client {:?}: {} frames at {} Hz, from {} s to {} s.",
+        "Playing {} on {}, as the client {:?}: {} frames at {} Hz, from {} s to {} s.",
         options.session.display(),
+        server_name(options),
         backend.client_name(),
         backend.period_frames(),
         backend.server_sample_rate(),
         seconds(span.from, rate),
         seconds(span.end, rate),
     ));
-    if options.connect {
-        // Connected ports play whether or not the server reported their latency: a play only
-        // reports it, so its absence is a warning, not a failure.
-        match backend.connect_to_physical_playback() {
-            Ok(connected) => say(format_args!(
-                "Connected {connected} playback ports to the server's physical ones."
-            )),
-            Err(ConnectError::Latency(error)) => say(format_args!(
-                "Connected the playback ports to the server's physical ones, but {error}."
-            )),
-            Err(error) => return Err(error.into()),
-        }
+    connect(options, &backend)?;
+    if let Some(monitoring) = session.monitoring_latency() {
+        say(latency::settle(&backend, monitoring, None, rate));
     }
 
     let stats = Arc::clone(player.stats());
@@ -76,34 +68,99 @@ pub fn play(options: &PlayOptions) -> Result<(), Box<dyn Error>> {
         backend: &backend,
         rate,
     };
-    let rolled = roll(&mut player, &watch, span);
-    // The audio thread runs until the client closes: its rights are asked of the kernel now.
-    let realtime = backend.realtime_status();
-    let report = player.report();
-    let callback_panicked = backend.callback_panicked();
-    let closed = backend.close();
-
-    say(realtime);
-    say(report.to_string().trim_end());
-    say(format_args!(
-        "gaps in the server's frame time: {}",
-        stats.frame_time_gaps()
-    ));
+    let rolled = roll(&mut player, &watch, span).map(drop);
+    let closed = Closed::close(backend, &player);
+    closed.print(&stats);
     rolled?;
-    closed?;
-    if callback_panicked {
-        return Err(
-            "the JACK backend's callback panicked: Magnolia played silence from then on".into(),
-        );
+    closed.outcome(&stats)
+}
+
+/// The server `options` name, for a person to read.
+pub(crate) fn server_name(options: &PlayOptions) -> String {
+    options.server.as_deref().map_or_else(
+        || "the default JACK server".to_owned(),
+        |name| format!("the JACK server {name:?}"),
+    )
+}
+
+/// With `--connect`, connects the playback ports, then the capture ports, to the server's
+/// physical ones, and waits for their latency. Connected ports play whether or not the server
+/// reported their latency: a play only reports it, so its absence is a warning, not a failure.
+pub(crate) fn connect(options: &PlayOptions, backend: &JackBackend) -> Result<(), Box<dyn Error>> {
+    if !options.connect {
+        return Ok(());
     }
-    if stats.poisoned() {
-        return Err("the engine panicked: it played silence from then on".into());
+    for kind in ["playback", "capture"] {
+        let connected = if kind == "playback" {
+            backend.connect_to_physical_playback()
+        } else {
+            backend.connect_to_physical_capture()
+        };
+        match connected {
+            Ok(0) if kind == "capture" => {}
+            Ok(connected) => say(format_args!(
+                "Connected {connected} {kind} ports to the server's physical ones."
+            )),
+            Err(ConnectError::Latency(error)) => say(format_args!(
+                "warning: connected the {kind} ports to the server's physical ones, but {error}."
+            )),
+            Err(error) => return Err(error.into()),
+        }
     }
     Ok(())
 }
 
+/// What a play leaves once its client is closed: what was read of the engine and the backend
+/// while the audio thread still ran, and the processor the backend gave back.
+pub(crate) struct Closed {
+    realtime: RealtimeStatus,
+    report: PlayReport,
+    callback_panicked: bool,
+    closed: Result<Processor, CloseError>,
+}
+
+impl Closed {
+    /// Asks the kernel whether the audio thread runs in real time while it still runs, reads the
+    /// player's report, then closes the client.
+    pub(crate) fn close(backend: JackBackend, player: &SessionPlayer) -> Self {
+        let realtime = backend.realtime_status();
+        let report = player.report();
+        let callback_panicked = backend.callback_panicked();
+        Self {
+            realtime,
+            report,
+            callback_panicked,
+            closed: backend.close(),
+        }
+    }
+
+    /// Prints the real-time report, the player's figures and the gaps in the server's frame time.
+    pub(crate) fn print(&self, stats: &EngineStats) {
+        say(&self.realtime);
+        say(self.report.to_string().trim_end());
+        say(format_args!(
+            "gaps in the server's frame time: {}",
+            stats.frame_time_gaps()
+        ));
+    }
+
+    /// Whether the client closed, and neither the backend's callback nor the engine panicked.
+    pub(crate) fn outcome(self, stats: &EngineStats) -> Result<(), Box<dyn Error>> {
+        self.closed?;
+        if self.callback_panicked {
+            return Err(
+                "the JACK backend's callback panicked: Magnolia played silence from then on".into(),
+            );
+        }
+        if stats.poisoned() {
+            return Err("the engine panicked: it played silence from then on".into());
+        }
+        Ok(())
+    }
+}
+
 /// Opens the backend on the server `options` name, around the session's processor.
-fn open_backend(
+pub(crate) fn open_backend(
     options: &PlayOptions,
     processor: Processor,
 ) -> Result<JackBackend, Box<dyn Error>> {
@@ -125,8 +182,12 @@ fn open_backend(
 }
 
 /// Plays `span`: starts the play, waits until the output has played its last sample, stops, and
-/// waits until the stop has faded out.
-fn roll(player: &mut SessionPlayer, watch: &Watch<'_>, span: Span) -> Result<(), Box<dyn Error>> {
+/// waits until the stop has faded out. Returns the play's sequence number.
+pub(crate) fn roll(
+    player: &mut SessionPlayer,
+    watch: &Watch<'_>,
+    span: Span,
+) -> Result<u64, Box<dyn Error>> {
     let sequence = player.start(span.from, PRIME_TIMEOUT)?;
     let sent_at = watch.stats.block_start().0;
     let start = watch.play_start(sequence)?;
@@ -140,21 +201,22 @@ fn roll(player: &mut SessionPlayer, watch: &Watch<'_>, span: Span) -> Result<(),
     let tail = pre_roll
         .saturating_add(samples_in(STOP_TAIL, watch.rate))
         .saturating_add(i64::from(watch.backend.period_frames()));
-    watch.until(stopped_at.saturating_add(tail))
+    watch.until(stopped_at.saturating_add(tail))?;
+    Ok(sequence)
 }
 
 /// The timeline samples a play covers: from `from` up to `end`, which it does not play.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Span {
-    from: SamplePosition,
-    end: SamplePosition,
+pub(crate) struct Span {
+    pub(crate) from: SamplePosition,
+    pub(crate) end: SamplePosition,
 }
 
 impl Span {
     /// The span `options` ask for, on the session's samples: from `--from`, for `--seconds`, or up
     /// to the session's last sample and one second of tail, as the offline render. Each time is
     /// placed on the first sample at or after it.
-    fn new(
+    pub(crate) fn new(
         options: &PlayOptions,
         rate: SampleRate,
         last_sample: SamplePosition,
@@ -189,16 +251,16 @@ impl Span {
 }
 
 /// A sample's time, in seconds to the millisecond, for a person to read.
-fn seconds(sample: SamplePosition, rate: SampleRate) -> String {
+pub(crate) fn seconds(sample: SamplePosition, rate: SampleRate) -> String {
     format!("{:.3}", sample.0 as f64 / f64::from(rate.hertz()))
 }
 
 /// The main thread's view of the engine while the server plays it.
-struct Watch<'a> {
-    stats: &'a EngineStats,
-    backend: &'a JackBackend,
+pub(crate) struct Watch<'a> {
+    pub(crate) stats: &'a EngineStats,
+    pub(crate) backend: &'a JackBackend,
     /// The session's rate, which the server runs at too.
-    rate: SampleRate,
+    pub(crate) rate: SampleRate,
 }
 
 impl Watch<'_> {
@@ -215,7 +277,7 @@ impl Watch<'_> {
 
     /// Waits until the engine has started a period at or after engine sample `sample`: every
     /// sample before it has played.
-    fn until(&self, sample: i64) -> Result<(), Box<dyn Error>> {
+    pub(crate) fn until(&self, sample: i64) -> Result<(), Box<dyn Error>> {
         self.wait(|| {
             let started = self.stats.block_start().0;
             if started >= sample {
@@ -230,7 +292,10 @@ impl Watch<'_> {
     /// asks, at least a period and at most [`LONGEST_SLEEP`]. Gives up when the server shuts the
     /// client down, when the backend's callback panicked, or when no period has run for
     /// [`STALL_TIMEOUT`].
-    fn wait<T>(&self, mut look: impl FnMut() -> Result<T, Duration>) -> Result<T, Box<dyn Error>> {
+    pub(crate) fn wait<T>(
+        &self,
+        mut look: impl FnMut() -> Result<T, Duration>,
+    ) -> Result<T, Box<dyn Error>> {
         let mut periods = self.stats.periods();
         let mut last_period_seen = Instant::now();
         loop {
@@ -259,13 +324,13 @@ impl Watch<'_> {
         }
     }
 
-    fn period(&self) -> Duration {
+    pub(crate) fn period(&self) -> Duration {
         duration_of(i64::from(self.backend.period_frames()), self.rate)
     }
 }
 
 /// How long `samples` play at `rate`, to the microsecond below; none for a negative count.
-fn duration_of(samples: i64, rate: SampleRate) -> Duration {
+pub(crate) fn duration_of(samples: i64, rate: SampleRate) -> Duration {
     let samples = u64::try_from(samples).unwrap_or(0);
     Duration::from_micros(samples.saturating_mul(1_000_000) / u64::from(rate.hertz()))
 }

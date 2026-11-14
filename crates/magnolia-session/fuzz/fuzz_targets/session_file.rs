@@ -1,6 +1,7 @@
 //! Fuzzes the test session's parser with arbitrary text, raw or built (`session_text.rs`). Nothing
-//! may panic; a session that parses must name no file outside its folder, and must write back to
-//! text that parses.
+//! may panic; a session that parses must name no file outside its folder, must name each capture
+//! channel once at most, from 1 to 1,024, in input tracks of version 2 alone, and must write back
+//! to text that parses.
 //!
 //! The sessions it builds are shaped like real ones, but every number, name and choice may still be
 //! arbitrary or out of range, so that the parser's refusals are fuzzed as much as what it accepts.
@@ -9,6 +10,7 @@
 
 mod session_text;
 
+use std::collections::HashSet;
 use std::path::{Component, Path};
 
 use libfuzzer_sys::arbitrary::{Result, Unstructured};
@@ -35,7 +37,7 @@ fn check(text: &str) {
     };
     // `../c.mid`, which the builder offers, is always refused: no path leaves the session's folder.
     for track in &session.tracks {
-        for clip in &track.clips {
+        for clip in track.clips() {
             let inside = Path::new(&clip.file)
                 .components()
                 .all(|component| matches!(component, Component::Normal(_) | Component::CurDir));
@@ -43,6 +45,25 @@ fn check(text: &str) {
                 inside,
                 "a path that leaves the session's folder parsed: {:?}",
                 clip.file
+            );
+        }
+    }
+    let mut capture_channels = HashSet::new();
+    for track in &session.tracks {
+        let inputs = track.inputs.as_deref().unwrap_or_default();
+        assert!(
+            inputs.is_empty() || track.kind == TrackKind::Input,
+            "a track of another kind than input names capture channels"
+        );
+        assert!(
+            track.kind != TrackKind::Input || session.version >= file::INPUT_TRACKS_SINCE,
+            "an input track parsed in version {}",
+            session.version
+        );
+        for &channel in inputs {
+            assert!(
+                (1..=file::MAX_CHANNELS).contains(&channel) && capture_channels.insert(channel),
+                "capture channel {channel} parsed out of range, or named twice"
             );
         }
     }
@@ -59,7 +80,11 @@ fn session(input: &mut Unstructured<'_>) -> Result<SessionFile> {
         } else {
             input.arbitrary()?
         },
-        version: often(input, |_| Ok(file::VERSION))?,
+        version: often(input, |input| {
+            input
+                .choose(&[file::OLDEST_VERSION, file::VERSION])
+                .copied()
+        })?,
         sample_rate: often(input, |input| {
             input.choose(&[44_100, 48_000, 96_000, 44_056]).copied()
         })?,
@@ -100,40 +125,42 @@ fn session(input: &mut Unstructured<'_>) -> Result<SessionFile> {
 }
 
 fn track(input: &mut Unstructured<'_>) -> Result<Track> {
-    let kind = *input.choose(&[TrackKind::Audio, TrackKind::Midi])?;
+    let kind = *input.choose(&[TrackKind::Audio, TrackKind::Midi, TrackKind::Input])?;
     let audio = kind == TrackKind::Audio;
-    // Mostly the fields of its kind; sometimes the other kind's, or none.
+    // Mostly the fields of its kind; sometimes another kind's, or none.
     let fits = input.ratio(7, 8)?;
+    let has = |kinds: &[TrackKind]| kinds.contains(&kind) == fits;
+    let channels = if has(&[TrackKind::Audio, TrackKind::Input]) {
+        Some(often(input, |input| input.int_in_range(1..=2))?)
+    } else {
+        None
+    };
+    // Capture channels from a few, so that tracks share them, and some out of range.
+    let inputs = if has(&[TrackKind::Input]) {
+        Some(list(input, 3, |input| {
+            often(input, |input| input.int_in_range(1..=4))
+        })?)
+    } else {
+        None
+    };
+    let armed = if has(&[TrackKind::Input]) {
+        Some(input.arbitrary()?)
+    } else {
+        None
+    };
+    let clips = if has(&[TrackKind::Audio, TrackKind::Midi]) {
+        Some(list(input, 4, |input| clip(input, audio == fits))?)
+    } else {
+        None
+    };
     Ok(Track {
         name: input.arbitrary()?,
         kind,
-        channels: if audio == fits {
-            Some(often(input, |input| input.int_in_range(1..=2))?)
-        } else {
-            None
-        },
-        instrument: (audio != fits).then_some(Instrument::TestSynth {}),
-        clips: list(input, 4, |input| {
-            Ok(Clip {
-                file: often(input, |input| {
-                    input
-                        .choose(&["a.wav", "b.wav", "../c.mid"])
-                        .map(|name| (*name).to_owned())
-                })?,
-                start: often(input, |input| input.int_in_range(0..=1 << 40))?,
-                file_offset: if audio == fits {
-                    Some(often(input, |input| input.int_in_range(0..=1 << 20))?)
-                } else {
-                    None
-                },
-                length: often(input, |input| input.int_in_range(1..=1 << 30))?,
-                gain: if audio == fits {
-                    Some(gain(input)?)
-                } else {
-                    None
-                },
-            })
-        })?,
+        channels,
+        instrument: has(&[TrackKind::Midi]).then_some(Instrument::TestSynth {}),
+        inputs,
+        armed,
+        clips,
         inserts: list(input, 2, insert)?,
         output: name(input)?,
         gain: gain(input)?,
@@ -143,6 +170,29 @@ fn track(input: &mut Unstructured<'_>) -> Result<Track> {
                 gain: gain(input)?,
             })
         })?,
+    })
+}
+
+/// A clip, with an audio clip's fields or not.
+fn clip(input: &mut Unstructured<'_>, audio_fields: bool) -> Result<Clip> {
+    Ok(Clip {
+        file: often(input, |input| {
+            input
+                .choose(&["a.wav", "b.wav", "../c.mid"])
+                .map(|name| (*name).to_owned())
+        })?,
+        start: often(input, |input| input.int_in_range(0..=1 << 40))?,
+        file_offset: if audio_fields {
+            Some(often(input, |input| input.int_in_range(0..=1 << 20))?)
+        } else {
+            None
+        },
+        length: often(input, |input| input.int_in_range(1..=1 << 30))?,
+        gain: if audio_fields {
+            Some(gain(input)?)
+        } else {
+            None
+        },
     })
 }
 

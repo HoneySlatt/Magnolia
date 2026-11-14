@@ -12,7 +12,8 @@
 //! sections (intro, verses, choruses, a bridge, an outro) over four chords. Vocal takes sing its
 //! melody, its harmonies or ad-libs in some sections, resting two bars in four, so that their files
 //! hold silence between phrases and their clips leave gaps between sections. Stems and instruments
-//! play from the start to the end.
+//! play from the start to the end. An input track, which plays the device's capture, has no file:
+//! offline, it is silent.
 
 mod audio;
 mod midi;
@@ -53,16 +54,18 @@ pub enum Kind {
     /// chords, a lead with pitch bends, pads, three more parts of the beat); buses for the vocals,
     /// the drums and the beat, and a room bus fed by sends, where the reverb goes. 0.67 GB.
     Lowest,
-    /// The high tier's reference project without its plugins and its live input: 48 audio tracks
-    /// (vocal takes, backing vocals, recorded instruments, stems) and 24 MIDI tracks (the beat, a
-    /// score's strings and brass), the same song. 2.18 GB.
+    /// The high tier's reference project without its plugins: 48 audio tracks (vocal takes,
+    /// backing vocals, recorded instruments, stems), 24 MIDI tracks (the beat, a score's strings
+    /// and brass), the same song, and its live voice, a mono input track from capture channel 1,
+    /// armed, into the vocals' bus through a gain where Auto-Tune goes. 2.18 GB.
     High,
     /// A session of about 8 seconds that holds every feature of the file: gaps between clips, a
     /// file offset, a start between two samples, gains, latent inserts on buses and a track, sends
     /// into a latent bus from tracks whose outputs go elsewhere, so that the engine adds delay
     /// lines, a bus into a bus, mono into stereo, MIDI with pitch bends and controllers, a MIDI
     /// file of 1,000 ticks a quarter, a clip cut short and a file played by two clips, a tempo
-    /// change and a meter change.
+    /// change and a meter change; and an armed mono input track, `mic`, from capture channel 1,
+    /// through a latent insert into a bus, sent to the latent bus.
     Small,
 }
 
@@ -138,9 +141,12 @@ pub fn generate(kind: Kind, folder: &Path) -> Result<Generated, GenerateError> {
         bytes: 0,
     };
     for track in &plan.tracks {
-        let path = folder.join(&track.file);
-        let mut random = Random::for_name(&track.file);
-        match track.content {
+        let Some((file, content)) = &track.file else {
+            continue;
+        };
+        let path = folder.join(file);
+        let mut random = Random::for_name(file);
+        match *content {
             Content::Audio(part) => {
                 let channels = part.render(&song, &synth, &mut random);
                 write_wav(&path, &channels, song.rate.hertz())?;
@@ -255,12 +261,11 @@ struct Plan {
 struct TrackPlan {
     /// The track as the session holds it.
     track: Track,
-    /// Its file, relative to the session's folder.
-    file: String,
-    /// What its file holds.
-    content: Content,
+    /// Its file, relative to the session's folder, and what it holds; none for an input track.
+    file: Option<(String, Content)>,
 }
 
+/// What a track's file holds.
 enum Content {
     Audio(AudioPart),
     /// A MIDI part, and its file's ticks a quarter.
@@ -298,14 +303,15 @@ impl Plan {
                 kind: TrackKind::Audio,
                 channels: Some(part.channels()),
                 instrument: None,
-                clips,
+                inputs: None,
+                armed: None,
+                clips: Some(clips),
                 inserts: Vec::new(),
                 output: output.to_owned(),
                 gain: 0.35,
                 sends: Vec::new(),
             },
-            file,
-            content: Content::Audio(part),
+            file: Some((file, Content::Audio(part))),
         })
     }
 
@@ -320,14 +326,36 @@ impl Plan {
                 kind: TrackKind::Midi,
                 channels: None,
                 instrument: Some(Instrument::TestSynth {}),
-                clips,
+                inputs: None,
+                armed: None,
+                clips: Some(clips),
                 inserts: Vec::new(),
                 output: output.to_owned(),
                 gain: 0.06,
                 sends: Vec::new(),
             },
-            file,
-            content: Content::Midi(part, TICKS_PER_QUARTER),
+            file: Some((file, Content::Midi(part, TICKS_PER_QUARTER))),
+        })
+    }
+
+    /// Adds an armed input track that plays the capture channels `inputs`, numbered from 1, one
+    /// per channel.
+    fn input(&mut self, name: &str, inputs: &[u16], output: &str) -> &mut TrackPlan {
+        self.push(TrackPlan {
+            track: Track {
+                name: name.to_owned(),
+                kind: TrackKind::Input,
+                channels: u16::try_from(inputs.len()).ok(),
+                instrument: None,
+                inputs: Some(inputs.to_vec()),
+                armed: Some(true),
+                clips: None,
+                inserts: Vec::new(),
+                output: output.to_owned(),
+                gain: 1.0,
+                sends: Vec::new(),
+            },
+            file: None,
         })
     }
 
@@ -359,15 +387,17 @@ impl TrackPlan {
 
     /// Gives a MIDI track's file `ticks` ticks a quarter.
     fn ticks_per_quarter(&mut self, ticks: u16) -> &mut Self {
-        if let Content::Midi(_, ticks_per_quarter) = &mut self.content {
+        if let Some((_, Content::Midi(_, ticks_per_quarter))) = &mut self.file {
             *ticks_per_quarter = ticks;
         }
         self
     }
 
-    /// Replaces its clips by those `clips` makes of its file.
+    /// Replaces an audio or a MIDI track's clips by those `clips` makes of its file.
     fn clips(&mut self, clips: impl FnOnce(&str) -> Vec<Clip>) -> &mut Self {
-        self.track.clips = clips(&self.file);
+        if let Some((file, _)) = &self.file {
+            self.track.clips = Some(clips(file));
+        }
         self
     }
 
@@ -514,7 +544,7 @@ fn lowest(song: &Song) -> Plan {
     plan
 }
 
-/// The high tier's reference project, without its plugins and its live input.
+/// The high tier's reference project, without its plugins.
 fn high(song: &Song) -> Plan {
     use Section::{Bridge, Chorus, Outro, Verse};
     let mut plan = Plan::new();
@@ -635,6 +665,10 @@ fn high(song: &Song) -> Plan {
     };
     plan.midi(song, "brass stabs", brass_stabs, "score")
         .gain(0.03);
+    // The voice sung live, monitored through Auto-Tune in its low-latency mode, whose place a
+    // gain holds.
+    plan.input("live voice", &[1], "vocals")
+        .insert(Insert::Gain { value: 1.0 });
     plan
 }
 
@@ -728,6 +762,11 @@ fn small(song: &Song) -> Plan {
             ]
         })
         .gain(0.1);
+    // An armed input, through a latent insert as a pitch corrector would be, sent to the latent
+    // bus. Live, it gets no delay line; its slowest path, through the room, is 132 samples late.
+    plan.input("mic", &[1], "vocals")
+        .insert(Insert::TestLatency { samples: 32 })
+        .send("room", 0.3);
     plan
 }
 

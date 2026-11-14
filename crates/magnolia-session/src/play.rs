@@ -1,13 +1,16 @@
-//! Playing a session through a backend: [`SessionPlayer`], for the command line.
+//! Playing a session through a backend: [`SessionPlayer`], for the command line, and
+//! [`SessionRecorder`], which records its armed input tracks as it plays.
 
 use std::error::Error;
 use std::fmt;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use magnolia_engine::callback_times::Snapshot;
 use magnolia_engine::disk::{DiskReader, PrimeError};
 use magnolia_engine::engine::{Controller, Processor, TransportError};
+use magnolia_engine::record::{RecordConfig, Recorder, TakeFormat};
 use magnolia_engine::stats::EngineStats;
 use magnolia_engine::time::SamplePosition;
 
@@ -36,12 +39,19 @@ impl SessionPlayer {
     ///
     /// What [`Session::build`] refuses.
     pub fn new(session: &Session) -> Result<(Self, Processor), BuildError> {
+        let built = session.build(ReaderMode::Thread)?;
+        Ok(Self::of(session, built))
+    }
+
+    /// The player of `built`, a build of `session` with its disk reader's thread, and its
+    /// processor.
+    fn of(session: &Session, built: BuiltSession) -> (Self, Processor) {
         let BuiltSession {
             controller,
             processor,
             reader,
             ..
-        } = session.build(ReaderMode::Thread)?;
+        } = built;
         let audio_tracks = session
             .tracks
             .iter()
@@ -53,7 +63,7 @@ impl SessionPlayer {
             reader,
             audio_tracks,
         };
-        Ok((player, processor))
+        (player, processor)
     }
 
     /// Plays from timeline sample `from`: stops any play under way, then, in the order the disk
@@ -124,6 +134,66 @@ impl SessionPlayer {
                 .map(|(index, name)| (name.clone(), self.reader.low_water(index)))
                 .collect(),
         }
+    }
+}
+
+/// Where and how a [`SessionRecorder`] records.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordSettings {
+    /// The recording folder, which must exist: the takes' files, and the lock file that the
+    /// recorder holds for its life.
+    pub folder: PathBuf,
+    /// The recorder's own latency beyond the device's, in frames: the extra loopback latency
+    /// measured with `jack_iodelay`
+    /// ([`RecordConfig::extra_latency`]).
+    pub extra_latency: u32,
+    /// How the takes' samples are written.
+    pub format: TakeFormat,
+}
+
+/// A session played as [`SessionPlayer`] plays it, with a recorder that records each of its armed
+/// input tracks into a take of every play
+/// ([ADR-0032](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0032-recording-by-a-capture-tap-of-the-processor.md)).
+///
+/// [`new`](Self::new) starts the recorder before anything plays: it takes the recording folder's
+/// lock, which it holds until it is dropped, and recovers what a crash left there
+/// ([`Recorder::recovery`]). Each armed track is then armed with its tap
+/// ([`Session::armed_tracks`]), in the same commit as the session's graph, so that the first play
+/// records. A take's first frame is the frame captured a round trip after the output played the
+/// play's first timeline sample: the device's capture and playback latencies, read at the play's
+/// start, plus [`RecordSettings::extra_latency`]. It ends a round trip after the output played the
+/// play's stop; [`Recorder::takes`] lists it once its file is complete.
+///
+/// Drop it after the backend has let its processor go: dropping the recorder ends the takes under
+/// way, removes the files made ahead of the next takes, and releases the folder's lock.
+pub struct SessionRecorder {
+    /// The player, which starts and stops the plays.
+    pub player: SessionPlayer,
+    /// The recorder: its takes, its figures, and the recovery it made at its start.
+    pub recorder: Recorder,
+}
+
+impl SessionRecorder {
+    /// Builds `session` with its disk reader's thread and a recorder in `settings.folder`, its
+    /// armed tracks armed, and returns it with the engine's processor, for a backend to play. The
+    /// recorder writes at the session's rate, through rings of its default length, which the
+    /// session's memory budget counts.
+    ///
+    /// # Errors
+    ///
+    /// What [`Session::build`] refuses; [`BuildError::Record`] for a folder that another recorder
+    /// or a recovery holds ([`RecordError::FolderLocked`](magnolia_engine::record::RecordError)),
+    /// one that cannot be used, or a take's file that cannot be made.
+    pub fn new(
+        session: &Session,
+        settings: RecordSettings,
+    ) -> Result<(Self, Processor), BuildError> {
+        let mut config = RecordConfig::new(settings.folder, session.sample_rate());
+        config.extra_latency = settings.extra_latency;
+        config.format = settings.format;
+        let (built, recorder) = session.build_recording(ReaderMode::Thread, config)?;
+        let (player, processor) = SessionPlayer::of(session, built);
+        Ok((Self { player, recorder }, processor))
     }
 }
 

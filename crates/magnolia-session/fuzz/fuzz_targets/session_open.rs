@@ -1,7 +1,8 @@
 //! Fuzzes the test session's loader, `Session::open`, with arbitrary text, written as
 //! `session.json` beside a few small WAV and MIDI files: the memory estimate, the audio files'
-//! checks, the MIDI files made into clips, and the clips into sequences. Nothing may panic; a
-//! session that opens must fit its memory budget and end within 24 hours.
+//! checks, the MIDI files made into clips, the clips into sequences, and input tracks. Nothing may
+//! panic; a session that opens must fit its memory budget, end within 24 hours, and give each
+//! armed track capture channels the engine has.
 //!
 //! The parser has its own target, `session_file`, which mostly builds sessions it must refuse. The
 //! loader is reached only by sessions that parse, so this target mostly changes a session that
@@ -36,10 +37,11 @@ use session_text::{often, session_text};
 const FRAMES: u64 = 4_800;
 
 /// A session that opens with the folder's files: a mono track sent to a latent bus, a stereo track
-/// of two clips of one file, and two MIDI tracks, one of two overlapping clips of one file. The
-/// second stereo clip starts on sample 2,400, in time units; MIDI clips last 2 or 4 quarters.
+/// of two clips of one file, two MIDI tracks, one of two overlapping clips of one file, and an
+/// armed mono input track into the latent bus. The second stereo clip starts on sample 2,400, in
+/// time units; MIDI clips last 2 or 4 quarters.
 const BASE: &str = r#"{
-  "format": "magnolia-test-session", "version": 1, "sample_rate": 48000,
+  "format": "magnolia-test-session", "version": 2, "sample_rate": 48000,
   "tempo": { "origin": 0, "changes": [ { "tick": 0, "bpm": [140, 1] } ],
              "meters": [ { "bar": 0, "beats": 4, "beat_unit": 4 } ] },
   "master": { "channels": 2, "inserts": [] },
@@ -63,7 +65,10 @@ const BASE: &str = r#"{
     { "name": "drums", "kind": "midi", "instrument": { "test_synth": {} },
       "clips": [ { "file": "midi/single.mid", "start": 0, "length": 9676800 } ],
       "inserts": [ { "test_latency": { "samples": 32 } } ], "output": "room", "gain": 1.0,
-      "sends": [] }
+      "sends": [] },
+    { "name": "mic", "kind": "input", "channels": 1, "inputs": [1], "armed": true,
+      "inserts": [ { "test_latency": { "samples": 16 } } ], "output": "room", "gain": 1.0,
+      "sends": [ { "to": "master", "gain": 0.5 } ] }
   ]
 }"#;
 
@@ -115,6 +120,19 @@ fn open(input: &[u8]) {
         "a session longer than a day opened: it ends on sample {}",
         session.last_sample().0
     );
+    let capture_channels = usize::from(session.capture_channels());
+    for track in session.armed_tracks() {
+        assert!(
+            !track.capture_channels.is_empty()
+                && track
+                    .capture_channels
+                    .iter()
+                    .all(|&channel| channel < capture_channels),
+            "armed track {} records capture channels {:?} of an engine of {capture_channels}",
+            track.number,
+            track.capture_channels
+        );
+    }
 }
 
 /// [`BASE`], changed in up to eight places that `input` picks.
@@ -128,9 +146,9 @@ fn changed_session(input: &mut Unstructured<'_>) -> Result<SessionFile> {
 
 /// Changes one thing of `session`, mostly within the ranges a session keeps to: a clip's start
 /// within the first 888 quarters, or milliseconds; an audio clip within its file; a MIDI clip up to
-/// 1,775 quarters long.
+/// 1,775 quarters long; an input track's capture channels among the first four.
 fn change(session: &mut SessionFile, input: &mut Unstructured<'_>) -> Result<()> {
-    match input.int_in_range(0..=9)? {
+    match input.int_in_range(0..=11)? {
         0 => {
             session.sample_rate = often(input, |input| {
                 input.choose(&[44_100, 48_000, 96_000]).copied()
@@ -176,11 +194,12 @@ fn change(session: &mut SessionFile, input: &mut Unstructured<'_>) -> Result<()>
         6 => {
             if let Some(track) =
                 pick(session.tracks.len(), input)?.and_then(|index| session.tracks.get_mut(index))
-                && let Some(clip) = pick(track.clips.len(), input)?
-                    .and_then(|index| track.clips.get(index))
+                && let Some(clips) = &mut track.clips
+                && let Some(clip) = pick(clips.len(), input)?
+                    .and_then(|index| clips.get(index))
                     .cloned()
             {
-                track.clips.push(clip);
+                clips.push(clip);
             }
         }
         7 => {
@@ -196,13 +215,36 @@ fn change(session: &mut SessionFile, input: &mut Unstructured<'_>) -> Result<()>
                 track.channels = Some(often(input, |input| input.int_in_range(1..=2))?);
             }
         }
-        _ => {
+        9 => {
             if let Some(track) =
                 pick(session.tracks.len(), input)?.and_then(|index| session.tracks.get_mut(index))
             {
                 track.inserts.push(Insert::TestLatency {
                     samples: often(input, |input| input.int_in_range(0..=70_000))?,
                 });
+            }
+        }
+        // An input track's capture channels: shared with another, too many or too few, or high.
+        10 => {
+            if let Some(track) =
+                pick(session.tracks.len(), input)?.and_then(|index| session.tracks.get_mut(index))
+                && track.inputs.is_some()
+            {
+                let count = input.int_in_range(0..=3)?;
+                track.inputs = Some(
+                    (0..count)
+                        .map(|_| often(input, |input| input.int_in_range(1..=4)))
+                        .collect::<Result<_>>()?,
+                );
+            }
+        }
+        // A copy of a track, an input among them, which then shares its capture channels.
+        _ => {
+            if let Some(track) = pick(session.tracks.len(), input)?
+                .and_then(|index| session.tracks.get(index))
+                .cloned()
+            {
+                session.tracks.push(track);
             }
         }
     }
@@ -222,14 +264,14 @@ fn pick_clip<'s>(
     session: &'s mut SessionFile,
     input: &mut Unstructured<'_>,
 ) -> Result<Option<&'s mut Clip>> {
-    let count = session.tracks.iter().map(|track| track.clips.len()).sum();
+    let count = session.tracks.iter().map(|track| track.clips().len()).sum();
     let Some(index) = pick(count, input)? else {
         return Ok(None);
     };
     Ok(session
         .tracks
         .iter_mut()
-        .flat_map(|track| &mut track.clips)
+        .flat_map(|track| track.clips.iter_mut().flatten())
         .nth(index))
 }
 

@@ -1,5 +1,6 @@
 //! The test session of M1.4: the file that describes a session, its loader into an engine, the
-//! offline render, a player for the command line, and the generator of the reference projects
+//! offline render, a player and a recorder for the command line, and the generator of the
+//! reference projects
 //! ([ADR-0028](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0028-the-test-session-in-json.md)).
 //! Only the tests and the command line read it; Stage 2's project, in SQLite, replaces it
 //! ([ADR-0009](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0009-the-project-in-sqlite-nothing-lost.md)).
@@ -10,6 +11,7 @@
 //!   sequences; [`Session::build`] makes an engine, a disk reader and the graph that plays it;
 //! - [`render()`]: the session played offline from its start into a WAV file of floats;
 //! - [`SessionPlayer`]: the session played through a backend, for the command line;
+//!   [`SessionRecorder`], the same with a recorder that records its armed input tracks;
 //! - [`generate`]: the reference projects without their plugins, and a small session for tests,
 //!   the same to the byte on every machine;
 //! - [`midi_file`]: Standard MIDI Files, formats 0 and 1, read and written by Magnolia's own code.
@@ -36,5 +38,5 @@ pub mod render;
 
 pub use build::{BuildError, BuiltSession, ReaderMode};
 pub use load::{LoadError, Session};
-pub use play::{PlayReport, SessionPlayer, StartError};
+pub use play::{PlayReport, RecordSettings, SessionPlayer, SessionRecorder, StartError};
 pub use render::{RenderError, RenderReport, render, render_to_file, tail_after_the_last_clip};

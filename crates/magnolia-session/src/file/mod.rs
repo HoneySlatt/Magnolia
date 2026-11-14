@@ -2,11 +2,11 @@
 //! ([ADR-0028](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0028-the-test-session-in-json.md)),
 //! and [`parse`], which refuses a file that fails any check that needs no file on disk.
 //!
-//! Version 1 of the format:
+//! Version 2 of the format:
 //!
 //! ```json
 //! {
-//!   "format": "magnolia-test-session", "version": 1,
+//!   "format": "magnolia-test-session", "version": 2,
 //!   "sample_rate": 48000,
 //!   "tempo": { "origin": 0, "changes": [ { "tick": 0, "bpm": [140, 1] } ],
 //!              "meters": [ { "bar": 0, "beats": 4, "beat_unit": 4 } ] },
@@ -22,10 +22,15 @@
 //!       "sends": [ { "to": "drums", "gain": 0.25 } ] },
 //!     { "name": "bass", "kind": "midi", "instrument": { "test_synth": {} },
 //!       "clips": [ { "file": "midi/bass.mid", "start": 0, "length": 3870720 } ],
-//!       "inserts": [], "output": "master", "gain": 1.0, "sends": [] }
+//!       "inserts": [], "output": "master", "gain": 1.0, "sends": [] },
+//!     { "name": "voice", "kind": "input", "channels": 1, "inputs": [1], "armed": true,
+//!       "inserts": [ { "test_latency": { "samples": 32 } } ], "output": "master", "gain": 1.0,
+//!       "sends": [] }
 //!   ]
 //! }
 //! ```
+//!
+//! Version 1, which this reader still reads, is the same without input tracks.
 //!
 //! Units ([ADR-0018](https://github.com/HoneySlatt/Magnolia/blob/main/docs/adr/0018-the-time-model.md)):
 //! `tempo.origin`, where tick 0 lies, and an audio clip's `start` are in time units, the clip's
@@ -36,13 +41,18 @@
 //! inside it: an absolute path or a `..` is refused, a `.` ignored, so that one file has one
 //! spelling; a symbolic link inside the folder is followed wherever it leads.
 //!
-//! The signal flows from each track's source (an audio track's clips, a MIDI track's instrument)
-//! through its inserts in series, then its gain, to its output, and from after its gain through
-//! each send's gain to the send's destination. A bus sums what feeds it, then runs its inserts and
-//! its gain into its output; the master sums what feeds it, then runs its inserts into the
-//! playback channels. An output or a send names `master` or a bus; a bus may feed another bus, not
-//! in a cycle; buses have no sends. What feeds a bus or the master has its channels, except a mono
-//! source, which feeds both channels of a stereo one.
+//! The signal flows from each track's source (an audio track's clips, a MIDI track's instrument,
+//! an input track's capture channels) through its inserts in series, then its gain, to its output,
+//! and from after its gain through each send's gain to the send's destination. A bus sums what
+//! feeds it, then runs its inserts and its gain into its output; the master sums what feeds it,
+//! then runs its inserts into the playback channels. An output or a send names `master` or a bus;
+//! a bus may feed another bus, not in a cycle; buses have no sends. What feeds a bus or the master
+//! has its channels, except a mono source, which feeds both channels of a stereo one.
+//!
+//! An input track has no clips: it plays the device's capture channels its `inputs` name,
+//! numbered from 1, one per channel of the track, live, whether the transport plays or not. A
+//! capture channel feeds one channel of one input track at most. An armed input track is recorded
+//! when the session is played with a recorder ([`SessionRecorder`](crate::SessionRecorder)).
 //!
 //! The schema is strict: a field unknown or missing, a value of the wrong type or out of range, a
 //! version newer than this reader's, each refuses the file with a [`FileError`] that names the
@@ -86,8 +96,14 @@ use magnolia_engine::time::TICKS_PER_QUARTER;
 /// The first field of every test session: what the file is.
 pub const FORMAT: &str = "magnolia-test-session";
 
-/// The version this reader reads, and the generator writes.
-pub const VERSION: u32 = 1;
+/// The version the generator writes, and the newest this reader reads.
+pub const VERSION: u32 = 2;
+
+/// The oldest version this reader reads: version 1, which has no input tracks.
+pub const OLDEST_VERSION: u32 = 1;
+
+/// The version that brought input tracks.
+pub const INPUT_TRACKS_SINCE: u32 = 2;
 
 /// The name an output or a send gives the master. No bus may take it.
 pub const MASTER: &str = "master";
@@ -95,7 +111,8 @@ pub const MASTER: &str = "master";
 /// The most distinct audio files a session reads: each stays open while the session plays.
 pub const MAX_AUDIO_FILES: usize = 512;
 
-/// The most channels a track, a bus or the master may have: the most a WAV file holds.
+/// The most channels a track, a bus or the master may have: the most a WAV file holds. Also the
+/// highest capture channel an input track may name.
 pub const MAX_CHANNELS: u16 = 1_024;
 
 /// A test session, as its JSON file holds it. [`parse`] reads one and checks it.
@@ -192,23 +209,33 @@ pub struct Bus {
 }
 
 /// A track: an audio track plays clips of WAV files, a MIDI track plays clips of MIDI files into
-/// its instrument.
+/// its instrument, an input track plays the device's capture channels.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Track {
-    /// Its name, as reports show it.
+    /// Its name, as reports and its takes' files show it.
     pub name: String,
     /// What it plays.
     pub kind: TrackKind,
-    /// An audio track's channels, those of its files: 1 to [`MAX_CHANNELS`]. A MIDI track has
-    /// none: its instrument gives two.
+    /// An audio track's channels, those of its files, or an input track's: 1 to [`MAX_CHANNELS`].
+    /// A MIDI track has none: its instrument gives two.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channels: Option<u16>,
-    /// A MIDI track's instrument. An audio track has none.
+    /// A MIDI track's instrument. Other tracks have none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instrument: Option<Instrument>,
-    /// Its clips, in any order.
-    pub clips: Vec<Clip>,
+    /// An input track's capture channels, numbered from 1 to [`MAX_CHANNELS`], one per channel of
+    /// the track, in order; each feeds one channel of one input track at most. Other tracks have
+    /// none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inputs: Option<Vec<u16>>,
+    /// Whether an input track is armed: recorded when the session is played with a recorder.
+    /// Other tracks have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub armed: Option<bool>,
+    /// An audio or a MIDI track's clips, in any order. An input track has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clips: Option<Vec<Clip>>,
     /// Its inserts, in series, after its source.
     pub inserts: Vec<Insert>,
     /// Where it goes: [`MASTER`] or a bus.
@@ -219,6 +246,13 @@ pub struct Track {
     pub sends: Vec<TrackSend>,
 }
 
+impl Track {
+    /// Its clips; none for an input track, or a track that gives none.
+    pub fn clips(&self) -> &[Clip] {
+        self.clips.as_deref().unwrap_or_default()
+    }
+}
+
 /// What a track plays.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -227,6 +261,8 @@ pub enum TrackKind {
     Audio,
     /// Clips of MIDI files, played into an instrument.
     Midi,
+    /// The device's capture channels, live. Since version 2.
+    Input,
 }
 
 /// A MIDI track's instrument.
@@ -294,8 +330,8 @@ struct Header {
 
 /// Reads a test session from its JSON text and checks everything that needs no file on disk: the
 /// format and its version, each value's range, the tempo map, the names that outputs and sends
-/// give, the channels of what feeds what, cycles of buses, overlapping audio clips, and the count
-/// of audio files.
+/// give, the channels of what feeds what, cycles of buses, overlapping audio clips, the count of
+/// audio files, and the capture channels of input tracks.
 ///
 /// # Errors
 ///
@@ -309,7 +345,7 @@ pub fn parse(text: &str) -> Result<SessionFile, FileError> {
             Problem::NotATestSession(header.format),
         ));
     }
-    if header.version != VERSION {
+    if !(OLDEST_VERSION..=VERSION).contains(&header.version) {
         return Err(FileError::new(
             "version",
             Problem::UnsupportedVersion(header.version),
@@ -385,8 +421,16 @@ pub enum Problem {
     Json(serde_json::Error),
     /// The format is not [`FORMAT`], but this.
     NotATestSession(String),
-    /// The version is not [`VERSION`], but this one: newer than this reader's, or 0.
+    /// The version is not one this reader reads, [`OLDEST_VERSION`] to [`VERSION`], but this one:
+    /// newer than this reader's, or 0.
     UnsupportedVersion(u32),
+    /// The field came with a later version of the format than the file's.
+    NotInVersion {
+        /// The file's version.
+        version: u32,
+        /// The version that brought the field.
+        since: u32,
+    },
     /// A value is out of its range.
     OutOfRange {
         /// The value, as the file gives it.
@@ -432,6 +476,21 @@ pub enum Problem {
     PathLeavesFolder,
     /// The clip's audio file is past the [`MAX_AUDIO_FILES`]th the session reads.
     TooManyAudioFiles,
+    /// An input track names more or fewer capture channels than it has channels.
+    InputCount {
+        /// The capture channels it names.
+        inputs: usize,
+        /// Its channels.
+        channels: u16,
+    },
+    /// The capture channel is used already, by the input at this field, such as
+    /// `tracks[2].inputs[0]`: each feeds one channel of one input track at most.
+    CaptureChannelTaken {
+        /// The capture channel, from 1.
+        channel: u16,
+        /// The field that uses it first.
+        by: String,
+    },
     /// The tempo map cannot be built.
     TempoMap(TempoMapError),
 }
@@ -450,7 +509,12 @@ impl fmt::Display for Problem {
             ),
             Self::UnsupportedVersion(version) => write!(
                 formatter,
-                "version {version} does not exist; this reader reads version {VERSION}"
+                "version {version} does not exist; this reader reads versions {OLDEST_VERSION} \
+                 to {VERSION}"
+            ),
+            Self::NotInVersion { version, since } => write!(
+                formatter,
+                "version {version} of the format does not have this; it came with version {since}"
             ),
             Self::OutOfRange { value, accepted } => {
                 write!(formatter, "{value} is out of range: {accepted}")
@@ -491,6 +555,16 @@ impl fmt::Display for Problem {
             Self::TooManyAudioFiles => write!(
                 formatter,
                 "the session reads at most {MAX_AUDIO_FILES} audio files, and this is one more"
+            ),
+            Self::InputCount { inputs, channels } => write!(
+                formatter,
+                "{inputs} capture channels for a track of {channels}; an input track names one \
+                 per channel"
+            ),
+            Self::CaptureChannelTaken { channel, by } => write!(
+                formatter,
+                "capture channel {channel} is used already, by {by}; each feeds one channel of \
+                 one input track at most"
             ),
             Self::TempoMap(error) => write!(formatter, "{error}"),
         }

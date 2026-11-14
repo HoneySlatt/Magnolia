@@ -25,6 +25,13 @@ use crate::realtime::{self, AudioServer, RealtimeStatus, ThreadScheduling};
 /// in two seconds is stalled.
 const LATENCY_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Which of Magnolia's ports a connection to the physical ones is for.
+#[derive(Clone, Copy)]
+enum Direction {
+    Playback,
+    Capture,
+}
+
 /// What [`JackBackend::open`] opens.
 pub struct JackOptions {
     /// The client's name, as the server and its patchbays show it. The server may add a suffix if
@@ -249,24 +256,56 @@ impl JackBackend {
     /// [`device_latency`](Self::device_latency) gives their latency, and other clients read
     /// Magnolia's ports' new ranges.
     pub fn connect_to_physical_playback(&self) -> Result<usize, ConnectError> {
+        self.connect_to_physical(Direction::Playback)
+    }
+
+    /// Connects each physical capture port of the server to a capture port, in order, as many as
+    /// both have, and returns how many it connected; then waits for their latency, as
+    /// [`connect_to_physical_playback`](Self::connect_to_physical_playback) does. Without it,
+    /// Magnolia's capture ports record what nothing feeds: silence.
+    pub fn connect_to_physical_capture(&self) -> Result<usize, ConnectError> {
+        self.connect_to_physical(Direction::Capture)
+    }
+
+    /// Connects Magnolia's ports of one direction to the server's physical ports, in order, then
+    /// waits for the latency callback to have run on the graph that holds them.
+    fn connect_to_physical(&self, direction: Direction) -> Result<usize, ConnectError> {
         let Some(client) = self.client() else {
             return Ok(0);
+        };
+        // A physical port that plays is an input of the graph; one that captures, an output.
+        let physical_flags = match direction {
+            Direction::Playback => PortFlags::IS_INPUT,
+            Direction::Capture => PortFlags::IS_OUTPUT,
         };
         let physical = client.ports(
             None,
             Some(jack::jack_sys::FLOAT_MONO_AUDIO),
-            PortFlags::IS_INPUT | PortFlags::IS_PHYSICAL,
+            physical_flags | PortFlags::IS_PHYSICAL,
         );
+        let pairs: Vec<(&str, &str)> = match direction {
+            Direction::Playback => self
+                .playback_ports
+                .iter()
+                .zip(&physical)
+                .map(|(own, physical)| (own.as_str(), physical.as_str()))
+                .collect(),
+            Direction::Capture => physical
+                .iter()
+                .zip(&self.capture_ports)
+                .map(|(physical, own)| (physical.as_str(), own.as_str()))
+                .collect(),
+        };
         let mut connected = Vec::new();
-        for (source, destination) in self.playback_ports.iter().zip(&physical) {
+        for (source, destination) in pairs {
             match client.connect_ports_by_name(source, destination) {
                 Ok(()) | Err(jack::Error::PortAlreadyConnected(_, _)) => {
-                    connected.push((source.as_str(), destination.as_str()));
+                    connected.push((source, destination));
                 }
                 Err(error) => {
                     return Err(ConnectError::Refused {
-                        source: source.clone(),
-                        destination: destination.clone(),
+                        source: source.to_owned(),
+                        destination: destination.to_owned(),
                         detail: error.to_string(),
                     });
                 }

@@ -74,7 +74,9 @@ fn reads_and_reports_the_dummy_drivers_latencies(period: u32) {
         }
     );
 
-    // Connected by the backend, which waits for the callback itself.
+    // Connected by the backend, which waits for the callback itself; a capture port already
+    // connected counts.
+    assert_eq!(rig.backend.connect_to_physical_capture().unwrap(), 1);
     assert_eq!(rig.backend.connect_to_physical_playback().unwrap(), 1);
     let expected = DeviceLatency {
         capture: period,

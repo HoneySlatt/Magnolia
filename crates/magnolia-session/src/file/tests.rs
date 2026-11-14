@@ -72,12 +72,16 @@ fn the_documented_example_parses() -> TestResult {
         return Err("one bus".into());
     };
     assert_eq!(bus.inserts, [Insert::TestLatency { samples: 64 }]);
-    let [audio, midi] = file.tracks.as_slice() else {
-        return Err("two tracks".into());
+    let [audio, midi, input] = file.tracks.as_slice() else {
+        return Err("three tracks".into());
     };
     assert_eq!((audio.kind, audio.channels), (TrackKind::Audio, Some(1)));
     assert_eq!(midi.kind, TrackKind::Midi);
     assert_eq!(midi.instrument, Some(Instrument::TestSynth {}));
-    assert!(midi.clips.iter().all(|clip| clip.file_offset.is_none()));
+    assert!(midi.clips().iter().all(|clip| clip.file_offset.is_none()));
+    assert_eq!((input.kind, input.channels), (TrackKind::Input, Some(1)));
+    assert_eq!(input.inputs.as_deref(), Some(&[1][..]));
+    assert_eq!(input.armed, Some(true));
+    assert!(input.clips.is_none());
     Ok(())
 }

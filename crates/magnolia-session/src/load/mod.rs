@@ -1,7 +1,8 @@
 //! Opening a test session: [`Session::open`] reads its file and checks it, holds the memory it
 //! asks for to a budget ([`MemoryEstimate`]), opens its audio files, reads its MIDI files into
 //! sequences, and resolves its routing, so that [`Session::build`](crate::build) only makes
-//! nodes.
+//! nodes. [`Session::armed_tracks`] and [`Session::monitoring_latency`] say what a recorder and a
+//! backend need of its input tracks.
 
 // The loader reads files from outside; a bad file must never crash Magnolia, so nothing here may
 // panic.
@@ -14,6 +15,7 @@
 )]
 
 mod budget;
+mod latency;
 mod midi;
 
 #[cfg(test)]
@@ -30,6 +32,7 @@ use std::sync::Arc;
 
 use magnolia_engine::disk::{AudioClip, AudioFile, AudioTrack};
 use magnolia_engine::engine::{MidiSequence, SequenceError};
+use magnolia_engine::record::RecordTrack;
 use magnolia_engine::time::{SamplePosition, SampleRate, TempoMap};
 use magnolia_engine::wav::WavError;
 
@@ -40,6 +43,8 @@ use crate::file::{
 use crate::midi_file::{self, MidiFile, MidiFileError};
 
 pub use budget::{MEMORY_BUDGET, MemoryEstimate};
+
+use latency::Demands;
 
 /// The most bytes a session's JSON file, or one of its MIDI files, may hold: 64 MiB.
 pub const MAX_FILE_BYTES: u64 = 64 << 20;
@@ -53,6 +58,8 @@ pub struct Session {
     pub(crate) tempo_map: Arc<TempoMap>,
     pub(crate) master_channels: u16,
     pub(crate) master_inserts: Vec<Insert>,
+    /// The capture channels the engine needs: the highest an input track names.
+    pub(crate) capture_channels: u16,
     pub(crate) routing: Routing,
     /// Each track's name and what it plays, in the file's order, as `routing.tracks`.
     pub(crate) tracks: Vec<LoadedTrack>,
@@ -78,6 +85,9 @@ pub(crate) enum LoadedSource {
         instrument: Instrument,
         sequence: Arc<MidiSequence>,
     },
+    /// The engine's capture channels it plays, numbered from 0, one per channel, and whether it is
+    /// armed.
+    Input { capture: Vec<usize>, armed: bool },
 }
 
 impl Session {
@@ -137,6 +147,49 @@ impl Session {
     /// The master's channels: the engine's playback channels.
     pub fn master_channels(&self) -> u16 {
         self.master_channels
+    }
+
+    /// The engine's capture channels: the highest that an input track names, 0 without input
+    /// tracks.
+    pub fn capture_channels(&self) -> u16 {
+        self.capture_channels
+    }
+
+    /// Each armed input track, as a recorder arms it: its number, counted from 1 in the session's
+    /// order of tracks, every kind together, which its takes' files start with; its name; and its
+    /// capture channels, numbered from 0 as the engine numbers them, one per channel of its takes.
+    pub fn armed_tracks(&self) -> Vec<RecordTrack> {
+        self.tracks
+            .iter()
+            .enumerate()
+            .filter_map(|(index, track)| match &track.source {
+                LoadedSource::Input {
+                    capture,
+                    armed: true,
+                } => Some(RecordTrack {
+                    number: u32::try_from(index.saturating_add(1)).unwrap_or(u32::MAX),
+                    name: track.name.clone(),
+                    capture_channels: capture.clone(),
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The latency of the monitoring path, in samples: how late a capture frame reaches the
+    /// playback channels on the slowest path from an input track, through its output or any of its
+    /// sends; `None` for a session without input tracks. A live path is never delayed to line it up
+    /// with others (`docs/ARCHITECTURE.md`, *Delay compensation*), so this is the sum of the test
+    /// latencies along the path: the track's inserts, each bus it goes through, and the master's
+    /// inserts. A backend reports it to other clients (ADR-0031).
+    pub fn monitoring_latency(&self) -> Option<u64> {
+        let demands = Demands::new(&self.master_inserts, &self.routing.buses);
+        self.tracks
+            .iter()
+            .zip(&self.routing.tracks)
+            .filter(|(track, _)| matches!(track.source, LoadedSource::Input { .. }))
+            .map(|(_, strip)| demands.slowest_path(strip))
+            .max()
     }
 
     /// What the session asks for in memory, estimated before anything was allocated, within
@@ -200,10 +253,10 @@ impl<'a> Loader<'a> {
     fn read_midi_files(&mut self, sources: &[TrackSource]) -> Result<(), Failed> {
         let file = self.file;
         for (index, (track, source)) in file.tracks.iter().zip(sources).enumerate() {
-            if let TrackSource::Audio { .. } = source {
+            if !matches!(source, TrackSource::Midi(_)) {
                 continue;
             }
-            for (clip_index, clip) in track.clips.iter().enumerate() {
+            for (clip_index, clip) in track.clips().iter().enumerate() {
                 let field = format!("tracks[{index}].clips[{clip_index}].file");
                 let (_, midi) = self.midi_file(&field, &clip.file)?;
                 let events = event_count(midi);
@@ -224,13 +277,16 @@ impl<'a> Loader<'a> {
             .enumerate()
             .map(|(index, track)| track.source(&format!("tracks[{index}]")))
             .collect::<Result<Vec<_>, _>>()?;
-        // Nothing large is allocated before the estimate fits the budget: the streams, delays and
-        // buffers from the file alone; then the MIDI files, each read once, and their clips.
+        let capture_channels = self.file.capture_channels();
+        // Nothing large is allocated before the estimate fits the budget: the streams, delays,
+        // buffers and rings from the file alone; then the MIDI files, each read once, and their
+        // clips.
         self.memory = MemoryEstimate::of_session(
             rate,
             (self.file.master.channels, &self.file.master.inserts),
             &routing,
             &sources,
+            capture_channels,
         );
         self.check_budget()?;
         self.read_midi_files(&sources)?;
@@ -245,6 +301,15 @@ impl<'a> Loader<'a> {
                 TrackSource::Midi(instrument) => {
                     self.midi_track(&field, track, instrument, rate, &tempo_map)?
                 }
+                TrackSource::Input { armed, .. } => {
+                    let capture = track
+                        .inputs
+                        .iter()
+                        .flatten()
+                        .map(|&input| usize::from(input.saturating_sub(1)))
+                        .collect();
+                    (LoadedSource::Input { capture, armed }, 0)
+                }
             };
             last_sample = last_sample.max(end);
             tracks.push(LoadedTrack {
@@ -257,6 +322,7 @@ impl<'a> Loader<'a> {
             tempo_map: Arc::new(tempo_map),
             master_channels: self.file.master.channels,
             master_inserts: self.file.master.inserts.clone(),
+            capture_channels,
             routing,
             tracks,
             last_sample: SamplePosition(last_sample),
@@ -272,9 +338,9 @@ impl<'a> Loader<'a> {
         channels: u16,
         rate: SampleRate,
     ) -> Result<(LoadedSource, i64), Failed> {
-        let mut clips = Vec::with_capacity(track.clips.len());
+        let mut clips = Vec::with_capacity(track.clips().len());
         let mut end = 0;
-        for (index, clip) in track.clips.iter().enumerate() {
+        for (index, clip) in track.clips().iter().enumerate() {
             let field = format!("{field}.clips[{index}]");
             let placed = place_audio_clip(&field, clip, rate)?;
             let file_field = format!("{field}.file");
@@ -329,9 +395,9 @@ impl<'a> Loader<'a> {
         rate: SampleRate,
         tempo_map: &TempoMap,
     ) -> Result<(LoadedSource, i64), Failed> {
-        let mut clips = Vec::with_capacity(track.clips.len());
+        let mut clips = Vec::with_capacity(track.clips().len());
         let mut end = 0;
-        for (index, clip) in track.clips.iter().enumerate() {
+        for (index, clip) in track.clips().iter().enumerate() {
             let field = format!("{field}.clips[{index}]");
             let placed = place_midi_clip(&field, clip, rate, tempo_map)?;
             let file_field = format!("{field}.file");

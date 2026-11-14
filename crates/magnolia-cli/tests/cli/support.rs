@@ -1,11 +1,28 @@
-//! What the command line's tests share: the `magnolia` binary run with arguments, and a folder of
-//! their own.
+//! What the command line's tests share: the `magnolia` binary run with arguments, a folder of
+//! their own, and the turn of the tests that start a JACK server.
 
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{MutexGuard, PoisonError};
+
+/// Takes the lock that runs the tests that start a JACK server one at a time: each starts a
+/// server of its own, and several at once would load the machine for nothing.
+#[expect(
+    clippy::disallowed_types,
+    reason = "the tests' threads take turns; no real-time code takes this lock"
+)]
+pub fn one_at_a_time() -> MutexGuard<'static, ()> {
+    static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    TURN.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The path of the `magnolia` binary the tests run.
+pub fn magnolia_binary() -> &'static str {
+    env!("CARGO_BIN_EXE_magnolia")
+}
 
 /// What a run of `magnolia` did.
 pub struct Ran {
@@ -22,7 +39,7 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let output = Command::new(env!("CARGO_BIN_EXE_magnolia"))
+    let output = Command::new(magnolia_binary())
         .args(arguments)
         .output()
         .expect("the magnolia binary runs");

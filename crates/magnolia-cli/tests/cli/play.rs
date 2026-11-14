@@ -1,25 +1,14 @@
 //! `magnolia play` on a JACK2 server of the test's own, on the dummy driver: it plays for the
-//! seconds asked, exits with 0 and prints its figures; a server at another rate, or none, is a
-//! plain error. None of these runs passes `--connect`.
+//! seconds asked, exits with 0 and prints its figures, the round trip's latency first, as the small
+//! session has an input track; a server at another rate, or none, is a plain error. None of these
+//! runs passes `--connect`.
 
 use std::ffi::OsString;
-use std::sync::{MutexGuard, PoisonError};
 
 use magnolia_session::generate::{Kind, generate};
 
 use crate::common::{Server, refuse_pipewire};
-use crate::support::{TempDir, magnolia};
-
-/// Takes the lock that runs these tests one at a time: each starts a server of its own, and
-/// several at once would load the machine for nothing.
-#[expect(
-    clippy::disallowed_types,
-    reason = "the tests' threads take turns; no real-time code takes this lock"
-)]
-fn one_at_a_time() -> MutexGuard<'static, ()> {
-    static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    TURN.lock().unwrap_or_else(PoisonError::into_inner)
-}
+use crate::support::{TempDir, magnolia, one_at_a_time};
 
 /// Generates the small session into `dir` and returns the arguments that play it on `server`.
 fn play_small(dir: &TempDir, server: &str) -> Vec<OsString> {
@@ -45,6 +34,12 @@ fn play_plays_for_the_seconds_asked_and_prints_its_figures() {
     for expected in [
         "Playing ",
         "256 frames at 48000 Hz, from 1.500 s to 4.500 s.",
+        // Ports connected to nothing have no latency; the mic's path runs through its 32 samples,
+        // then the room's 100.
+        "  capture: 0 frames (0.000 ms)",
+        "  playback: 0 frames (0.000 ms)",
+        "  round trip: 0 frames (0.000 ms)",
+        "  monitoring path: 132 frames (2.750 ms)",
         // The real-time report: on JACK2 without -R, the audio thread does not run in real time.
         "real time",
         "periods: ",
@@ -69,6 +64,10 @@ fn play_plays_for_the_seconds_asked_and_prints_its_figures() {
         );
     }
     // Three seconds at 256 frames are 562 periods, and the play waits for its start and its stop.
+    assert!(
+        !stdout.contains("extra") && !stdout.contains("Takes"),
+        "a play records nothing:\n{stdout}"
+    );
     let periods: u64 = stdout
         .lines()
         .find_map(|line| line.strip_prefix("periods: "))
