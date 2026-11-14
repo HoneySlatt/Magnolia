@@ -191,10 +191,10 @@ float32|int24` (float32, the device's samples bit for bit, by default). `--conne
 playback ports, then the capture ports, to the first physical ones, before the take starts: a
 connection made during a take changes its latency, which ends it; an armed track whose capture
 port finds no physical port is warned of, as it records silence. `--extra-latency` takes at most
-65,536 frames. Before it opens the server, it recovers the folder, holds it for its own, and prints the round trip with the extra and
-what places the takes. Once the takes have ended, it prints each take (its file, track, first
-timeline sample, frames and how it ended), the recovery made at the start, the recorder's figures
-and the engine's. A take is named `<track number>-<track name>-take<n>.wav`, the tracks counted
+65,536 frames. Before it opens the server, it recovers the folder, holds it for its own, and
+prints what the recovery did; then the round trip with the extra and what places the takes. Once
+the takes have ended, it prints each take (its file, track, first timeline sample, frames and how
+it ended), the recorder's figures and the engine's. A take is named `<track number>-<track name>-take<n>.wav`, the tracks counted
 from 1 in the session's order. It exits with 1 when a take's writing failed or a change of latency
 ended it; a take padded with silence after the disk fell behind exits 0, its padding printed. A
 play that fails mid-take still ends its takes at what they recorded, and lists them.
@@ -208,6 +208,33 @@ cargo run --release -p magnolia-cli -- recover /tmp/magnolia-takes
 
 which lists each take found and whether it was repaired, and refuses a folder that a recording
 uses. Delete the folder afterwards: nothing cleans it.
+
+#### Measuring the round trip
+
+A loopback cable from an output of the audio interface to an input, and `jack_iodelay` (JACK's
+example tools), measure the round trip
+([ADR-0031](docs/adr/0031-the-round-trip-reported-and-takes-placed-by-it.md)). Direct: connect
+`jack_delay:out` to the physical playback port the cable leaves and the physical capture port it
+enters to `jack_delay:in`; note the total round trip and the extra loopback latency. Through
+Magnolia's monitoring path: play a session that holds only an input track, written into
+`loop/session.json`:
+
+```json
+{"format": "magnolia-test-session", "version": 2, "sample_rate": 48000,
+ "tempo": {"origin": 0, "changes": [{"tick": 0, "bpm": [120, 1]}],
+           "meters": [{"bar": 0, "beats": 4, "beat_unit": 4}]},
+ "master": {"channels": 2, "inserts": []}, "buses": [],
+ "tracks": [{"name": "voice", "kind": "input", "channels": 1, "inputs": [1], "armed": false,
+             "inserts": [], "output": "master", "gain": 1.0, "sends": []}]}
+```
+
+```sh
+pw-jack -p 64 cargo run --release -p magnolia-cli -- play loop/session.json --seconds 60
+```
+
+then connect `jack_delay:out` to the cable's playback port, the cable's capture port to
+`magnolia:capture_1`, and `magnolia:playback_1` to `jack_delay:in`. The two total round trips must
+be equal, to the sample. The extra loopback latency is what `record --extra-latency` takes.
 
 ## Fuzzing
 
@@ -283,4 +310,4 @@ each fuzz folder's manifest, such as `--manifest-path crates/magnolia-session/fu
 the script finds every `crates/*/fuzz/` folder.
 
 How long a full check takes, and its budget, are in
-[`docs/measurements.md`](docs/measurements.md#m14--a-session-plays).
+[`docs/measurements.md`](docs/measurements.md#m15--recording-and-monitoring).

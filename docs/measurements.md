@@ -236,3 +236,63 @@ ran side by side, the full check took 298 s from nothing and 232 s with
 nothing changed, over its budget: five targets of 20 s one after the other. `scripts/check.sh` now
 prints each step's time; the tests take about a minute, the JACK backend's playing in real time on
 their dummy servers.
+
+## M1.5 — Recording and monitoring
+
+Taken on 2026-11-14 on the high tier (AMD Ryzen 7 5800X, 8 cores, 16 threads, NVMe, btrfs), with
+rustc 1.99.1, the nightly of 2026-11-05 and JACK2 1.9.22, inside the development shell. The round
+trip through the Focusrite is the owner's to measure ([PLAN](PLAN.md#m15--recording-and-monitoring)).
+
+### The recorder
+
+`cargo bench --bench recorder`: mono noise recorded for 10 s in real time, in periods of 256 frames,
+on the bench's thread at normal priority; the writer syncs each take's data every second of its
+audio, on a pool of sync threads. Load average 3.0 to 1.2. No frame was dropped in any run, and every
+ring's fullest fill was its 2,048-frame wake threshold: the writer always kept up.
+
+| Armed tracks | Sync threads | Writer's pass, mean | Longest pass | Syncs | Longest sync | Callback: median, 99.9th |
+|---|---|---|---|---|---|---|
+| 1 | 4 | 52 µs | 89 µs | 13 | 1.8 ms | 12 µs, 30 µs |
+| 8 | 4 | 166 µs | 291 µs | 97 | 2.3 ms | 8.7 µs, 55 µs |
+| 32 | 8 | 557 µs | 11.7 ms | 385 | 7.9 ms | 18 µs, 238 µs |
+| 32 | 4 (the default) | 501 µs | 1.13 ms | 369 | 8.0 ms | 16 µs, 74 µs |
+| 32 | 2 | 513 µs | 1.09 ms | 360 | 4.7 ms | 16 µs, 86 µs |
+| 32 | 1 | 514 µs | 0.94 ms | 359 | 6.9 ms | 18 µs, 94 µs |
+
+Eight `fdatasync` calls at once slow one another on this btrfs and stall the writer's writes: 5.5 to
+57 ms in five earlier runs, against about 1.1 ms with four threads, which keep the syncs parallel.
+The callback's figures include the capture tap and a test graph, not the reference projects. The
+lowest tier's storage is measured by the owner.
+
+### The tests that prove it
+
+- Killed mid-take with SIGKILL after at least 200,000 frames, a take is recovered whole: every frame
+  the recorder had written, exact, its `bext` time reference right (`tests/engine/record.rs`).
+- A simulated power cut, 300 seeds, keeps every frame synced before it, exact, and whole frames only
+  (`record/tests.rs`).
+- Takes are placed to the sample for round trips of 0 to 5,000 frames, periods of 1 to 4,096 frames,
+  a play while rolling and a swap during the take.
+- On JACK2's dummy driver, an impulse through Magnolia's monitoring path arrives on the same sample
+  as a direct one, and 100 samples later through a `TestLatency` of 100 (`tests/jack/round_trip.rs`);
+  the dummy reports one period of capture latency and two of playback, at 64 and 256 frames.
+
+### Compiling and checking
+
+The median of three runs, in a target folder of its own. Load average 2.5 to 4.6.
+
+| What | Time | Budget ([floors](ROADMAP.md#floors)) |
+|---|---|---|
+| A debug build of the workspace from nothing | 4.6 s (4.7, 4.6, 4.6) | 3 min |
+| A release build from nothing | 5.7 s (5.8, 5.7, 5.7) | 10 min |
+| A debug build after a change to the engine, a low-level crate | 0.70 s | 10 s |
+| A change to the engine, `magnolia` rebuilt, relaunched and playing the `small` session on a dummy JACK2 for 0.1 s, then stopped | 1.05 s (the build 0.70 s) | 2 s |
+| A full check from nothing | 153 s (153, 144, 194) | 3 min |
+| A full check, nothing changed, one run | 83 s | — |
+| The CI job | 4 min 53 s | 20 min |
+
+The load rose from 0.8 to 18.8 during the three full checks, as other work started; the third, at
+the highest load, took 194 s, over the budget. Another run from nothing, earlier that day at a load
+of 3.5, took 144 s. The CI job's time is that of run 43568954353, one run. The tests' step went from
+about 90 s at M1.4 to about 45 s: the JACK backend's tests now run in
+JACK2's freewheel mode, 10 to 17 s against 38 to 64 s before, though M1.5 added the recorder's, the
+latency's, the round trip's and the command line's tests.

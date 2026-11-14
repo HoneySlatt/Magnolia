@@ -19,19 +19,11 @@ tier, into [`measurements.md`](measurements.md).
   ([ADR-0011](adr/0011-magnolia-no-longer-a-program-of-uwuis-first-stage.md)).
 - **M1.1, the workspace and its checks: done, 2026-11-10.**
 - **M1.2, the time model: done, 2026-11-11** ([ADR-0018](adr/0018-the-time-model.md)).
-- **M1.3, the JACK backend and the graph: built, 2026-11-11; waiting for the owner's measures by
-  hand**, on the owner's decisions of that day
-  ([ADR-0019](adr/0019-the-sanitizers-nightly-code-behind-a-cfg.md) to
-  [ADR-0024](adr/0024-how-a-swap-avoids-a-click.md); `jack`, `rtrb` and `libc` taken; the
-  [reference projects](reference-projects.md) adopted). What only the owner's hardware can
-  measure is [listed below](#m13--the-jack-backend-and-the-graph).
-- **M1.4, a session plays: built, 2026-11-11; waiting for the owner's measures by hand**, on the
-  owner's decisions of that day ([ADR-0025](adr/0025-delay-compensation-by-reading-ahead.md) to
-  [ADR-0029](adr/0029-magnolias-own-wav-and-midi-file-readers.md); `serde` and `serde_json` taken).
-  What only the owner's hardware can measure is [listed below](#m14--a-session-plays).
-- **M1.5, recording and monitoring: in progress**, on the owner's decisions of 2026-11-12
-  ([ADR-0030](adr/0030-takes-in-wav-of-unknown-length-repaired-on-recovery.md) to
-  [ADR-0032](adr/0032-recording-by-a-capture-tap-of-the-processor.md)).
+- **M1.3 to M1.5: built, 2026-11-11 to 14; waiting for the owner's measures by hand**, on the
+  owner's decisions ([ADR-0019](adr/0019-the-sanitizers-nightly-code-behind-a-cfg.md) to
+  [ADR-0032](adr/0032-recording-by-a-capture-tap-of-the-processor.md); `jack`, `rtrb`, `libc`,
+  `serde` and `serde_json` taken; the [reference projects](reference-projects.md) adopted). What
+  only the owner's hardware can measure is listed in each milestone below.
 
 ## Status
 
@@ -41,7 +33,7 @@ tier, into [`measurements.md`](measurements.md).
 | [M1.2](#m12--the-time-model) | Positions, tempo, meter and timecode are exact | Done |
 | [M1.3](#m13--the-jack-backend-and-the-graph) | A graph of nodes plays through the JACK API, swapped without a click | Built; waiting for the owner's measures by hand |
 | [M1.4](#m14--a-session-plays) | A test session of clips and MIDI plays from disk, delays compensated | Built; waiting for the owner's measures by hand |
-| [M1.5](#m15--recording-and-monitoring) | A voice is recorded and monitored at low latency | In progress |
+| [M1.5](#m15--recording-and-monitoring) | A voice is recorded and monitored at low latency | Built; waiting for the owner's measures by hand |
 | [M1.6](#m16--plugin-hosts) | Native CLAP and VST3 plugins play out of the engine's process and survive a crash | Planned |
 | [M1.7](#m17--the-wine-bridge) | The owner's Windows plugins play under the system's Wine | Planned |
 | [M1.8](#m18--plugin-windows-and-the-command-surface) | Plugin GUIs open; the engine is driven by the command line and MCP | Planned |
@@ -56,15 +48,13 @@ process, without an interface
 
 ### M1.1 — The workspace and its checks
 
-Done, 2026-11-10: the Cargo workspace, the toolchains in the development shell, `scripts/check.sh`
-and CI; RealtimeSanitizer proved to catch an allocation in a function marked real-time
+Done, 2026-11-10: the workspace, its checks and CI
 ([measurements](measurements.md#m11--the-workspace-and-its-checks)).
 
 ### M1.2 — The time model
 
-Done, 2026-11-11: exact positions over a film's length ([ADR-0018](adr/0018-the-time-model.md)),
-in `magnolia_engine::time`, tested over ten hours against an independent oracle, fuzzed,
-benchmarked ([measurements](measurements.md#m12--the-time-model)).
+Done, 2026-11-11: exact positions over a film's length ([ADR-0018](adr/0018-the-time-model.md),
+[measurements](measurements.md#m12--the-time-model)).
 
 ### M1.3 — The JACK backend and the graph
 
@@ -80,13 +70,9 @@ benchmarked ([measurements](measurements.md#m12--the-time-model)).
   named; the lowest tier's reference project defined, its plugins named; its memory, within
   2.5 GB, is measured at M1.9, once it can play
   ([ADR-0014](adr/0014-the-quality-bar-measured-against-the-market.md)).
-- **Delivered**, on the owner's decisions of 2026-11-11: in `magnolia-engine`, nodes under
-  [ADR-0021](adr/0021-the-node-contract.md)'s contract in an arena, the compiled graph swapped by a
-  crossfade or a dip, one swap in flight, sample-accurate events, the collector, the histogram and
-  counters, silence on a panic ([ADR-0022](adr/0022-a-panic-on-the-real-time-path-gives-silence.md)),
-  a device-less backend; `magnolia-jack`, the duplex backend, its report of real-time rights and an
-  example that plays a sine. Tested against an oracle, on JACK2's dummy driver in CI, and under
-  RealtimeSanitizer with its [allowlist](adr/0023-the-real-time-allowlist.md). Figures in
+- **Delivered**, on ADR-0019 to ADR-0024: the graph, its swaps, events and collector in
+  `magnolia-engine`; the duplex backend in `magnolia-jack`; tested against an oracle, on JACK2's
+  dummy driver and under RealtimeSanitizer. Figures in
   [`measurements.md`](measurements.md#m13--the-jack-backend-and-the-graph).
 - **By hand, by the owner** (agents have no sound card and no display):
   - listen through PipeWire: `pw-jack -p 64 cargo run --release -p magnolia-jack --example play --
@@ -110,11 +96,10 @@ benchmarked ([measurements](measurements.md#m12--the-time-model)).
 - **How to test.** `cargo test`; the command line plays the session by hand.
 - **Measured.** The callback's histogram on the reference project without plugins; the disk
   thread's read-ahead.
-- **Delivered**, on ADR-0025 to ADR-0029: in `magnolia-engine`, compensation, structured events,
-  the transport, MIDI sequences, the disk reader, WAV files; `magnolia-session`, MIDI files, the
-  test session, its render and generator; `magnolia-cli`, the `magnolia` command. Tested: a render nulls against playback through the device-less backend and
-  through JACK2's dummy driver at 64 and 256 frames; compensation aligns `TestLatency` to the
-  sample. Figures in [`measurements.md`](measurements.md#m14--a-session-plays).
+- **Delivered**, on ADR-0025 to ADR-0029: compensation, the transport, MIDI sequences, the disk
+  reader, WAV and MIDI files, the test session, the `magnolia` command. Tested: a render nulls
+  against playback, device-less and through JACK2's dummy driver; compensation aligns
+  `TestLatency` to the sample. Figures in [`measurements.md`](measurements.md#m14--a-session-plays).
 - **By hand, by the owner**, with the reference projects generated as
   [CONTRIBUTING](../CONTRIBUTING.md#test-sessions) says:
   - listen through PipeWire: `pw-jack -p 64 cargo run --release -p magnolia-cli -- play
@@ -136,10 +121,22 @@ benchmarked ([measurements](measurements.md#m12--the-time-model)).
 - **How to test.** `cargo test` for recovery; the loopback by hand.
 - **Measured.** The round trip with a loopback cable and `jack_iodelay`, by the owner on the
   Focusrite.
-- **Where it stands**, 2026-11-14: built and merged: the WAV takes and their repair, the device's
-  latencies read by JACK's latency callback, the capture tap, the recorder and recovery, tested
-  (a take killed mid-way recovered whole). Next: input tracks in the test session, `magnolia
-  record` and `magnolia recover`; then the figures and the closing review.
+- **Delivered**, on ADR-0030 to ADR-0032: in `magnolia-engine`, WAV takes of unknown length with
+  `bext` and their repair, the capture tap, the recorder and recovery (`record`); in
+  `magnolia-jack`, the device's latencies from JACK's latency callback, physical capture connected,
+  its tests in freewheel; version 2 of the test session with input tracks; `magnolia record` and
+  `magnolia recover`. Tested: a take killed mid-way recovered whole; a simulated power cut keeps
+  every synced frame; takes placed to the sample by the round trip; on JACK2's dummy driver, an
+  impulse through Magnolia's monitoring path arrives with a direct one. Figures in
+  [`measurements.md`](measurements.md#m15--recording-and-monitoring).
+- **By hand, by the owner**, as [CONTRIBUTING](../CONTRIBUTING.md#measuring-the-round-trip) says:
+  - on the Focusrite at 64 frames, a loopback cable and `jack_iodelay`, direct and through
+    Magnolia's monitoring path: the two round trips equal, to the sample;
+  - a take of the small session's playback through the cable, placed by `--extra-latency` from
+    `jack_iodelay`: in line with its render, to the sample;
+  - through `pw-jack`: the latency report gives PipeWire's figures, and `record --connect` records;
+  - a voice recorded and heard live, at 64 frames;
+  - on the laptop, `cargo bench --bench recorder`: the syncs' stall on its storage.
 
 ### M1.6 — Plugin hosts
 
