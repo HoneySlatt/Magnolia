@@ -33,7 +33,7 @@ use magnolia_jack::{JackBackend, JackOptions};
 use magnolia_session::generate::{Kind, generate};
 use magnolia_session::{Session, SessionPlayer, render};
 
-use crate::common::Server;
+use crate::common::{Server, client_name, step};
 use crate::support::{Freewheel, Gaps, one_at_a_time, wait_for};
 
 /// What the recorder may record before the play's first audible sample: the disk reader's
@@ -163,8 +163,9 @@ fn play_through_jack(session: &Session, period: u32, frames: usize) -> Played {
     let server = Server::start(period);
     let (mut player, processor) = SessionPlayer::new(session).unwrap();
     let channels = processor.playback_channels();
+    step("opening Magnolia's client");
     let backend = JackBackend::open(JackOptions {
-        client_name: "magnolia".to_owned(),
+        client_name: client_name("magnolia"),
         server_name: Some(server.name.clone()),
         processor,
     })
@@ -213,6 +214,7 @@ fn play_through_jack(session: &Session, period: u32, frames: usize) -> Played {
     let tearing_down = Instant::now();
     let (channels, period_starts) = recorder.finish();
     player.stop().unwrap();
+    step("closing Magnolia's client");
     backend.close().expect("the backend closes");
     let teardown = tearing_down.elapsed();
     Played {
@@ -323,9 +325,13 @@ impl Recorder {
         capacity: usize,
         period: u32,
     ) -> Self {
-        let (client, _) =
-            Client::new_with_server_name("recorder", &server.name, ClientOptions::NO_START_SERVER)
-                .expect("the recorder opens on the test's server");
+        step("opening the recorder");
+        let (client, _) = Client::new_with_server_name(
+            &client_name("recorder"),
+            &server.name,
+            ClientOptions::NO_START_SERVER,
+        )
+        .expect("the recorder opens on the test's server");
         let ports: Vec<Port<AudioIn>> = (1..=channels)
             .map(|channel| {
                 client
@@ -395,6 +401,7 @@ impl Recorder {
 
     /// Deactivates it and returns each channel and where each period recorded starts.
     fn finish(self) -> (Vec<Vec<f32>>, Vec<Option<i64>>) {
+        step("closing the recorder");
         let (_, _, recording) = self.client.deactivate().unwrap();
         (recording.channels, recording.period_starts)
     }

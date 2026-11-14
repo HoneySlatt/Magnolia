@@ -107,6 +107,44 @@ pub(crate) struct RecorderLink {
     /// Makes the tap's next run panic, so that a test sees what follows.
     #[cfg(test)]
     pub(crate) panic_in_tap: AtomicBool,
+    /// Holds a tap's drop once it has asked for its last pass, so that a test runs that pass then.
+    #[cfg(test)]
+    pub(crate) drop_gate: DropGate,
+}
+
+/// A unit test's gate in a tap's drop, right after the drop asks the recorder for a pass: while
+/// the gate is closed, the drop waits there, its rings still held, so that the test sees that pass
+/// run before the drop ends.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct DropGate {
+    /// Whether the gate is closed: a drop then waits at it.
+    pub(crate) closed: AtomicBool,
+    /// Whether a drop waits at the gate now.
+    pub(crate) waiting: AtomicBool,
+}
+
+#[cfg(test)]
+impl DropGate {
+    /// Waits while the gate is closed, 20 seconds at most, so that a failing test never leaves a
+    /// drop waiting.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a unit test's tap waits in its drop, which never runs on the real-time path"
+    )]
+    fn wait(&self) {
+        if !self.closed.load(Ordering::Acquire) {
+            return;
+        }
+        self.waiting.store(true, Ordering::Release);
+        let start = std::time::Instant::now();
+        while self.closed.load(Ordering::Acquire)
+            && start.elapsed() < std::time::Duration::from_secs(20)
+        {
+            std::thread::sleep(std::time::Duration::from_micros(50));
+        }
+        self.waiting.store(false, Ordering::Release);
+    }
 }
 
 impl RecorderLink {
@@ -183,9 +221,20 @@ pub(crate) struct TapRings {
     pub(crate) frames: Consumer<f32>,
     pub(crate) marks: Consumer<Mark>,
     pub(crate) fills: Arc<RingFills>,
+    /// Set by the tap's drop before it asks the recorder for a pass ([`Drop for
+    /// TrackTap`](TrackTap)).
+    pub(crate) tap_dropped: Arc<AtomicBool>,
     /// Frames taken from the frames ring since the tap was made: where the next one lies in the
     /// tap's stream, which the marks' positions count in.
     pub(crate) consumed: u64,
+}
+
+impl TapRings {
+    /// Whether the tap was dropped: it has then pushed all it ever will, and those pushes are seen
+    /// by the reads that follow. A pass that a tap's drop woke always finds it set.
+    pub(crate) fn is_tap_dropped(&self) -> bool {
+        self.tap_dropped.load(Ordering::Acquire)
+    }
 }
 
 /// One take, from its play's start until its end is pushed.
@@ -258,6 +307,8 @@ pub(crate) struct TrackTap {
     marks: Producer<Mark>,
     link: Arc<RecorderLink>,
     fills: Arc<RingFills>,
+    /// Set when the tap is dropped, before it asks the recorder for its last pass.
+    dropped: Arc<AtomicBool>,
     /// The takes under way, in the order of their plays.
     windows: [Option<Window>; MAX_WINDOWS],
     /// The last play the tap has seen: a play after it opens a window.
@@ -300,6 +351,7 @@ impl TrackTap {
             frames: AtomicU64::new(black_box(0)),
             marks: AtomicU64::new(black_box(0)),
         });
+        let dropped = Arc::new(AtomicBool::new(false));
         let tap = Self {
             id: TapId::next(),
             track,
@@ -309,6 +361,7 @@ impl TrackTap {
             marks,
             link,
             fills: Arc::clone(&fills),
+            dropped: Arc::clone(&dropped),
             windows: [None; MAX_WINDOWS],
             last_play: 0,
             pushed: 0,
@@ -319,6 +372,7 @@ impl TrackTap {
             frames: frames_out,
             marks: marks_out,
             fills,
+            tap_dropped: dropped,
             consumed: 0,
         };
         (tap, rings)
@@ -614,12 +668,20 @@ impl TrackTap {
 }
 
 impl Drop for TrackTap {
-    /// Asks the recorder for a pass, which finds the rings abandoned and ends the take this tap
-    /// left under way: a tap is dropped off the real-time thread, by the collector after a disarm,
-    /// with the processor, or unarmed.
+    /// Says the tap is dropped, then asks the recorder for a pass, which finds it so and ends the
+    /// take this tap left under way: a tap is dropped off the real-time thread, by the collector
+    /// after a disarm, with the processor, or unarmed.
+    ///
+    /// The flag is set before the ask, never left to the rings: their producers are dropped only
+    /// after this body, so a pass that the ask woke could find them still held, and then nothing
+    /// would wake the recorder again for this track. The release store, and the ask's
+    /// read-modify-write after it, make every push of the tap visible to that pass.
     fn drop(&mut self) {
+        self.dropped.store(true, Ordering::Release);
         self.link.flag.asked.swap(true, Ordering::AcqRel);
         self.link.thread.unpark();
+        #[cfg(test)]
+        self.link.drop_gate.wait();
     }
 }
 

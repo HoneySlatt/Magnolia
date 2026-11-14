@@ -8,8 +8,8 @@
 use std::f64::consts::{PI, TAU};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use jack::{
@@ -21,7 +21,8 @@ use magnolia_engine::node::{Node, ProcessContext, ProcessStatus};
 use magnolia_engine::time::SampleRate;
 use magnolia_jack::{JackBackend, JackOptions};
 
-use crate::common::{Server, pause};
+use crate::common::{Server, client_name, pause, step};
+pub use crate::common::{one_at_a_time, this_thread_id};
 
 /// The tests' sample rate, the dummy driver's and the engine's.
 pub const RATE: u32 = 48_000;
@@ -62,9 +63,13 @@ pub struct Freewheel {
 impl Freewheel {
     /// Turns freewheel on, through a client of its own on `server`.
     pub fn start(server: &Server) -> Self {
-        let (client, _) =
-            Client::new_with_server_name("freewheel", &server.name, ClientOptions::NO_START_SERVER)
-                .expect("the freewheel's client opens on the test's server");
+        step("opening the freewheel's client and turning freewheel on");
+        let (client, _) = Client::new_with_server_name(
+            &client_name("freewheel"),
+            &server.name,
+            ClientOptions::NO_START_SERVER,
+        )
+        .expect("the freewheel's client opens on the test's server");
         assert!(set_freewheel(&client, true), "the server freewheels");
         Self {
             client: Some(client),
@@ -78,9 +83,10 @@ impl Freewheel {
 
     /// Turns freewheel off, once; returns whether the server agreed.
     fn turn_off(&mut self) -> bool {
-        self.client
-            .take()
-            .is_none_or(|client| set_freewheel(&client, false))
+        self.client.take().is_none_or(|client| {
+            step("turning freewheel off and closing the freewheel's client");
+            set_freewheel(&client, false)
+        })
     }
 }
 
@@ -99,17 +105,6 @@ fn set_freewheel(client: &Client, on: bool) -> bool {
     unsafe { jack::jack_sys::jack_set_freewheel(client.raw(), i32::from(on)) == 0 }
 }
 
-/// Takes the lock that runs the JACK tests one at a time: each starts a server of its own, and
-/// several at once would load the machine into xruns that the tests do not provoke themselves.
-#[expect(
-    clippy::disallowed_types,
-    reason = "the tests' threads take turns; no real-time code takes this lock"
-)]
-pub fn one_at_a_time() -> MutexGuard<'static, ()> {
-    static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    TURN.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 /// Whether any process's command line holds `text`: a server started under a test's name.
 pub fn a_process_names(text: &str) -> bool {
     let Ok(entries) = fs::read_dir("/proc") else {
@@ -123,6 +118,8 @@ pub fn a_process_names(text: &str) -> bool {
 
 /// An engine played by the JACK backend on a test's server.
 pub struct Rig {
+    /// First, so that it is dropped first, before the backend closes.
+    _marks_the_close: MarksTheClose,
     pub controller: Controller,
     pub backend: JackBackend,
 }
@@ -130,14 +127,16 @@ pub struct Rig {
 impl Rig {
     /// An engine of `capture` and `playback` channels, opened on `server`.
     pub fn open(server: &Server, capture: usize, playback: usize) -> Self {
+        step("opening Magnolia's client");
         let (controller, processor) = new_engine(capture, playback);
         let backend = JackBackend::open(JackOptions {
-            client_name: "magnolia".to_owned(),
+            client_name: client_name("magnolia"),
             server_name: Some(server.name.clone()),
             processor,
         })
         .expect("the backend opens on the test's server");
         Self {
+            _marks_the_close: MarksTheClose,
             controller,
             backend,
         }
@@ -161,6 +160,15 @@ impl Rig {
         wait_for("periods", Duration::from_secs(10), || {
             stats.periods() >= target
         });
+    }
+}
+
+/// Marks, when dropped, the close of the backend that a [`Rig`] drops next.
+struct MarksTheClose;
+
+impl Drop for MarksTheClose {
+    fn drop(&mut self) {
+        step("closing Magnolia's client");
     }
 }
 
@@ -267,9 +275,13 @@ impl ProcessHandler for Recorder {
 impl Probe {
     /// Opens a probe on `server` that plays `signal` and records up to `length` samples.
     pub fn open(server: &Server, signal: Signal, length: usize) -> Self {
-        let (client, _) =
-            Client::new_with_server_name("probe", &server.name, ClientOptions::NO_START_SERVER)
-                .expect("the probe opens on the test's server");
+        step("opening the probe");
+        let (client, _) = Client::new_with_server_name(
+            &client_name("probe"),
+            &server.name,
+            ClientOptions::NO_START_SERVER,
+        )
+        .expect("the probe opens on the test's server");
         let output = client.register_port("out", AudioOut::default()).unwrap();
         let input = client.register_port("in", AudioIn::default()).unwrap();
         let (output_name, input_name) = (output.name().unwrap(), input.name().unwrap());
@@ -349,6 +361,7 @@ impl Probe {
 
     /// Deactivates the probe and returns what it recorded.
     pub fn finish(self) -> Vec<f32> {
+        step("closing the probe");
         self.hold_at(usize::MAX);
         let (_, _, recorder) = self.client.deactivate().unwrap();
         assert!(
@@ -546,12 +559,6 @@ impl Drop for DropWitness {
     fn drop(&mut self) {
         self.dropped_on.store(this_thread_id(), Ordering::Release);
     }
-}
-
-/// The kernel's id of the calling thread.
-pub fn this_thread_id() -> i32 {
-    // SAFETY: `gettid` takes no argument, touches no memory and cannot fail.
-    unsafe { libc::gettid() }
 }
 
 /// Whether a thread of this process has the kernel id `id`.

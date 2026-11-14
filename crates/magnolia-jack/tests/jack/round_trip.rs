@@ -22,7 +22,7 @@ use jack::{
 use magnolia_engine::engine::{Destination, Source};
 use magnolia_engine::nodes::TestLatency;
 
-use crate::common::{Server, pause};
+use crate::common::{Server, client_name, pause, step};
 use crate::support::{Freewheel, Rig, one_at_a_time};
 
 /// The latency of the latent node, in samples: more than a period of 64 frames, so that the
@@ -92,6 +92,7 @@ fn an_impulse_through_magnolia_arrives_with_a_direct_one_or_exactly_its_nodes_la
     let through_zero = through_node(&mut rig, 0);
     let through_latency = through_node(&mut rig, LATENCY);
     freewheel.stop();
+    step("closing the sink and the source");
     drop(sink);
     drop(source);
 
@@ -181,9 +182,13 @@ impl ProcessHandler for SourceHandler {
 
 impl ImpulseSource {
     fn open(server: &Server, impulse: Arc<Impulse>) -> Self {
-        let (client, _) =
-            Client::new_with_server_name("source", &server.name, ClientOptions::NO_START_SERVER)
-                .expect("the source opens on the test's server");
+        step("opening the source");
+        let (client, _) = Client::new_with_server_name(
+            &client_name("source"),
+            &server.name,
+            ClientOptions::NO_START_SERVER,
+        )
+        .expect("the source opens on the test's server");
         let output = client.register_port("out", AudioOut::default()).unwrap();
         let name = output.name().unwrap();
         let client = client
@@ -248,9 +253,13 @@ impl ProcessHandler for SinkHandler {
 
 impl ImpulseSink {
     fn open(server: &Server, impulse: Arc<Impulse>) -> Self {
-        let (client, _) =
-            Client::new_with_server_name("sink", &server.name, ClientOptions::NO_START_SERVER)
-                .expect("the sink opens on the test's server");
+        step("opening the sink");
+        let (client, _) = Client::new_with_server_name(
+            &client_name("sink"),
+            &server.name,
+            ClientOptions::NO_START_SERVER,
+        )
+        .expect("the sink opens on the test's server");
         let direct = client.register_port("direct", AudioIn::default()).unwrap();
         let through = client.register_port("through", AudioIn::default()).unwrap();
         let (direct_name, through_name) = (direct.name().unwrap(), through.name().unwrap());

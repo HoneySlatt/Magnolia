@@ -1,5 +1,5 @@
 //! The recorder's unit tests: the order in which it reads its two rings, a power cut replayed on a
-//! take's own writes and syncs, and a panic of the capture tap.
+//! take's own writes and syncs, a panic of the capture tap, and the pass a tap's drop asks for.
 
 use std::error::Error;
 use std::fs;
@@ -10,7 +10,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 
 use rtrb::{Producer, RingBuffer};
 
@@ -53,6 +53,7 @@ impl Rings {
                     frames: AtomicU64::new(0),
                     marks: AtomicU64::new(0),
                 }),
+                tap_dropped: Arc::new(AtomicBool::new(false)),
                 consumed: 0,
             },
             pushed: 0,
@@ -538,5 +539,67 @@ fn a_panic_of_the_tap_stops_it_alone_and_its_take_ends_at_what_it_holds() -> Tes
     let info = read_info(&mut fs::File::open(&path)?)?;
     assert_eq!(info.frames, 10 * 256);
     assert!(!info.length_repaired, "it was finished");
+    Ok(())
+}
+
+// ---- A tap's drop ----
+
+/// A tap dropped with the processor asks the recorder for a pass. Held right after it asks, its
+/// rings still held, while that pass runs, it is found dropped all the same, and its take ends at
+/// what it holds. When the pass looked for the rings' abandonment instead, which comes only once
+/// the drop's body has returned, such a pass ended nothing, and nothing woke the recorder again.
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test's thread waits for the thread that drops the processor"
+)]
+fn the_pass_a_taps_drop_asks_for_ends_its_take_while_its_rings_are_still_held() -> TestResult {
+    let folder = Folder::new("tap-drop")?;
+    let rate = SampleRate::new(48_000).ok_or("48 kHz is a rate")?;
+    let (mut controller, processor) = engine::new(EngineConfig::new(rate, 1_024, 1, 1))?;
+    let mut backend = OfflineBackend::new(processor);
+    let mut recorder = Recorder::start(RecordConfig::new(&folder.0, rate), controller.stats())?;
+    let tap = recorder.tap(RecordTrack {
+        number: 1,
+        name: "voice".into(),
+        capture_channels: vec![0],
+    })?;
+    controller.arm(tap)?;
+    controller.commit()?;
+    let capture = vec![0.25_f32; 256];
+    backend.play_period(256, &[&capture]);
+    controller.play(SamplePosition(0))?;
+    for _ in 0..10 {
+        backend.play_period(256, &[&capture]);
+    }
+    assert!(recorder.wait_idle(Duration::from_secs(20)));
+    assert!(recorder.takes().is_empty(), "the take is under way");
+
+    let gate = &recorder.link().drop_gate;
+    gate.closed.store(true, Ordering::Release);
+    let dropping = std::thread::spawn(move || drop(backend));
+    let start = std::time::Instant::now();
+    while !gate.waiting.load(Ordering::Acquire) && start.elapsed() < Duration::from_secs(20) {
+        std::thread::sleep(Duration::from_micros(50));
+    }
+    let held = gate.waiting.load(Ordering::Acquire);
+    // The drop waits at the gate, the rings still held: the pass it asked for runs now.
+    let idle = recorder.wait_idle(Duration::from_secs(20));
+    let takes = recorder.takes();
+    gate.closed.store(false, Ordering::Release);
+    dropping
+        .join()
+        .map_err(|_| "the processor's drop panicked")?;
+    assert!(held, "the tap's drop reached the gate");
+    assert!(idle);
+    assert_eq!(takes.len(), 1, "the take ended in that pass: {takes:?}");
+    let take = takes.first().ok_or("the take ended")?;
+    assert_eq!(take.ended, TakeEnd::TapDropped);
+    assert_eq!(
+        take.frames,
+        10 * 256,
+        "every frame captured before the drop"
+    );
+    assert!(take.error.is_none());
     Ok(())
 }

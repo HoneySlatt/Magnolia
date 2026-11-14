@@ -418,10 +418,12 @@ the next commit carries the change of the armed taps in its swap's message, with
 every tap the swap keeps, and the capture tap applies it in the period that applies the swap, after
 the transport's commands. A tap's state, its windows and its rings, survives every swap that keeps
 it. A tap armed during a play records from the next play; one disarmed during a take ends it at the
-frames it has reached, and goes to the collector, which drops it; a tap dropped asks its recorder
-for a pass, which finds its rings abandoned and lets the track go. `Controller::arm` refuses a
-capture channel the engine lacks, a recorder at another rate than the engine's, and a track armed
-already, and gives the tap back each time.
+frames it has reached, and goes to the collector, which drops it; a tap dropped sets a flag of its
+own, then asks its recorder for a pass, which finds the flag set, ends the take the tap left under
+way and lets the track go. The flag comes before the ask: the rings' own abandonment comes only
+after the drop's body, too late for that pass. `Controller::arm` refuses a capture channel the
+engine lacks, a recorder at another rate than the engine's, and a track armed already, and gives
+the tap back each time.
 
 **The window.** A take's window is counted in engine samples. A play that starts publishes
 `audible_at`, the engine sample at which the output plays its first timeline sample `from`
@@ -841,7 +843,10 @@ a time; a plain JACK client of the test's plays a signal into Magnolia and recor
 refuses to run when the libjack it would load is PipeWire's (`tests/common/mod.rs`), which would
 reach a live PipeWire. A server without real time on a busy machine may skip a client's cycle,
 which breaks a recording; the tests that compare a recording sample by sample take it again when
-the gap counters show a skipped cycle, five times at most.
+the gap counters show a skipped cycle, five times at most. A JACK call never times out, so a
+watchdog bounds each test: one that marks no step for two minutes is reported with where each of
+its threads waits, and its servers are stopped, which ends its JACK calls; one still stuck after
+that is aborted (`tests/common/mod.rs`, [CONTRIBUTING](../CONTRIBUTING.md#the-jack-backends-tests)).
 
 The tests that need JACK's processing path and not its timing run their server in **freewheel**
 (`support::Freewheel`, `jack_set_freewheel`): it runs its cycles one after another, as fast as its

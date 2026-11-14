@@ -13,7 +13,7 @@ use std::time::Duration;
 use jack::{Client, ClientOptions, LatencyType};
 use magnolia_engine::stats::DeviceLatency;
 
-use crate::common::Server;
+use crate::common::{Server, client_name, step};
 use crate::support::{Rig, new_engine, one_at_a_time, wait_for};
 
 /// How long a test waits for the latency callback.
@@ -47,9 +47,13 @@ fn reads_and_reports_the_dummy_drivers_latencies(period: u32) {
     let mut rig = Rig::open(&server, 1, 1);
     let capture = rig.backend.capture_ports()[0].clone();
     let playback = rig.backend.playback_ports()[0].clone();
-    let (patchbay, _) =
-        Client::new_with_server_name("patchbay", &server.name, ClientOptions::NO_START_SERVER)
-            .expect("a second client opens");
+    step("opening the patchbay");
+    let (patchbay, _) = Client::new_with_server_name(
+        &client_name("patchbay"),
+        &server.name,
+        ClientOptions::NO_START_SERVER,
+    )
+    .expect("a second client opens");
 
     // Connected to nothing, the ports have no latency; the server runs the callback when asked,
     // though Magnolia's client is connected to no other.
@@ -136,4 +140,6 @@ fn reads_and_reports_the_dummy_drivers_latencies(period: u32) {
     });
     assert_eq!(rig.backend.device_latency().playback, two);
     rig.backend.poll();
+    step("closing the patchbay");
+    drop(patchbay);
 }

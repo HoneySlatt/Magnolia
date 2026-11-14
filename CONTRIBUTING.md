@@ -61,6 +61,23 @@ server, a test starts one under the same name and stops it cleanly, which frees 
 the socket and semaphores named after that server (`tests/common/mod.rs`). JACK2's registry itself,
 `/dev/shm/jack-shm-registry`, shared by every JACK2 server of the user, stays.
 
+A JACK call never times out: libjack waits for its server's answer for ever, and closing a client
+waits for JACK's threads of that client without a bound. So each test that starts a server takes
+its turn through `common::one_at_a_time` and marks what it does with `common::step`; a watchdog
+thread bounds it. A test that marks no step for two minutes is reported on standard error, with its
+last step and where the kernel says each thread of the process and of its servers waits; its
+servers are then stopped (SIGTERM, SIGKILL 10 s later), which answers every JACK call waiting on
+them, so the test fails. A test still stuck 10 s later is stuck in its own process: the watchdog
+aborts the process, whose core dump holds every thread's stack (`coredumpctl debug <pid>`).
+`MAGNOLIA_JACK_TEST_WATCHDOG=<stuck after>,<grace>`, in seconds, shortens the two minutes and the
+10 s, as the watchdog's own tests do (`tests/jack/watchdog.rs`).
+
+Each client the tests open carries the test process's id in its name (`common::client_name`).
+JACK2 names a client's notification socket in `/dev/shm` after the client alone, whatever its
+server: two test runs at once, from two worktrees, that open clients of one name would take each
+other's sockets, and their opens would fail or their notifications go astray. The command line's
+own client is still named `magnolia`, so two runs of its tests at once can still collide.
+
 The tests that need JACK's processing path and not its timing run their server in freewheel, as
 fast as the clients go (`support::Freewheel` in `tests/jack/support.rs`); the others run in real
 time ([ARCHITECTURE](docs/ARCHITECTURE.md#its-tests) says which, and why). A test that freewheels
@@ -79,7 +96,7 @@ reads and the monitoring path's round trip; with `-- --nocapture`, the round tri
 impulse's delay by both paths.
 
 The command line's tests (`crates/magnolia-cli/tests/cli/`) start their servers the same way,
-through the same `tests/common/mod.rs`, and refuse PipeWire's libjack too.
+through the same `tests/common/mod.rs`, under the same watchdog, and refuse PipeWire's libjack too.
 
 ### Playing through JACK
 

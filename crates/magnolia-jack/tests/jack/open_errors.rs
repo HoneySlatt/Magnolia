@@ -4,7 +4,7 @@
 
 use magnolia_jack::{JackBackend, JackOptions, OpenError, ReplaceError};
 
-use crate::common::{Server, refuse_pipewire, unique_server_name};
+use crate::common::{Server, client_name, refuse_pipewire, step, unique_server_name};
 use crate::support::{Rig, a_process_names, new_engine, one_at_a_time};
 
 #[test]
@@ -14,7 +14,7 @@ fn no_server_running_gives_the_no_server_error_and_never_starts_one() {
     let name = unique_server_name();
     let (_controller, processor) = new_engine(0, 2);
     let opened = JackBackend::open(JackOptions {
-        client_name: "magnolia".to_owned(),
+        client_name: client_name("magnolia"),
         server_name: Some(name.clone()),
         processor,
     });
@@ -36,8 +36,9 @@ fn a_server_at_another_rate_gives_the_rate_error() {
     let _turn = one_at_a_time();
     let server = Server::start_at(44_100, 256);
     let (_controller, processor) = new_engine(0, 2);
+    step("opening Magnolia's client, which closes it on the rate's error");
     let opened = JackBackend::open(JackOptions {
-        client_name: "magnolia".to_owned(),
+        client_name: client_name("magnolia"),
         server_name: Some(server.name.clone()),
         processor,
     });

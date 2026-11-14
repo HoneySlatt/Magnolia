@@ -36,7 +36,7 @@ use magnolia_engine::nodes::{Gain, Sine};
 use magnolia_engine::time::{SamplePosition, SampleRate};
 use magnolia_jack::{JackBackend, JackOptions};
 
-use common::{Server, pause, refuse_pipewire};
+use common::{Server, client_name, one_at_a_time, pause, refuse_pipewire, step};
 
 /// Names the case a child process runs; the parent leaves it unset.
 const CASE_VARIABLE: &str = "MAGNOLIA_RTSAN_CASE";
@@ -127,15 +127,18 @@ fn play_the_backend(server: &str) {
     controller.commit().unwrap();
 
     let mut backend = JackBackend::open(JackOptions {
-        client_name: "magnolia".to_owned(),
+        client_name: client_name("magnolia"),
         server_name: Some(server.to_owned()),
         processor,
     })
     .expect("the backend opens on the test's server");
     // The dummy driver's capture reaches the engine, its playback takes the engine's.
-    let (patchbay, _) =
-        Client::new_with_server_name("patchbay", server, ClientOptions::NO_START_SERVER)
-            .expect("a second client opens");
+    let (patchbay, _) = Client::new_with_server_name(
+        &client_name("patchbay"),
+        server,
+        ClientOptions::NO_START_SERVER,
+    )
+    .expect("a second client opens");
     let capture = backend.capture_ports()[0].clone();
     patchbay
         .connect_ports_by_name("system:capture_1", &capture)
@@ -272,6 +275,7 @@ enum Expected {
 /// Runs one case in a child process and checks its outcome; on failure, says why and shows the
 /// child's standard error.
 fn check(case: &str, expected: Expected, server: &str) -> bool {
+    step(format!("running the case `{case}` in a child process"));
     let child = run_child(case, server);
     let stderr = String::from_utf8_lossy(&child.stderr);
     let reported = stderr.contains(VIOLATION);
@@ -301,6 +305,9 @@ fn main() -> ExitCode {
     if let Some(case) = env::var_os(CASE_VARIABLE) {
         return run_case(&case.to_string_lossy());
     }
+    // The watchdog's turn, held for the whole test: the parent waits on its children without a
+    // bound, and they on the server.
+    let _turn = one_at_a_time();
     let server = Server::start(64);
     let results = [
         check("allocate", Expected::Stopped, &server.name),

@@ -16,7 +16,7 @@ use magnolia_engine::wav::{Bext, SampleFormat, WavInfo, WavWriter, decode, read_
 use magnolia_session::file;
 use magnolia_session::generate::{Kind, generate};
 
-use crate::common::{Server, pause, refuse_pipewire};
+use crate::common::{Server, pause, refuse_pipewire, step};
 use crate::support::{TempDir, magnolia, magnolia_binary, one_at_a_time};
 
 /// The small session's armed input track, `mic`, is its ninth track: its first take's file.
@@ -209,6 +209,7 @@ fn a_server_that_stops_mid_take_still_leaves_the_take_ended_and_listed() {
     let takes = dir.path().join("takes");
     wait_for_frames(&takes.join(MIC_TAKE), 8_192, &mut recording);
     server.stop();
+    step("waiting for `magnolia record` to end after its server stopped");
     let output = recording.wait_with_output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);

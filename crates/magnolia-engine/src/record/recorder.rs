@@ -405,6 +405,8 @@ impl Recorder {
             extra_latency: u64::from(config.extra_latency),
             #[cfg(test)]
             panic_in_tap: AtomicBool::new(false),
+            #[cfg(test)]
+            drop_gate: Default::default(),
         });
         Ok(Self {
             shared,
@@ -690,9 +692,9 @@ impl Writer {
         let tap_stopped = self.shared.engine.tap_stopped();
         let mut folder_changed = false;
         for track in &mut self.tracks {
-            // Read before draining: a tap dropped has pushed all it ever will, and rtrb's acquiring
-            // read of it makes those pushes visible.
-            track.gone = track.rings.frames.is_abandoned();
+            // Read before draining: a tap dropped has pushed all it ever will, and the flag's
+            // acquiring read makes those pushes visible.
+            track.gone = track.rings.is_tap_dropped();
             did |= track.drain(&self.context, &self.shared, &mut folder_changed);
             let state = &mut track.state;
             state.end_if_sync_failed();

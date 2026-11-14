@@ -1,23 +1,14 @@
 //! What the command line's tests share: the `magnolia` binary run with arguments, a folder of
-//! their own, and the turn of the tests that start a JACK server.
+//! their own, and the turn of the tests that start a JACK server, from `tests/common/mod.rs`.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{MutexGuard, PoisonError};
 
-/// Takes the lock that runs the tests that start a JACK server one at a time: each starts a
-/// server of its own, and several at once would load the machine for nothing.
-#[expect(
-    clippy::disallowed_types,
-    reason = "the tests' threads take turns; no real-time code takes this lock"
-)]
-pub fn one_at_a_time() -> MutexGuard<'static, ()> {
-    static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    TURN.lock().unwrap_or_else(PoisonError::into_inner)
-}
+pub use crate::common::one_at_a_time;
+use crate::common::step;
 
 /// The path of the `magnolia` binary the tests run.
 pub fn magnolia_binary() -> &'static str {
@@ -39,6 +30,15 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    let arguments: Vec<OsString> = arguments
+        .into_iter()
+        .map(|argument| argument.as_ref().to_owned())
+        .collect();
+    let line: Vec<_> = arguments
+        .iter()
+        .map(|argument| argument.to_string_lossy())
+        .collect();
+    step(format!("running magnolia {}", line.join(" ")));
     let output = Command::new(magnolia_binary())
         .args(arguments)
         .output()
