@@ -136,6 +136,10 @@ benchmarked ([measurements](measurements.md#m12--the-time-model)).
 - **How to test.** `cargo test` for recovery; the loopback by hand.
 - **Measured.** The round trip with a loopback cable and `jack_iodelay`, by the owner on the
   Focusrite.
+- **Where it stands**, 2026-11-14: built and merged: the WAV takes and their repair, the device's
+  latencies read by JACK's latency callback, the capture tap, the recorder and recovery, tested
+  (a take killed mid-way recovered whole). Next: input tracks in the test session, `magnolia
+  record` and `magnolia recover`; then the figures and the closing review.
 
 ### M1.6 — Plugin hosts
 
