@@ -10,7 +10,7 @@
 
 use std::fs::{self, File};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, PoisonError};
 use std::thread::{self, JoinHandle, Thread};
@@ -499,11 +499,6 @@ impl Recorder {
     /// What [`recover`](super::recover) found in the folder when the recorder started.
     pub fn recovery(&self) -> &Recovery {
         &self.recovery
-    }
-
-    /// The recording folder.
-    pub fn folder(&self) -> &Path {
-        &self.config.folder
     }
 
     /// What the recorder says of itself.

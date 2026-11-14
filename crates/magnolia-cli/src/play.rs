@@ -93,6 +93,13 @@ pub(crate) enum Connect {
     PlaybackAndCapture,
 }
 
+/// One side of Magnolia's ports.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Side {
+    Playback,
+    Capture,
+}
+
 /// With `--connect`, connects the ports `which` names to the server's physical ones, and waits for
 /// their latency; returns how many capture ports it connected. Connected ports play whether or
 /// not the server reported their latency: a play only reports it, so its absence is a warning, not
@@ -105,23 +112,22 @@ pub(crate) fn connect(
     if !options.connect {
         return Ok(0);
     }
-    let mut kinds = vec!["playback"];
-    if which == Connect::PlaybackAndCapture {
-        kinds.push("capture");
-    }
     let mut capture_ports = 0;
-    for kind in kinds {
-        let connected = if kind == "playback" {
-            backend.connect_to_physical_playback()
-        } else {
-            backend.connect_to_physical_capture()
+    let sides: &[Side] = match which {
+        Connect::Playback => &[Side::Playback],
+        Connect::PlaybackAndCapture => &[Side::Playback, Side::Capture],
+    };
+    for &side in sides {
+        let (kind, connected) = match side {
+            Side::Playback => ("playback", backend.connect_to_physical_playback()),
+            Side::Capture => ("capture", backend.connect_to_physical_capture()),
         };
         match connected {
             Ok(connected) => {
                 say(format_args!(
                     "Connected {connected} {kind} ports to the server's physical ones."
                 ));
-                if kind == "capture" {
+                if side == Side::Capture {
                     capture_ports = connected;
                 }
             }
