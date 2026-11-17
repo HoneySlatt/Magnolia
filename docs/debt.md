@@ -7,7 +7,9 @@ stage's audit triages the whole list.
 - **A processor is lost when the JACK server dies**: JACK2 then refuses to deactivate the client,
   and the `jack` crate leaks its callback's context, the processor and its collector with it;
   `close` says so. Fixing it means bypassing the crate's `AsyncClient`
-  ([ARCHITECTURE](ARCHITECTURE.md#the-jack-backend)).
+  ([ARCHITECTURE](ARCHITECTURE.md#the-jack-backend)). This item, the third and the `jackd -S` one
+  are paid by a milestone of their own before M1.9's eight-hour runs, decided on the owner's
+  PipeWire runs ([audit](audits/2026-11-17-architecture.md#f9-the-jack-crate-on-the-real-time-path)).
 - **PipeWire was read in its code, not run** by an agent: its thread-init callback, its server
   names, its behaviour after a panic. The owner's listening, listed under
   [M1.3](PLAN.md#m13--the-jack-backend-and-the-graph), runs it.
@@ -76,7 +78,9 @@ stage's audit triages the whole list.
   not yet in [`survey.md`](survey.md).
 - **A WAV size torn by a power cut can hide frames**: `wav::repair` assumes storage writes a
   sector whole. A 4-byte size torn mid-write, as when a repair marks a file of sizes 0 unfinished,
-  can leave a file that reads as finished but short, which no repair then takes up.
+  can leave a file that reads as finished but short, which no repair then takes up. Data is at
+  risk, so it is paid at once or kept by the owner's explicit choice, still open
+  ([audit](audits/2026-11-17-architecture.md#f16-a-torn-wav-size-can-hide-frames)).
 - **The session's memory budget copies the recorder's marks ring** (`load/budget.rs`, 256 marks
   of 64 bytes, against the engine's private `MARKS_CAPACITY`): an overestimate today, which will
   not follow a change of the engine's until it exports a tap's bytes.
@@ -90,3 +94,35 @@ stage's audit triages the whole list.
   (`crates/magnolia-jack/tests/common/mod.rs`).
 - **The test server's command line is written in three places** (`ARCHITECTURE.md`,
   `CONTRIBUTING.md`, the tests' `common/mod.rs`): to keep in the code and link from the documents.
+
+From the [audit of 2026-11-17](audits/2026-11-17-architecture.md), each with the milestone that
+follows it:
+
+- **Ids before MCP edits** (F7): tracks are numbered by position and plugin instances are arena
+  slots; `EventKind::Parameter` names a parameter's id `index`. M1.8 gives tracks and instances
+  ids the engine assigns, before its server; Stage 2 takes them over as persistent ids.
+- **The method's change of 2026-11-16** (F10): amendment chains instead of superseding ADRs, no page
+  first in `ARCHITECTURE.md`, no change or compatibility scenarios in the quality bar, an ADR index
+  written by hand, most items here without a milestone, and this file's header stating the old
+  rule; the local rule on abstractions, to align on the owner's go. M1.6 supersedes the ADRs it
+  changes; Stage 1's audit pays the rest.
+- **The quality bar says Miri runs in CI; no step runs it** (F10): all `unsafe` today wraps libjack
+  or libc, which Miri cannot run. Added with M1.6's first `unsafe` of its own.
+- **Nothing says contribution is closed** (F11): ADR-0002 merges no outside contribution before a
+  policy, and neither `README.md` nor `CONTRIBUTING.md` says so. One sentence each, with M1.6's
+  first documents; the policy, after legal advice, before contributions open.
+- **Guards that apply only by choice** (F12): the no-panic lints are inner attributes of 39 files,
+  `clippy.toml`'s bans hold for every crate, and nothing forbids `unsafe` in the engine. M1.6, with
+  its first crates off the real-time path.
+- **SQLite's WAL and network filesystems** (F14): ADR-0009 does not say; the recording folder's lock
+  is unverified on NFS and SMB. Stage 2's design.
+- **One snapshot per track, not per clip** (F15): ADR-0007 says one per clip; a timeline edit is a
+  full commit; the read-ahead does not scale with the tracks. Stage 2's design.
+- **The collector's thread is never joined, and an overflow of its queue leaks without a counter**;
+  the sync queue is unbounded, bounded in practice by the takes. The next milestone that touches
+  `engine/collector.rs` or `record/syncer.rs`.
+- **A second backend has no written contract** beyond `DeviceBuffers`: replacing a poisoned
+  processor, the counters, the real-time report and freewheel are told in the JACK section alone.
+  The stage of the next backend.
+- **The test plugins' build is unplanned**, while the full check takes 153 s of its 3 minutes. M1.6's
+  design session.
