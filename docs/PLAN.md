@@ -24,6 +24,10 @@ tier, into [`measurements.md`](measurements.md).
   [ADR-0034](adr/0034-no-play-after-the-graphs-panic.md); `jack`, `rtrb`, `libc`,
   `serde` and `serde_json` taken; the [reference projects](reference-projects.md) adopted). What
   only the owner's hardware can measure is listed in each milestone below.
+- **The audit of the foundations, 2026-11-17: done**
+  ([audit](audits/2026-11-17-architecture.md)). The foundations hold; M1.6 fixes contracts that no
+  ADR decides yet. On the owner's choice, **M1.6 opens with a design session that builds nothing**
+  ([below](#m16--plugin-hosts)), while the owner takes the measures of M1.3 to M1.5.
 
 ## Status
 
@@ -34,7 +38,7 @@ tier, into [`measurements.md`](measurements.md).
 | [M1.3](#m13--the-jack-backend-and-the-graph) | A graph of nodes plays through the JACK API, swapped without a click | Built; waiting for the owner's measures by hand |
 | [M1.4](#m14--a-session-plays) | A test session of clips and MIDI plays from disk, delays compensated | Built; waiting for the owner's measures by hand |
 | [M1.5](#m15--recording-and-monitoring) | A voice is recorded and monitored at low latency | Built; waiting for the owner's measures by hand |
-| [M1.6](#m16--plugin-hosts) | Native CLAP and VST3 plugins play out of the engine's process and survive a crash | Planned |
+| [M1.6](#m16--plugin-hosts) | Native CLAP and VST3 plugins play out of the engine's process and survive a crash | Next: its design session |
 | [M1.7](#m17--the-wine-bridge) | The owner's Windows plugins play under the system's Wine | Planned |
 | [M1.8](#m18--plugin-windows-and-the-command-surface) | Plugin GUIs open; the engine is driven by the command line and MCP | Planned |
 | [M1.9](#m19--the-stages-budgets) | The stage's budgets are measured and met | Planned |
@@ -145,6 +149,22 @@ Done, 2026-11-11: exact positions over a film's length ([ADR-0018](adr/0018-the-
 ### M1.6 — Plugin hosts
 
 - **Goal.** Native CLAP and VST3 plugins play out of the engine's process.
+- **Starts with a design session**, which builds nothing, on the owner's choice of 2026-11-17
+  ([audit](audits/2026-11-17-architecture.md)). Its ADRs decide, each put to the owner:
+  - how the audio thread runs nodes in plugin hosts: several hosts at work at once, a bounded wait on
+    the [allowlist](adr/0023-the-real-time-allowlist.md), a deadline per hop of a chain, no deadline
+    in an offline render, and a node contract for third-party plugins (audit F1);
+  - who owns the engine's process: a supervisor that owns the hosts, proxies that reattach to them
+    when the processor is rebuilt, and one owner of the controller, the supervisor, the recorder and
+    the disk reader, which the command line uses (F2);
+  - the transport plugins see: tempo, meter and bar, and changes inside a block as events (F3);
+  - the host's protocol: its version and layout, what the host writes read as untrusted, the wake
+    behind one function so that M1.7's choice stays open (F4);
+  - rest with plugin hosts (F8);
+  - and a split of this milestone into smaller ones (F6).
+
+  A plugin's deadline and the unit of isolation stay open until the owner's measures of M1.3 to M1.5
+  and the prototype give their figures (F5).
 - **Delivers.** The plugin-host process; audio by shared memory, waking by futex; the prototype that
   measures one process per plugin against one per track's chain; the deadline of a late plugin;
   silence on a crash or a hang; reload; state snapshots, and the interval for plugins that never
@@ -204,6 +224,11 @@ Done, 2026-11-11: exact positions over a film's length ([ADR-0018](adr/0018-the-
 
 ## Ideas
 
+- Live MIDI input from a device, and MIDI output: in no milestone, while the quality bar sets a
+  floor of 0.5 ms of jitter and `DeviceBuffers` carries audio only; its place in the roadmap is the
+  owner's to decide ([audit](audits/2026-11-17-architecture.md#f13-live-midi-input-is-in-no-milestone)).
+- Locking the engine's memory, if M1.9's runs count major faults on the audio thread of the lowest
+  tier's laptop.
 - Pro Tools' other timecode rates (47.952, 48, 100, 119.88 and 120, 119.88 and 120 drop, and the
   "30 drop" and "60 drop" of pulled workflows), at the stage that brings video; what Pro Tools means by the last two is
   unverified ([survey](survey.md#time-models-2026-11-11)).
