@@ -28,6 +28,10 @@ tier, into [`measurements.md`](measurements.md).
   ([audit](audits/2026-11-17-architecture.md)). The foundations hold; M1.6 fixes contracts that no
   ADR decides yet. On the owner's choice, **M1.6 opens with a design session that builds nothing**
   ([below](#m16--plugin-hosts)), while the owner takes the measures of M1.3 to M1.5.
+- **Keep stable Rust 1.99.1 through the Stage 1 measurements.** Review the current stable release
+  at the close of M1.9, or sooner if M1.6 identifies a concrete need for a newer stable. Review
+  the nightly used for checks separately
+  ([ADR-0013](adr/0013-a-pinned-stable-toolchain-and-a-nightly-for-checks.md)).
 
 ## Status
 
